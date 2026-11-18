@@ -71,7 +71,8 @@ impl Panel {
             let mut heartbeat = Instant::now() - Duration::from_secs(3);
             loop {
                 if heartbeat.elapsed() >= Duration::from_secs(2) {
-                    let _ = fs::write(poll_dir.join("observe"), []);
+                    // An empty rewrite can leave the previous modification time on Windows.
+                    let _ = fs::write(poll_dir.join("observe"), b"1");
                     heartbeat = Instant::now();
                 }
                 let status = read_json::<EngineStatus>(&poll_dir.join("status.json"))

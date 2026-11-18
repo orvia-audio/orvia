@@ -3,7 +3,11 @@
            UpgradeCode="FF4E4F65-2891-4DB8-BDBC-C42D9B179C3B" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer version of Orvia is already installed." Schedule="afterInstallInitialize" />
     <MediaTemplate EmbedCab="yes" />
-    <Launch Condition="Installed OR (VersionNT64 AND WindowsBuild &gt;= 22000)" Message="Orvia requires Windows 11 x64." />
+    <Property Id="ORVIA_WINDOWS_BUILD">
+      <RegistrySearch Id="WindowsBuildSearch" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
+    </Property>
+    <Launch Condition="Installed OR (VersionNT64 AND ORVIA_WINDOWS_BUILD &gt;= 22000)" Message="Orvia requires Windows 11 x64." />
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Orvia">
         <Component Id="Settings"><File Id="AppFile" KeyPath="yes" Source="$(var.Bin)\orvia.exe">

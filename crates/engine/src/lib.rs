@@ -87,6 +87,20 @@ pub fn outputs() -> Result<Vec<(String, String)>, cpal::DevicesError> {
         .collect())
 }
 
+/// List playback devices available for headphone monitoring. Known virtual
+/// cables are excluded so monitoring cannot feed the processed route back into itself.
+///
+/// # Errors
+///
+/// Returns a host enumeration error. Endpoints removed during discovery are skipped.
+pub fn monitors() -> Result<Vec<(String, String)>, cpal::DevicesError> {
+    Ok(cpal::default_host()
+        .output_devices()?
+        .filter(|d| !is_virtual_cable(d))
+        .filter_map(|d| Some((d.id().ok()?.to_string(), label(&d).ok()?)))
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

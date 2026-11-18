@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod stream;
+mod tray;
 
 use anyhow::Result;
 use fs2::FileExt;
@@ -33,15 +34,31 @@ fn main() -> Result<()> {
 
 fn supervise(dir: &Path) -> Result<()> {
     let mut running: Option<stream::Route> = None;
-    let mut previous = None;
+    let mut previous: Option<Settings> = None;
+    let mut tray = tray::Tray::new().ok();
+    let mut tray_attempt = Instant::now();
     let mut last_attempt = Instant::now() - Duration::from_secs(2);
     let mut last_default_check = last_attempt;
     let mut message = String::new();
     let mut was_observed = false;
     loop {
         let now = Instant::now();
+        if tray.is_none() && tray_attempt.elapsed() >= Duration::from_secs(10) {
+            tray = tray::Tray::new().ok();
+            tray_attempt = now;
+        }
+        if let Some(tray) = &tray
+            && matches!(tray.handle(dir), Ok(true))
+        {
+            return Ok(());
+        }
         let settings = Settings::load(&dir.join("settings.json"));
-        if previous.as_ref() != settings.as_ref().ok() {
+        if let Ok(s) = &settings
+            && let Some(tray) = &mut tray
+        {
+            tray.refresh(s);
+        }
+        if !matches!((&previous, &settings), (Some(old), Ok(new)) if old.same_signal_path(new)) {
             running = None;
             last_attempt = now - Duration::from_secs(2);
             previous = settings.as_ref().ok().cloned();
@@ -80,6 +97,9 @@ fn supervise(dir: &Path) -> Result<()> {
                         Err(e) => message = format!("{e:#}"),
                     }
                 }
+                if let Some(route) = &mut running {
+                    route.update_controls(&s);
+                }
             }
         }
         // Persist diagnostics only while a settings window is observing the engine.
@@ -93,10 +113,17 @@ fn supervise(dir: &Path) -> Result<()> {
                 .as_ref()
                 .map(stream::Route::metrics)
                 .unwrap_or_default();
+            let (monitoring, monitor_error) = running
+                .as_ref()
+                .map(stream::Route::monitor_status)
+                .unwrap_or_default();
             let status = EngineStatus {
-                signal: Default::default(),
-                monitoring: false,
-                monitor_error: None,
+                signal: running
+                    .as_ref()
+                    .map(stream::Route::envelopes)
+                    .unwrap_or_default(),
+                monitoring,
+                monitor_error,
                 observed: SystemTime::now(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 message: message.clone(),

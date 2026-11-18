@@ -1,16 +1,18 @@
 # Orvia
 
-Orvia turns one Windows microphone into a processed recording device that another app can select. Its Rust engine captures WASAPI input, applies channel mixing, optional RNNoise suppression, gain and mute, then feeds the Orvia WaveRT driver. The GPUI settings window can close while the engine keeps running.
+Orvia sends one microphone through channel mixing, optional RNNoise suppression, gain and mute to a virtual audio device. A game or recorder can use the processed signal while a call uses the original microphone. Closing the settings window leaves the audio engine running.
 
-**Development build for Windows 11 x64.** The installer includes Orvia's own test-signed driver. Loading it requires a Windows test environment prepared for that signature. A stock Secure Boot installation cannot load this build. The project has no production driver signature or v1.0 release.
+**Windows 11 x64 with Secure Boot enabled.** The standard MSI installs the application. Install a supported, production-signed virtual audio device separately. The private development builds are available as artifacts of the Windows workflow.
 
-## Use in a test environment
+## Route a microphone
 
-1. Prepare a Windows test machine and trust the public test certificate that accompanies your build. Follow the [driver instructions](driver/README.md).
-2. Run the matching `Orvia-<version>-windows-x64-test.msi`, then open **Orvia** from Start.
-3. Select a microphone. **Stereo** preserves its first two channels. **Average L + R**, **Left only** and **Right only** send the selected signal to both output channels. A single-channel input automatically feeds both sides.
-4. Select the **Orvia Audio v1** recording endpoint in your call or recording app. The settings window shows the engine state, output peak, and dropped or missing frames.
-5. Adjust gain, mute or noise suppression as needed. Closing the window keeps the engine running. Reopen it from Start. The engine also starts at user sign-in.
+1. Install a virtual cable. Eugene Muzychenko provides **Virtual Audio Cable Lite** for private home use unrelated to income generation. Its single cable exposes a playback device and a recording device, both usually called **Line 1 (Virtual Audio Cable)**. [VAC downloads and license](https://vac.muzychenko.net/en/download.htm)
+2. Install `Orvia-<version>-windows-x64.msi`, then open **Orvia** from Start.
+3. Under **Input**, select your physical microphone. Under **Virtual microphone output**, select the cable's playback device. For a stereo interface with a microphone on only one channel, choose **Left only** or **Right only** to send it to both sides.
+4. Select the cable's recording device in each game voice client or recorder that should receive the processed signal. Select the physical microphone explicitly in apps such as Discord that should receive the original signal. This setup works with the existing Windows defaults.
+5. Turn on **Noise suppression**, adjust **Output gain**, or mute in Orvia. These controls affect only the virtual output. Orvia remembers the endpoint IDs and waits for a disconnected device to return.
+
+With **Elgato Wave Link**, select a dedicated playback channel on the **Elgato Virtual Audio** adapter. Route only that channel to a mix in Wave Link and select that mix as the recording device in the receiving apps. [Wave Link audio routing](https://www.elgato.com/us/en/explorer/products/wave/wave-link-30-redefining-creator-audio-control/)
 
 Check for updates in the settings window. While the repository is private, **Open releases** uses your browser's GitHub session. Install a newer MSI over the previous version. Uninstall **Orvia** through Windows Installed apps. Preferences remain in `%LOCALAPPDATA%\Orvia` for a later installation.
 
@@ -36,4 +38,4 @@ The input diagnostic lists device names and formats without opening an audio str
 - [Driver source](driver/) exposes the capture and render pins under one stable device identity.
 - [Contributing](CONTRIBUTING.md) covers API documentation, review and UI conventions.
 
-The Rust application and installer use the [MIT License](LICENSE). The driver directory uses the [Microsoft Public License](driver/LICENSE). Packaging generates notices for the Windows dependency graph, including GPUI and the embedded denoiser.
+The Rust application and installer use the [MIT License](LICENSE). The optional [lab driver](driver/README.md) uses the [Microsoft Public License](driver/LICENSE). Packaging generates notices for the Windows dependency graph, including GPUI and the embedded denoiser.

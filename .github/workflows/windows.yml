@@ -21,13 +21,6 @@ jobs:
         run: cargo test --workspace --locked
       - name: Build Rustdoc
         run: cargo doc --workspace --no-deps --locked
-      - name: Restore the Windows Driver Kit
-        run: nuget install Microsoft.Windows.WDK.x64 -Version 10.0.26100.6584 -OutputDirectory target/wdk -Source https://api.nuget.org/v3/index.json -NonInteractive
-      - name: Build and test-sign the driver
-        shell: cmd
-        run: |
-          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          powershell -NoProfile -File driver\build.ps1 -TestSign
       - name: Install packaging tools
         shell: pwsh
         run: |
@@ -41,13 +34,30 @@ jobs:
           tar -xf target/tools/about.tar.gz -C target/tools
           (Resolve-Path target/tools).Path >> $env:GITHUB_PATH
           (Resolve-Path "target/tools/$name").Path >> $env:GITHUB_PATH
-      - name: Package the lab installer
+      - name: Package Orvia for installed virtual cables
         shell: cmd
         run: |
           call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           powershell -NoProfile -File installer\build.ps1
       - uses: actions/upload-artifact@v4
         with:
+          name: orvia-windows-x64
+          path: |
+            dist/*.msi
+            dist/THIRD-PARTY-NOTICES.txt
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+      - name: Restore the Windows Driver Kit
+        run: nuget install Microsoft.Windows.WDK.x64 -Version 10.0.26100.6584 -OutputDirectory target/wdk -Source https://api.nuget.org/v3/index.json -NonInteractive
+      - name: Build and package the test driver
+        shell: cmd
+        run: |
+          call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          powershell -NoProfile -File driver\build.ps1 -TestSign
+          if errorlevel 1 exit /b 1
+          powershell -NoProfile -File installer\build.ps1 -WithTestDriver
+      - uses: actions/upload-artifact@v4
+        with:
           name: orvia-windows-x64-test
-          path: dist/
+          path: dist/lab/
           if-no-files-found: error

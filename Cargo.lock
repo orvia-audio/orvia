@@ -3422,7 +3422,7 @@ dependencies = [
 
 [[package]]
 name = "orvia"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gpui",
  "orvia-core",
@@ -3434,7 +3434,7 @@ dependencies = [
 
 [[package]]
 name = "orvia-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "nnnoiseless",
  "serde",
@@ -3444,7 +3444,7 @@ dependencies = [
 
 [[package]]
 name = "orvia-engine"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "cpal",

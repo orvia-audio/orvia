@@ -1,7 +1,20 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="Orvia" Manufacturer="Orvia" Version="$(var.Version)"
-           UpgradeCode="FF4E4F65-2891-4DB8-BDBC-C42D9B179C3B" Scope="perMachine">
+  <?ifdef LabDriver ?>
+    <?define ProductName = "Orvia (test driver)" ?>
+    <?define Family = "FF4E4F65-2891-4DB8-BDBC-C42D9B179C3B" ?>
+    <?define OtherFamily = "3E169810-1163-4F20-B547-F00347D32761" ?>
+  <?else?>
+    <?define ProductName = "Orvia" ?>
+    <?define Family = "3E169810-1163-4F20-B547-F00347D32761" ?>
+    <?define OtherFamily = "FF4E4F65-2891-4DB8-BDBC-C42D9B179C3B" ?>
+  <?endif?>
+  <Package Name="$(var.ProductName)" Manufacturer="Orvia" Version="$(var.Version)"
+           UpgradeCode="$(var.Family)" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer version of Orvia is already installed." Schedule="afterInstallInitialize" />
+    <Upgrade Id="$(var.OtherFamily)">
+      <UpgradeVersion Minimum="0.0.0" IncludeMinimum="yes" OnlyDetect="yes" Property="ORVIA_OTHER_EDITION" />
+    </Upgrade>
+    <Launch Condition="Installed OR NOT ORVIA_OTHER_EDITION" Message="Uninstall the other edition of Orvia before installing this one. Your microphone settings will be kept." />
     <MediaTemplate EmbedCab="yes" />
     <Property Id="ORVIA_WINDOWS_BUILD">
       <RegistrySearch Id="WindowsBuildSearch" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
@@ -19,19 +32,24 @@
         </Component>
         <Component Id="Notices"><File Source="$(var.Dist)\THIRD-PARTY-NOTICES.txt" /></Component>
         <Component Id="Runtime"><File Source="$(var.Runtime)" /></Component>
+        <?ifdef LabDriver ?>
         <Directory Id="DriverFolder" Name="driver">
           <Component Id="DeviceSetup"><File Id="Helper" Source="$(var.Work)\orvia-device.exe" /></Component>
           <Component Id="DriverInf"><File Source="$(var.Driver)\OrviaAudio.inf" /></Component>
           <Component Id="DriverSys"><File Source="$(var.Driver)\OrviaAudio.sys" /></Component>
           <Component Id="DriverCat"><File Source="$(var.Driver)\OrviaAudio.cat" /></Component>
         </Directory>
+        <?endif?>
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
     <Feature Id="Product" Title="Orvia" Level="1">
       <ComponentRef Id="Settings" /><ComponentRef Id="Engine" /><ComponentRef Id="Notices" /><ComponentRef Id="Runtime" />
-      <ComponentRef Id="DeviceSetup" /><ComponentRef Id="DriverInf" /><ComponentRef Id="DriverSys" /><ComponentRef Id="DriverCat" />
+      <?ifdef LabDriver ?>
+        <ComponentRef Id="DeviceSetup" /><ComponentRef Id="DriverInf" /><ComponentRef Id="DriverSys" /><ComponentRef Id="DriverCat" />
+      <?endif?>
     </Feature>
+    <?ifdef LabDriver ?>
     <CustomAction Id="InstallDevice" FileRef="Helper" ExeCommand="install" Execute="deferred" Impersonate="no" Return="check" />
     <CustomAction Id="UndoNewDevice" FileRef="Helper" ExeCommand="remove" Execute="rollback" Impersonate="no" Return="ignore" />
     <CustomAction Id="RemoveDevice" FileRef="Helper" ExeCommand="remove" Execute="deferred" Impersonate="no" Return="check" />
@@ -42,5 +60,6 @@
       <Custom Action="RestoreDevice" Before="RemoveDevice" Condition="REMOVE ~= &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
       <Custom Action="RemoveDevice" Before="RemoveFiles" Condition="REMOVE ~= &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
     </InstallExecuteSequence>
+    <?endif?>
   </Package>
 </Wix>

@@ -16,6 +16,8 @@
     </Upgrade>
     <Launch Condition="Installed OR NOT ORVIA_OTHER_EDITION" Message="Uninstall the other edition of Orvia before installing this one. Your microphone settings will be kept." />
     <MediaTemplate EmbedCab="yes" />
+    <Icon Id="Orvia.ico" SourceFile="$(var.Icon)" />
+    <Property Id="ARPPRODUCTICON" Value="Orvia.ico" />
     <Property Id="ORVIA_WINDOWS_BUILD">
       <RegistrySearch Id="WindowsBuildSearch" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
                       Name="CurrentBuildNumber" Type="raw" Bitness="always64" />
@@ -24,7 +26,7 @@
     <StandardDirectory Id="ProgramFiles64Folder">
       <Directory Id="INSTALLFOLDER" Name="Orvia">
         <Component Id="Settings"><File Id="AppFile" KeyPath="yes" Source="$(var.Bin)\orvia.exe">
-          <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="Orvia" Advertise="yes" />
+          <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="Orvia" Advertise="yes" Icon="Orvia.ico" />
         </File></Component>
         <Component Id="Engine"><File Id="EngineFile" Source="$(var.Bin)\orvia-engine.exe" />
           <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run"

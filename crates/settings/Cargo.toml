@@ -1,4 +1,5 @@
 [package]
+build = "../../assets/windows-icon.rs"
 name = "orvia"
 description = "Orvia microphone settings for Windows"
 version.workspace = true
@@ -13,6 +14,11 @@ orvia-engine = { path = "../engine" }
 semver = "1"
 ureq = { version = "3", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
+fs2 = "0.4"
 
 [lints]
 workspace = true
+
+[build-dependencies]
+embed-resource = "3"
+resvg = { version = "0.45", default-features = false }

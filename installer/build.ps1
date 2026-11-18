@@ -30,9 +30,14 @@ try {
             "/Fo$work/device.obj","/Fe$work/orvia-device.exe","$PSScriptRoot/device.cpp",
             '/link','setupapi.lib','newdev.lib','cfgmgr32.lib')
     }
-    Run cargo @('build','--workspace','--locked','--release')
     $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
-    $version = ($metadata.packages | Where-Object name -eq 'orvia').version
+    $app = $metadata.packages | Where-Object name -eq 'orvia'
+    $version = $app.version
+    $appBuild = cargo build --workspace --locked --release --message-format=json-render-diagnostics |
+        ForEach-Object { $_ | ConvertFrom-Json } |
+        Where-Object { $_.reason -eq 'build-script-executed' -and $_.package_id -eq $app.id }
+    if ($LASTEXITCODE -ne 0 -or !$appBuild) { throw "Application build did not produce icon resources" }
+    $icon = Join-Path $appBuild.out_dir 'orvia.ico'
     Run cargo-about @('generate','--locked','-o',"$work/dependencies.txt","$PSScriptRoot/notices.hbs")
     $notices = @("Orvia $version", (Get-Content LICENSE -Raw),
         'Microsoft Visual C++ Runtime, Copyright Microsoft Corporation. Distributed under the Visual Studio redistribution terms.',
@@ -43,7 +48,7 @@ try {
     $name = "Orvia-$version-windows-x64$suffix.msi"
     $runtime = Get-Item "$env:VCToolsRedistDir/x64/Microsoft.VC*.CRT/vcruntime140.dll" | Select-Object -First 1
     Run wix (@('build','-arch','x64','-d',"Runtime=$($runtime.FullName)",'-d',"Version=$version",'-d',"Work=$work",'-d',"Dist=$dist",
-        '-d',"Bin=$root/target/release",'-intermediateFolder',"$work/wix$suffix",
+        '-d',"Bin=$root/target/release",'-d',"Icon=$icon",'-intermediateFolder',"$work/wix$suffix",
         '-pdbtype','none','-out',"$dist/$name","$PSScriptRoot/Orvia.wxs") + $driverFlags)
     $files = @($name,'THIRD-PARTY-NOTICES.txt')
     if ($WithTestDriver) {

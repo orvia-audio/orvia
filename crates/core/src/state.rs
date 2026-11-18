@@ -14,6 +14,9 @@ pub struct Settings {
     /// Stable WASAPI endpoint ID, preserved while the device is unplugged.
     /// An absent ID follows the Windows default microphone.
     pub input: Option<String>,
+    /// Stable WASAPI playback ID of the selected virtual cable. When absent,
+    /// the engine looks only for the Orvia lab adapter used by older settings.
+    pub output: Option<String>,
     /// Channel routing independent of the denoiser.
     pub mixing: crate::Mixing,
     /// Enable the embedded RNNoise model.
@@ -28,6 +31,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             input: None,
+            output: None,
             mixing: Default::default(),
             suppress_noise: false,
             gain_percent: 100,
@@ -115,9 +119,14 @@ mod tests {
         fs::write(&path, br#"{"muted":true}"#).unwrap();
         let settings = Settings::load(&path).unwrap();
         assert!(settings.muted);
+        assert_eq!(settings.output, None);
         assert_eq!(settings.gain_percent, 100);
-        write_json(&path, &settings).unwrap();
-        assert_eq!(Settings::load(&path).unwrap(), settings);
+        let selected = Settings {
+            output: Some("saved-playback-id".into()),
+            ..settings
+        };
+        write_json(&path, &selected).unwrap();
+        assert_eq!(Settings::load(&path).unwrap(), selected);
         fs::write(&path, b"{").unwrap();
         assert!(Settings::load(&path).is_err());
     }

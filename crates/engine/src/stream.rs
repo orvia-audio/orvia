@@ -1,11 +1,11 @@
 //! WASAPI streams with a bounded single-producer, single-consumer queue.
 use anyhow::{Context, Result, anyhow, ensure};
 use cpal::{
-    Device, DeviceId, SampleFormat, Stream, StreamConfig,
+    Device, DeviceId, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use orvia_core::{BLOCK, Processor, SAMPLE_RATE, Settings};
-use orvia_engine::{is_orvia, label};
+use orvia_engine::{is_orvia, is_virtual_cable, label};
 use rtrb::{Consumer, RingBuffer};
 use std::{
     sync::{
@@ -43,10 +43,19 @@ pub(super) fn default_input_id() -> Option<DeviceId> {
 impl Route {
     pub(super) fn open(settings: &Settings) -> Result<Self> {
         let host = cpal::default_host();
-        let output = host
-            .output_devices()?
-            .find(is_orvia)
-            .context("Orvia Audio v1 is unavailable. Check the driver in Device Manager.")?;
+        let output = match &settings.output {
+            Some(id) => host
+                .device_by_id(&id.parse()?)
+                .context("Selected virtual output is disconnected")?,
+            None => host
+                .output_devices()?
+                .find(is_orvia)
+                .context("Choose a virtual output in microphone settings")?,
+        };
+        ensure!(
+            output.description()?.supports_output() && is_virtual_cable(&output),
+            "Select the playback side of a supported virtual cable"
+        );
         let input = match &settings.input {
             Some(id) => host
                 .device_by_id(&id.parse()?)
@@ -56,12 +65,12 @@ impl Route {
                 .context("No default microphone")?,
         };
         ensure!(
-            !is_orvia(&input),
+            input.description()?.supports_input() && !is_virtual_cable(&input),
             "Select a physical microphone to avoid feedback"
         );
         let input_id = input.id()?;
-        let name = label(&input)?;
-        let input_config = config(&input, true)?;
+        let name = format!("{} → {}", label(&input)?, label(&output)?);
+        let input_config = config(&input, true)?.config();
         let output_config = config(&output, false)?;
         let counters = Arc::new(Counters::default());
         let start = Instant::now();
@@ -97,18 +106,15 @@ impl Route {
             on_error(&counters),
             None,
         )?;
-        let meter = counters.clone();
-        let mut playback = Playback::new(rx);
-        let output_stream = output.build_output_stream(
-            &output_config,
-            move |out: &mut [f32], _| {
-                let now = start.elapsed().as_millis() as u64;
-                meter.played_ms.store(now, Relaxed);
-                playback.fill(out, now, &meter);
-            },
-            on_error(&counters),
-            None,
-        )?;
+        let output_stream = match output_config.sample_format() {
+            SampleFormat::F32 => {
+                playback_stream::<f32>(&output, output_config, rx, start, &counters)
+            }
+            SampleFormat::I16 => {
+                playback_stream::<i16>(&output, output_config, rx, start, &counters)
+            }
+            format => return Err(anyhow!("Unsupported output format: {format}")),
+        }?;
         input_stream.play()?;
         output_stream.play()?;
         Ok(Self {
@@ -141,7 +147,28 @@ fn on_error(counters: &Arc<Counters>) -> impl FnMut(cpal::StreamError) + Send + 
     move |_| counters.failed.store(true, Relaxed)
 }
 
-fn config(device: &Device, input: bool) -> Result<StreamConfig> {
+fn playback_stream<T: SizedSample + FromSample<f32>>(
+    output: &Device,
+    config: SupportedStreamConfig,
+    rx: Consumer<TimedFrame>,
+    start: Instant,
+    counters: &Arc<Counters>,
+) -> Result<Stream> {
+    let meter = counters.clone();
+    let mut playback = Playback::new(rx, config.sample_rate(), config.channels());
+    Ok(output.build_output_stream(
+        &config.config(),
+        move |out: &mut [T], _| {
+            let now = start.elapsed().as_millis() as u64;
+            meter.played_ms.store(now, Relaxed);
+            playback.fill(out, now, &meter);
+        },
+        on_error(counters),
+        None,
+    )?)
+}
+
+fn config(device: &Device, input: bool) -> Result<SupportedStreamConfig> {
     let ranges: Vec<_> = if input {
         device.supported_input_configs()?.collect()
     } else {
@@ -149,17 +176,26 @@ fn config(device: &Device, input: bool) -> Result<StreamConfig> {
     };
     ranges
         .into_iter()
-        .filter(|r| r.sample_format() == SampleFormat::F32)
+        .filter(|r| {
+            r.sample_format() == SampleFormat::F32
+                || (!input && r.sample_format() == SampleFormat::I16)
+        })
         .filter_map(|r| {
             let rate = r.max_sample_rate().min(SAMPLE_RATE);
             let suitable = if input {
                 rate >= 8_000 && r.channels() > 0
             } else {
-                rate == SAMPLE_RATE && r.channels() == 2
+                rate >= 8_000 && (1..=2).contains(&r.channels())
             };
-            (suitable && rate >= r.min_sample_rate()).then(|| r.with_sample_rate(rate).config())
+            (suitable && rate >= r.min_sample_rate()).then(|| r.with_sample_rate(rate))
         })
-        .max_by_key(|c| (c.sample_rate, c.channels == 2))
+        .max_by_key(|c| {
+            (
+                c.sample_rate(),
+                c.channels() == 2,
+                c.sample_format() == SampleFormat::F32,
+            )
+        })
         .ok_or_else(|| {
             anyhow!(
                 "{} has no compatible shared format. Try 48 kHz in Windows Sound settings.",
@@ -209,21 +245,31 @@ struct Playback {
     current: Option<TimedFrame>,
     fraction: f64,
     started: bool,
+    rate_ratio: f64,
+    channels: usize,
 }
 
 impl Playback {
-    fn new(rx: Consumer<TimedFrame>) -> Self {
+    fn new(rx: Consumer<TimedFrame>, rate: u32, channels: u16) -> Self {
         Self {
             rx,
             current: None,
             fraction: 0.,
             started: false,
+            rate_ratio: f64::from(SAMPLE_RATE) / f64::from(rate),
+            channels: usize::from(channels),
         }
     }
 
-    fn fill(&mut self, out: &mut [f32], now: u64, counts: &Counters) {
+    fn fill<T: SizedSample + FromSample<f32>>(
+        &mut self,
+        out: &mut [T],
+        now: u64,
+        counts: &Counters,
+    ) {
         const TARGET: usize = 2 * BLOCK;
-        out.fill(0.);
+        out.fill(T::EQUILIBRIUM);
+        let frame_count = out.len() / self.channels;
         if self
             .current
             .is_some_and(|(_, t)| now.saturating_sub(t) > 100)
@@ -244,17 +290,17 @@ impl Playback {
         if self.current.is_none() {
             if buffered < TARGET {
                 if self.started {
-                    counts.missing.fetch_add((out.len() / 2) as u64, Relaxed);
+                    counts.missing.fetch_add(frame_count as u64, Relaxed);
                 }
                 return;
             }
             self.current = self.rx.pop().ok();
             self.started = true;
         }
-        let step =
-            1. + ((buffered as f64 - TARGET as f64) / (TARGET as f64 * 800.)).clamp(-0.003, 0.003);
-        let frame_count = out.len() / 2;
-        for (idx, frame) in out.chunks_exact_mut(2).enumerate() {
+        let drift =
+            ((buffered as f64 - TARGET as f64) / (TARGET as f64 * 800.)).clamp(-0.003, 0.003);
+        let step = self.rate_ratio * (1. + drift);
+        for (idx, frame) in out.chunks_exact_mut(self.channels).enumerate() {
             let (Some((left, _)), Ok((right, _))) = (self.current, self.rx.peek()) else {
                 counts
                     .missing
@@ -263,8 +309,12 @@ impl Playback {
                 self.fraction = 0.;
                 break;
             };
-            for c in 0..2 {
-                frame[c] = left[c] + (right[c] - left[c]) * self.fraction as f32;
+            let sample = |c: usize| left[c] + (right[c] - left[c]) * self.fraction as f32;
+            if frame.len() == 1 {
+                frame[0] = T::from_sample((sample(0) + sample(1)) * 0.5);
+            } else {
+                frame[0] = T::from_sample(sample(0));
+                frame[1] = T::from_sample(sample(1));
             }
             self.fraction += step;
             while self.fraction >= 1. {
@@ -278,6 +328,18 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn renders_48_khz_stereo_processing_to_a_44_1_khz_mono_pcm_cable() {
+        let (mut tx, rx) = RingBuffer::new(3 * BLOCK);
+        for _ in 0..2 * BLOCK {
+            tx.push(([0.25, 0.75], 0)).unwrap();
+        }
+        let mut playback = Playback::new(rx, 44_100, 1);
+        let mut out = [0_i16; 441];
+        playback.fill(&mut out, 10, &Counters::default());
+        assert_eq!(out, [16_384; 441]);
+        assert!(playback.rx.slots().abs_diff(BLOCK) <= 1);
+    }
     #[test]
     fn capture_rates_produce_one_second_of_transport_frames() {
         for rate in [8_000, 16_000, 44_100, 48_000] {
@@ -298,9 +360,9 @@ mod tests {
         for _ in 0..2 * BLOCK {
             tx.push(([0.75; 2], 0)).unwrap();
         }
-        let mut playback = Playback::new(rx);
+        let mut playback = Playback::new(rx, SAMPLE_RATE, 2);
         let counts = Counters::default();
-        let mut out = [1.; BLOCK * 2];
+        let mut out = [1.0_f32; BLOCK * 2];
         playback.fill(&mut out, 10, &counts);
         assert!(out.iter().all(|s| *s == 0.75));
         playback.fill(&mut out, 120, &counts);

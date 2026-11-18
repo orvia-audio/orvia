@@ -1,7 +1,7 @@
 use nnnoiseless::DenoiseState;
 use serde::{Deserialize, Serialize};
 
-/// Sample frames per second on both sides of the driver transport.
+/// Sample frames per second used by the processor before output rate conversion.
 pub const SAMPLE_RATE: u32 = 48_000;
 
 /// Stereo frames in one 10 ms processing block.
@@ -119,6 +119,33 @@ mod tests {
             processor.process(&mut frames);
             assert!(frames.iter().all(|frame| *frame == expected));
         }
+    }
+
+    #[test]
+    fn suppression_reduces_stationary_noise() {
+        let mut processor = Processor::new(&Settings {
+            suppress_noise: true,
+            mixing: Mixing::Left,
+            ..Default::default()
+        });
+        let mut rng = 17_u32;
+        let (mut original, mut filtered) = (0.0, 0.0);
+        for block in 0..100 {
+            let mut frames: [[f32; 2]; BLOCK] = std::array::from_fn(|_| {
+                rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                [0.05 * (rng as i32 as f32 / i32::MAX as f32); 2]
+            });
+            let energy = |frames: &[[f32; 2]; BLOCK]| {
+                frames.iter().map(|f| f64::from(f[0]).powi(2)).sum::<f64>()
+            };
+            let input = energy(&frames);
+            processor.process(&mut frames);
+            if block >= 50 {
+                original += input;
+                filtered += energy(&frames);
+            }
+        }
+        assert!(filtered < original * 0.5);
     }
 
     #[test]

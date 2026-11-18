@@ -3,7 +3,7 @@
 
 mod stream;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use fs2::FileExt;
 use orvia_core::{EngineStatus, Settings, data_dir, write_json};
 use std::{
@@ -101,7 +101,8 @@ fn supervise(dir: &Path) -> Result<()> {
                 missing_frames,
                 dropped_frames,
             };
-            write_json(&dir.join("status.json"), &status).context("Writing engine status")?;
+            // A busy diagnostics file must not interrupt the audio streams.
+            let _ = write_json(&dir.join("status.json"), &status);
         } else if was_observed {
             let _ = fs::remove_file(dir.join("status.json"));
         }

@@ -159,7 +159,7 @@ fn config(device: &Device, input: bool) -> Result<StreamConfig> {
             };
             (suitable && rate >= r.min_sample_rate()).then(|| r.with_sample_rate(rate).config())
         })
-        .max_by_key(|c| (c.sample_rate, c.channels() == 2))
+        .max_by_key(|c| (c.sample_rate, c.channels == 2))
         .ok_or_else(|| {
             anyhow!(
                 "{} has no compatible shared format. Try 48 kHz in Windows Sound settings.",

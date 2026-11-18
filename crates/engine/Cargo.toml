@@ -1,0 +1,17 @@
+[package]
+name = "orvia-engine"
+description = "Resident microphone capture and playback engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+orvia-core = { path = "../core" }
+cpal = "0.17"
+anyhow = "1"
+fs2 = "0.4"
+rtrb = "0.3"
+
+[lints]
+workspace = true

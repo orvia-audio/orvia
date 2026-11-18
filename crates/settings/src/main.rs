@@ -20,9 +20,7 @@ actions!(
         /// Move keyboard focus to the next settings control.
         NextControl,
         /// Move keyboard focus to the preceding settings control.
-        PreviousControl,
-        /// Perform the focused control's primary action.
-        Activate
+        PreviousControl
     ]
 );
 const RELEASES: &str = "https://github.com/sya-ri/orvia/releases";
@@ -174,11 +172,9 @@ impl Panel {
         control: Control,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let keyboard = control.clone();
         div()
             .id(id.into())
             .tab_index(0)
-            .key_context("Control")
             .px_3()
             .py_1p5()
             .rounded_md()
@@ -188,7 +184,6 @@ impl Panel {
             .bg(rgb(if selected { 0xd6f2e7 } else { 0xffffff }))
             .hover(|s| s.bg(rgb(0xe0eee7)))
             .focus(|s| s.border_2().border_color(rgb(0x215dba)))
-            .on_action(cx.listener(move |p, _: &Activate, _, cx| p.activate(keyboard.clone(), cx)))
             .on_click(cx.listener(move |p, _, _, cx| p.activate(control.clone(), cx)))
             .child(label.into())
     }
@@ -413,8 +408,6 @@ fn run(dir: &Path) {
         cx.bind_keys([
             KeyBinding::new("tab", NextControl, Some("Settings")),
             KeyBinding::new("shift-tab", PreviousControl, Some("Settings")),
-            KeyBinding::new("space", Activate, Some("Control")),
-            KeyBinding::new("enter", Activate, Some("Control")),
         ]);
         let bounds = Bounds::centered(None, size(px(540.), px(630.)), cx);
         cx.on_window_closed(|cx| {

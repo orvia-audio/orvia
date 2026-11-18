@@ -1,6 +1,6 @@
 # Orvia
 
-Orvia sends one microphone through channel mixing, optional RNNoise suppression, gain and mute to a virtual audio device. A game or recorder can use the processed signal while a call uses the original microphone. Closing the settings window leaves the audio engine running.
+Orvia sends one microphone through channel mixing, optional noise suppression, gain and mute to a virtual audio device. A game or recorder can use the processed signal while a call uses the original microphone. Closing the settings window leaves the audio engine running.
 
 **Windows 11 x64 with Secure Boot enabled.** The standard MSI installs the application. Install a supported, production-signed virtual audio device separately. The private development builds are available as artifacts of the Windows workflow.
 
@@ -8,9 +8,15 @@ Orvia sends one microphone through channel mixing, optional RNNoise suppression,
 
 1. Install a virtual cable. Eugene Muzychenko provides **Virtual Audio Cable Lite** for private home use unrelated to income generation. Its single cable exposes a playback device and a recording device, both usually called **Line 1 (Virtual Audio Cable)**. [VAC downloads and license](https://vac.muzychenko.net/en/download.htm)
 2. Install `Orvia-<version>-windows-x64.msi`, then open **Orvia** from Start.
-3. Under **Input**, select your physical microphone. Under **Virtual microphone output**, select the cable's playback device. For a stereo interface with a microphone on only one channel, choose **Left only** or **Right only** to send it to both sides.
+3. Open **Devices**. Under **Microphone input**, select your physical microphone. Under **Virtual microphone output**, select the cable's playback device. For a stereo interface with a microphone on only one channel, choose **Mono** in the **Mixer** to send the average of both channels to both sides.
 4. Select the cable's recording device in each game voice client or recorder that should receive the processed signal. Select the physical microphone explicitly in apps such as Discord that should receive the original signal. This setup works with the existing Windows defaults.
-5. Turn on **Noise suppression**, adjust **Output gain**, or mute in Orvia. These controls affect only the virtual output. Orvia remembers the endpoint IDs and waits for a disconnected device to return.
+5. In **Mixer**, select **RNNoise** for speech, **Spectral subtraction** for steady background sounds such as fans, or **Off** to bypass suppression. Drag **Output gain** from 0% to 200% or use the arrow keys on the slider. Apps that capture the physical microphone directly keep their original audio.
+
+**Signal history** shows two seconds of peak envelopes before and after suppression on the same dBFS scale. **Pre-gain attenuation** compares the signal energy over the latest half second. It includes any change to speech as well as noise. Pause speaking to measure the background alone. The output reading includes gain, so you can adjust recording volume independently.
+
+To hear the same processing, select a playback device under **Devices → Headphone monitor**. Use the monitor switch to listen or stop listening. Orvia remembers the selected headphones and reconnects when they return. Mute silences both processed outputs.
+
+Use **Preferences → Language** to follow Windows or choose English or Japanese. Closing the window leaves Orvia in the notification area. Its menu opens the mixer, mutes or unmutes the processed outputs, and quits the engine.
 
 With **Elgato Wave Link**, select a dedicated playback channel on the **Elgato Virtual Audio** adapter. Route only that channel to a mix in Wave Link and select that mix as the recording device in the receiving apps. [Wave Link audio routing](https://www.elgato.com/us/en/explorer/products/wave/wave-link-30-redefining-creator-audio-control/)
 

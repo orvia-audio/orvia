@@ -20,7 +20,7 @@ The lab installer owns `ROOT\ORVIAAUDIO\0000` and its driver package. A lab upgr
 
 The Windows workflow checks formatting, Clippy, Rustdoc links and missing documentation, unit tests and doctests. It builds and test-signs the x64 driver, checks the INF, generates a catalog, and packages development artifacts. It does not publish a GitHub Release.
 
-The deterministic audio tests cover channel selection, suppression of stationary noise, gain, clipping, mute, stale queue recovery and rate conversion. Capture supports float shared formats from 8 to 48 kHz. For multichannel interfaces it uses the first two channels. The output supports mono or stereo float or 16-bit PCM from 8 to 48 kHz. The processor runs at 48 kHz regardless of the negotiated endpoint rates.
+The deterministic audio tests cover channel selection, suppression of stationary noise, gain, clipping, mute, monitor isolation, stale queue recovery and rate conversion. Capture supports float shared formats from 8 to 48 kHz. For multichannel inputs it uses the first two channels. Output negotiates float or 16-bit PCM at the available rate closest to 48 kHz. On multichannel monitoring devices Orvia uses the front stereo pair. The processor runs at 48 kHz regardless of the endpoint rates.
 
 ## Verification on a test machine
 
@@ -29,8 +29,8 @@ For the standard edition, use a Secure Boot system and a vendor-signed cable. Co
 | Check | Procedure and evidence |
 | --- | --- |
 | First install | Install on a clean machine with the appropriate boot policy for the edition. Open settings as a standard user. Record the capture endpoint ID and check that the default speakers remain usable. |
-| Delivery | Record speech in Windows Sound Recorder, then in a browser call and a desktop calling app. Check left, right and average with distinct signals on each input. Open two consumers at once. |
-| Quality | Compare a fixed speech-and-noise sample with suppression off and on. Listen for clipped consonants, pumping and switch noise. Inspect clipping at 100% and 200% gain. |
+| Delivery | Record speech in Windows Sound Recorder, then in a browser call and a desktop calling app. Feed distinct signals into each channel. Check independent stereo and a centered mono average. Open two consumers at once. |
+| Quality | Compare a fixed speech-and-noise sample with Off, RNNoise and Spectral subtraction. Allow the spectral estimate to settle on steady noise. Compare both envelopes during pauses and speech. Drag the gain slider and check the pre-gain comparison stays stable. Listen for clipped consonants, pumping and switch noise. Inspect clipping at 100% and 200% gain. |
 | Recovery | Unplug the selected microphone, disable and re-enable it, sleep and resume, then restart the engine. Verify silence during loss and no buffered replay. Repeat with mute enabled. |
 | Timing | During an extended run and a separate high-load run, log elapsed time, missing and dropped frames, CPU utilization and loopback impulse delay. Establish pass thresholds from measured baseline data. |
 | Input diversity | Cover a single-channel microphone, a stereo or multichannel USB interface, and a wireless headset. The Steinberg UR12 and Razer Barracuda X are example devices. Record the format Windows actually negotiates. |
@@ -40,7 +40,7 @@ For the standard edition, use a Secure Boot system and a vendor-signed cable. Co
 
 ### Verify mute with an independent recording
 
-Feed a continuous tone to the selected input. Set gain to 100% and turn off noise suppression. Start a WASAPI recording of **Microphone Array (Orvia Audio v1)** and a second recording of the source input. Keep both recorders open while clicking **Mute microphone**, waiting at least six seconds, and clicking **Unmute microphone**. Check that the tone continues in the reference recording throughout. Inspect a settled interval in each phase of the Orvia recording for the original tone, digital silence and the return of the tone.
+Feed a continuous tone to the selected input. Set gain to 100% and turn off noise suppression. Start a WASAPI recording of **Microphone Array (Orvia Audio v1)** and a second recording of the source input. Keep both recorders open while clicking **Mute output**, waiting at least six seconds, and clicking **Unmute output**. Check that the tone continues in the reference recording throughout. Inspect a settled interval in each phase of the Orvia recording for the original tone, digital silence and the return of the tone.
 
 On Windows 11 Enterprise LTSC 2024 x64 (build 26100.1742), a QEMU line input carried a 440 Hz and 880 Hz tone. The reference recorder used 44.1 kHz and the Orvia recorder used 48 kHz. The source measured −19.1 dBFS RMS in all three intervals. Orvia measured −19.1 dBFS before and after mute. All 168,000 samples in the 3.5-second muted interval were zero in the recorded channel. This test covers the installed driver, audio engine and settings buttons with an emulated input. Hardware compatibility and sustained audio quality need separate measurements.
 
@@ -51,7 +51,7 @@ On Windows 11 Enterprise LTSC 2024 x64 (build 26100.1742), a QEMU line input car
 - **No virtual output found.** Install a supported virtual audio device, enable its playback endpoint in Sound settings, then reopen the output picker. Both sides of Virtual Audio Cable normally have the same name. Choose its playback side in Orvia and its recording side in downstream apps.
 - **Selected virtual output is disconnected.** Reconnect or enable the device. Orvia retries the saved endpoint and never falls back to the default speakers. If reinstalling a cable changes its endpoint ID, select it again.
 - **The selected microphone is disconnected.** Reconnect it or choose another input. An explicit selection is retained by endpoint ID. Choosing the Windows default follows later default changes.
-- **Only one side carries speech.** Choose Left only or Right only for an interface with a microphone on one input.
+- **Only one side carries speech.** Choose Mono to send the average of both channels to both outputs. A microphone on just one channel becomes 6 dB quieter at unity gain.
 - **No compatible shared format.** Check microphone access for desktop apps in Windows Privacy settings and try a 48 kHz shared format under Sound settings.
 - **No public release is available.** The anonymous GitHub lookup cannot see private releases. Open releases in a signed-in browser.
 

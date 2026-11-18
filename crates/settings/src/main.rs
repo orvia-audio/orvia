@@ -3,9 +3,9 @@
 
 use gpui::{
     Application, Bounds, Context, FocusHandle, KeyBinding, SharedString, Timer, TitlebarOptions,
-    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, relative, rgb, size,
+    Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
-use orvia_core::{EngineStatus, Mixing, Settings, data_dir, read_json, write_json};
+use orvia_core::{EngineStatus, Language, Mixing, NoiseMethod, Settings, data_dir, read_json};
 use serde::Deserialize;
 use std::{
     fs, io,
@@ -29,16 +29,27 @@ const RELEASES: &str = "https://github.com/sya-ri/orvia/releases";
 enum Endpoint {
     Input,
     Output,
+    Monitor,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Mixer,
+    Devices,
+    Preferences,
 }
 
 #[derive(Clone)]
 enum Control {
+    Page(Page),
+    Language(Language),
+    Monitor,
     Choose(Endpoint),
     Select(Endpoint, Option<String>),
     Mix(Mixing),
-    Noise,
+    Noise(Option<NoiseMethod>),
     Mute,
-    Gain(i16),
+    Gain(u16),
     CheckUpdate,
     Releases,
 }
@@ -46,9 +57,15 @@ enum Control {
 struct Panel {
     dir: PathBuf,
     root: FocusHandle,
+    gain_focus: FocusHandle,
+    gain_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
+    dragging_gain: bool,
     prefs: Settings,
     inputs: Vec<(String, String)>,
     outputs: Vec<(String, String)>,
+    monitors: Vec<(String, String)>,
+    page: Page,
+    logo: std::sync::Arc<gpui::Image>,
     choosing: Option<Endpoint>,
     status: Option<EngineStatus>,
     error: String,
@@ -62,19 +79,38 @@ impl Panel {
         window.focus(&root);
         let mut error = String::new();
         let prefs = Settings::load(&dir.join("settings.json")).unwrap_or_else(|e| {
-            error = format!("Cannot load settings: {e}");
+            error = format!(
+                "{} · {e}",
+                Language::System.text("Cannot load settings", "設定を読み込めません")
+            );
             Settings {
                 muted: true,
                 ..Default::default()
             }
         });
         if let Err(e) = start_engine() {
-            error = format!("Cannot start engine: {e}");
+            error = format!(
+                "{} · {e}",
+                prefs
+                    .language
+                    .text("Cannot start audio engine", "音声エンジンを起動できません")
+            );
         }
         let poll_dir = dir.clone();
+        let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let mut heartbeat = Instant::now() - Duration::from_secs(3);
             loop {
+                if fs::remove_file(poll_dir.join("close-window")).is_ok() {
+                    let _ = handle.update(cx, |_, w, _| w.remove_window());
+                    break;
+                }
+                if fs::remove_file(poll_dir.join("show-window")).is_ok() {
+                    let _ = handle.update(cx, |_, w, app| {
+                        app.activate(true);
+                        w.activate_window();
+                    });
+                }
                 if heartbeat.elapsed() >= Duration::from_secs(2) {
                     // An empty rewrite can leave the previous modification time on Windows.
                     let _ = fs::write(poll_dir.join("observe"), b"1");
@@ -87,9 +123,13 @@ impl Panel {
                             .elapsed()
                             .is_ok_and(|age| age < Duration::from_secs(2))
                     });
+                let prefs = Settings::load(&poll_dir.join("settings.json")).ok();
                 if this
                     .update(cx, |p, cx| {
                         p.status = status;
+                        if let Some(prefs) = prefs {
+                            p.prefs = prefs;
+                        }
                         cx.notify();
                     })
                     .is_err()
@@ -104,9 +144,18 @@ impl Panel {
         Self {
             dir,
             root,
+            gain_focus: cx.focus_handle().tab_stop(true),
+            gain_bounds: Default::default(),
+            dragging_gain: false,
             prefs,
             inputs,
             outputs: orvia_engine::outputs().unwrap_or_default(),
+            monitors: orvia_engine::monitors().unwrap_or_default(),
+            page: Page::Mixer,
+            logo: std::sync::Arc::new(gpui::Image::from_bytes(
+                gpui::ImageFormat::Png,
+                include_bytes!(concat!(env!("OUT_DIR"), "/orvia.png")).to_vec(),
+            )),
             choosing: None,
             status: None,
             error,
@@ -117,12 +166,21 @@ impl Panel {
 
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
         match control {
+            Control::Page(page) => {
+                self.page = page;
+                self.choosing = None;
+            }
+            Control::Monitor if self.prefs.monitor.is_none() => {
+                self.page = Page::Devices;
+                self.activate(Control::Choose(Endpoint::Monitor), cx);
+            }
             Control::Choose(side) => {
                 self.choosing = (self.choosing != Some(side)).then_some(side);
                 if self.choosing.is_some() {
                     let (list, devices) = match side {
                         Endpoint::Input => (&mut self.inputs, orvia_engine::inputs()),
                         Endpoint::Output => (&mut self.outputs, orvia_engine::outputs()),
+                        Endpoint::Monitor => (&mut self.monitors, orvia_engine::monitors()),
                     };
                     match devices {
                         Ok(devices) => *list = devices,
@@ -132,8 +190,15 @@ impl Panel {
             }
             Control::CheckUpdate if !self.checking => {
                 self.checking = true;
-                self.update = "Checking releases…".into();
-                let task = cx.background_executor().spawn(async { latest_release() });
+                self.update = self
+                    .prefs
+                    .language
+                    .text("Checking releases…", "更新を確認中…")
+                    .into();
+                let language = self.prefs.language;
+                let task = cx
+                    .background_executor()
+                    .spawn(async move { latest_release(language) });
                 cx.spawn(async move |this, cx| {
                     let result = task.await;
                     let _ = this.update(cx, |p, cx| {
@@ -148,246 +213,53 @@ impl Panel {
             Control::Releases => cx.open_url(RELEASES),
             change => {
                 let path = self.dir.join("settings.json");
-                let result = Settings::load(&path).and_then(|mut settings| {
-                    match change {
-                        Control::Select(side, id) => {
-                            match side {
-                                Endpoint::Input => settings.input = id,
-                                Endpoint::Output => settings.output = id,
+                let result = Settings::update(&path, |settings| match change {
+                    Control::Select(side, id) => {
+                        match side {
+                            Endpoint::Input => settings.input = id,
+                            Endpoint::Output => settings.output = id,
+                            Endpoint::Monitor => {
+                                settings.monitor_enabled = id.is_some();
+                                settings.monitor = id;
                             }
-                            self.choosing = None;
                         }
-                        Control::Mix(mode) => settings.mixing = mode,
-                        Control::Mute => settings.muted = !settings.muted,
-                        Control::Noise => settings.suppress_noise = !settings.suppress_noise,
-                        Control::Gain(delta) => {
-                            settings.gain_percent =
-                                settings.gain_percent.saturating_add_signed(delta).min(200)
-                        }
-                        _ => unreachable!(),
+                        self.choosing = None;
                     }
-                    write_json(&path, &settings)?;
-                    self.prefs = settings;
-                    Ok(())
-                });
+                    Control::Mix(mode) => settings.mixing = mode,
+                    Control::Language(l) => {
+                        settings.language = l;
+                        self.update.clear();
+                    }
+                    Control::Monitor => settings.monitor_enabled = !settings.monitor_enabled,
+                    Control::Mute => settings.muted = !settings.muted,
+                    Control::Noise(method) => {
+                        settings.suppress_noise = method.is_some();
+                        if let Some(method) = method {
+                            settings.noise_method = method;
+                        }
+                    }
+                    Control::Gain(percent) => settings.gain_percent = percent,
+                    _ => unreachable!(),
+                })
+                .map(|saved| self.prefs = saved);
                 self.error = result
                     .err()
-                    .map(|e| format!("Cannot save settings: {e}"))
+                    .map(|e| {
+                        format!(
+                            "{} · {e}",
+                            self.prefs
+                                .language
+                                .text("Cannot save settings", "設定を保存できません")
+                        )
+                    })
                     .unwrap_or_default();
             }
         }
         cx.notify();
     }
-
-    fn button(
-        &self,
-        id: impl Into<SharedString>,
-        label: impl Into<SharedString>,
-        selected: bool,
-        control: Control,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        div()
-            .id(id.into())
-            .tab_index(0)
-            .px_3()
-            .py_1p5()
-            .rounded_md()
-            .border_1()
-            .cursor_pointer()
-            .border_color(rgb(if selected { 0x16745e } else { 0xb6c8c1 }))
-            .bg(rgb(if selected { 0xd6f2e7 } else { 0xffffff }))
-            .hover(|s| s.bg(rgb(0xe0eee7)))
-            .focus(|s| s.border_2().border_color(rgb(0x215dba)))
-            .on_click(cx.listener(move |p, _, _, cx| p.activate(control.clone(), cx)))
-            .child(label.into())
-    }
-
-    fn device_picker(&self, side: Endpoint, cx: &mut Context<Self>) -> impl IntoElement {
-        let (id, selected, devices, default, missing) = match side {
-            Endpoint::Input => (
-                "choose-input",
-                &self.prefs.input,
-                &self.inputs,
-                "Windows default microphone",
-                "Disconnected microphone",
-            ),
-            Endpoint::Output => (
-                "choose-output",
-                &self.prefs.output,
-                &self.outputs,
-                "Choose a virtual output",
-                "Disconnected virtual output",
-            ),
-        };
-        let name = selected.as_ref().map_or(default, |id| {
-            devices
-                .iter()
-                .find(|d| &d.0 == id)
-                .map_or(missing, |d| d.1.as_str())
-        });
-        let open = self.choosing == Some(side);
-        let mut picker = div().flex().flex_col().gap_1().child(self.button(
-            id,
-            format!("{name}  ▾"),
-            open,
-            Control::Choose(side),
-            cx,
-        ));
-        if open {
-            if side == Endpoint::Input {
-                picker = picker.child(self.button(
-                    "default-input",
-                    default,
-                    selected.is_none(),
-                    Control::Select(side, None),
-                    cx,
-                ));
-            } else if devices.is_empty() {
-                picker = picker.child(
-                    "No virtual output found. Install Virtual Audio Cable and reopen this list.",
-                );
-            }
-            for (id, name) in devices {
-                picker = picker.child(self.button(
-                    id.clone(),
-                    name.clone(),
-                    selected.as_ref() == Some(id),
-                    Control::Select(side, Some(id.clone())),
-                    cx,
-                ));
-            }
-        }
-        picker
-    }
 }
 
-impl Render for Panel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let status = self.status.as_ref();
-        let peak = status.map_or(0., |s| s.peak.clamp(0., 1.));
-        let db = if peak > 0.00001 {
-            format!("{:.1} dBFS", 20. * peak.log10())
-        } else {
-            "Silence".into()
-        };
-        let row = || div().flex().flex_wrap().gap_2().items_center();
-        let heading = |text| div().font_weight(gpui::FontWeight::SEMIBOLD).child(text);
-        let view = div()
-            .id("settings")
-            .track_focus(&self.root)
-            .key_context("Settings")
-            .on_action(|_: &NextControl, w, _| w.focus_next())
-            .on_action(|_: &PreviousControl, w, _| w.focus_prev())
-            .size_full()
-            .overflow_y_scroll()
-            .bg(rgb(0xf4f7f5))
-            .text_color(rgb(0x182c27))
-            .font_family("Segoe UI")
-            .p_6()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .child(div().text_2xl().child("Microphone settings"))
-            .child(
-                div().child(
-                    status
-                        .map_or("Waiting for the audio engine", |s| &s.message)
-                        .to_owned(),
-                ),
-            )
-            .child(heading("Input"))
-            .child(self.device_picker(Endpoint::Input, cx))
-            .child(heading("Virtual microphone output"))
-            .child(self.device_picker(Endpoint::Output, cx));
-        let mut mix = row();
-        for (mode, name) in [
-            (Mixing::Stereo, "Stereo"),
-            (Mixing::Average, "Mono"),
-        ] {
-            let selected = mode == self.prefs.mixing;
-            let caption = if selected {
-                format!("✓ {name}")
-            } else {
-                name.into()
-            };
-            mix = mix.child(self.button(name, caption, selected, Control::Mix(mode), cx));
-        }
-        view.child(heading("Channel mix"))
-            .child(mix)
-            .child(heading("Processing"))
-            .child(
-                row()
-                    .child(self.button(
-                        "noise",
-                        if self.prefs.suppress_noise {
-                            "Noise suppression · On"
-                        } else {
-                            "Noise suppression · Off"
-                        },
-                        self.prefs.suppress_noise,
-                        Control::Noise,
-                        cx,
-                    ))
-                    .child(self.button(
-                        "mute",
-                        if self.prefs.muted {
-                            "Unmute microphone"
-                        } else {
-                            "Mute microphone"
-                        },
-                        self.prefs.muted,
-                        Control::Mute,
-                        cx,
-                    )),
-            )
-            .child(heading("Output gain"))
-            .child(
-                row()
-                    .child(self.button("quieter", "− 5%", false, Control::Gain(-5), cx))
-                    .child(format!("{}%", self.prefs.gain_percent))
-                    .child(self.button("louder", "+ 5%", false, Control::Gain(5), cx)),
-            )
-            .child(heading("Output level"))
-            .child(
-                row()
-                    .child(
-                        div()
-                            .w(px(230.))
-                            .h(px(10.))
-                            .rounded_md()
-                            .bg(rgb(0xcbd9d1))
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(peak))
-                                    .rounded_md()
-                                    .bg(rgb(0x12775b)),
-                            ),
-                    )
-                    .child(db),
-            )
-            .when_some(status, |v, s| {
-                v.child(div().text_sm().child(format!(
-                    "Engine {}   ·   Missing frames {}   ·   Dropped frames {}",
-                    s.version, s.missing_frames, s.dropped_frames
-                )))
-            })
-            .when(!self.error.is_empty(), |v| v.child(self.error.clone()))
-            .child(
-                row()
-                    .child(self.button(
-                        "updates",
-                        "Check for updates",
-                        false,
-                        Control::CheckUpdate,
-                        cx,
-                    ))
-                    .child(self.button("releases", "Open releases", false, Control::Releases, cx)),
-            )
-            .when(!self.update.is_empty(), |v| v.child(self.update.clone()))
-    }
-}
+mod view;
 
 fn start_engine() -> io::Result<()> {
     let engine = std::env::current_exe()?.with_file_name("orvia-engine.exe");
@@ -399,7 +271,7 @@ struct Release {
     tag_name: String,
 }
 
-fn latest_release() -> String {
+fn latest_release(l: Language) -> String {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(10)))
         .build()
@@ -411,27 +283,56 @@ fn latest_release() -> String {
     let mut response = match result {
         Ok(r) => r,
         Err(ureq::Error::StatusCode(404)) => {
-            return "No public release is available. Open releases for private builds.".into();
+            return l
+                .text("No public release available.", "公開リリースはありません。")
+                .into();
         }
-        Err(e) => return format!("Update check failed: {e}"),
+        Err(e) => {
+            return format!(
+                "{} · {e}",
+                l.text("Update check failed", "更新を確認できません")
+            );
+        }
     };
     let Ok(release) = response.body_mut().read_json::<Release>() else {
-        return "Unrecognized release information".into();
+        return l
+            .text(
+                "Unrecognized release information",
+                "リリース情報を読み取れません",
+            )
+            .into();
     };
     let latest = semver::Version::parse(release.tag_name.trim_start_matches('v'));
     let current = semver::Version::parse(env!("CARGO_PKG_VERSION"));
     match (latest, current) {
         (Ok(v), Ok(installed)) if v > installed => {
-            format!("Version {v} is available. Open releases to update.")
+            format!(
+                "{} · {v}",
+                l.text("Update available", "アップデートがあります")
+            )
         }
-        (Ok(_), Ok(_)) => "You have the latest version.".into(),
-        _ => "Unrecognized release version".into(),
+        (Ok(_), Ok(_)) => l.text("Up to date", "最新バージョンです").into(),
+        _ => l
+            .text("Unrecognized release version", "バージョンを読み取れません")
+            .into(),
     }
 }
 
 fn main() -> io::Result<()> {
     let dir = data_dir()?;
     fs::create_dir_all(&dir)?;
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("window.lock"))?;
+    if let Err(e) = fs2::FileExt::try_lock_exclusive(&lock) {
+        if e.raw_os_error() == Some(33) || e.kind() == io::ErrorKind::WouldBlock {
+            return fs::write(dir.join("show-window"), b"1");
+        }
+        return Err(e);
+    }
+    let _ = fs::remove_file(dir.join("close-window"));
     run(&dir);
     Ok(())
 }
@@ -443,7 +344,7 @@ fn run(dir: &Path) {
             KeyBinding::new("tab", NextControl, Some("Settings")),
             KeyBinding::new("shift-tab", PreviousControl, Some("Settings")),
         ]);
-        let bounds = Bounds::centered(None, size(px(540.), px(630.)), cx);
+        let bounds = Bounds::centered(None, size(px(830.), px(610.)), cx);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -457,6 +358,7 @@ fn run(dir: &Path) {
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                window_min_size: Some(size(px(590.), px(440.))),
                 ..Default::default()
             },
             |w, cx| cx.new(|cx| Panel::new(dir, w, cx)),

@@ -25,10 +25,16 @@ actions!(
 );
 const RELEASES: &str = "https://github.com/sya-ri/orvia/releases";
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Endpoint {
+    Input,
+    Output,
+}
+
 #[derive(Clone)]
 enum Control {
-    Inputs,
-    Input(Option<String>),
+    Choose(Endpoint),
+    Select(Endpoint, Option<String>),
     Mix(Mixing),
     Noise,
     Mute,
@@ -42,7 +48,8 @@ struct Panel {
     root: FocusHandle,
     prefs: Settings,
     inputs: Vec<(String, String)>,
-    choosing_input: bool,
+    outputs: Vec<(String, String)>,
+    choosing: Option<Endpoint>,
     status: Option<EngineStatus>,
     error: String,
     update: String,
@@ -99,7 +106,8 @@ impl Panel {
             root,
             prefs,
             inputs,
-            choosing_input: false,
+            outputs: orvia_engine::outputs().unwrap_or_default(),
+            choosing: None,
             status: None,
             error,
             update: String::new(),
@@ -109,11 +117,15 @@ impl Panel {
 
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
         match control {
-            Control::Inputs => {
-                self.choosing_input = !self.choosing_input;
-                if self.choosing_input {
-                    match orvia_engine::inputs() {
-                        Ok(inputs) => self.inputs = inputs,
+            Control::Choose(side) => {
+                self.choosing = (self.choosing != Some(side)).then_some(side);
+                if self.choosing.is_some() {
+                    let (list, devices) = match side {
+                        Endpoint::Input => (&mut self.inputs, orvia_engine::inputs()),
+                        Endpoint::Output => (&mut self.outputs, orvia_engine::outputs()),
+                    };
+                    match devices {
+                        Ok(devices) => *list = devices,
                         Err(e) => self.error = e.to_string(),
                     }
                 }
@@ -138,9 +150,12 @@ impl Panel {
                 let path = self.dir.join("settings.json");
                 let result = Settings::load(&path).and_then(|mut settings| {
                     match change {
-                        Control::Input(id) => {
-                            settings.input = id;
-                            self.choosing_input = false;
+                        Control::Select(side, id) => {
+                            match side {
+                                Endpoint::Input => settings.input = id,
+                                Endpoint::Output => settings.output = id,
+                            }
+                            self.choosing = None;
                         }
                         Control::Mix(mode) => settings.mixing = mode,
                         Control::Mute => settings.muted = !settings.muted,
@@ -188,18 +203,62 @@ impl Panel {
             .child(label.into())
     }
 
-    fn input_name(&self) -> String {
-        self.prefs
-            .input
-            .as_ref()
-            .map(|id| {
-                self.inputs
-                    .iter()
-                    .find(|d| &d.0 == id)
-                    .map(|d| d.1.clone())
-                    .unwrap_or_else(|| "Disconnected microphone".into())
-            })
-            .unwrap_or_else(|| "Windows default microphone".into())
+    fn device_picker(&self, side: Endpoint, cx: &mut Context<Self>) -> impl IntoElement {
+        let (id, selected, devices, default, missing) = match side {
+            Endpoint::Input => (
+                "choose-input",
+                &self.prefs.input,
+                &self.inputs,
+                "Windows default microphone",
+                "Disconnected microphone",
+            ),
+            Endpoint::Output => (
+                "choose-output",
+                &self.prefs.output,
+                &self.outputs,
+                "Choose a virtual output",
+                "Disconnected virtual output",
+            ),
+        };
+        let name = selected.as_ref().map_or(default, |id| {
+            devices
+                .iter()
+                .find(|d| &d.0 == id)
+                .map_or(missing, |d| d.1.as_str())
+        });
+        let open = self.choosing == Some(side);
+        let mut picker = div().flex().flex_col().gap_1().child(self.button(
+            id,
+            format!("{name}  ▾"),
+            open,
+            Control::Choose(side),
+            cx,
+        ));
+        if open {
+            if side == Endpoint::Input {
+                picker = picker.child(self.button(
+                    "default-input",
+                    default,
+                    selected.is_none(),
+                    Control::Select(side, None),
+                    cx,
+                ));
+            } else if devices.is_empty() {
+                picker = picker.child(
+                    "No virtual output found. Install Virtual Audio Cable and reopen this list.",
+                );
+            }
+            for (id, name) in devices {
+                picker = picker.child(self.button(
+                    id.clone(),
+                    name.clone(),
+                    selected.as_ref() == Some(id),
+                    Control::Select(side, Some(id.clone())),
+                    cx,
+                ));
+            }
+        }
+        picker
     }
 }
 
@@ -214,7 +273,7 @@ impl Render for Panel {
         };
         let row = || div().flex().flex_wrap().gap_2().items_center();
         let heading = |text| div().font_weight(gpui::FontWeight::SEMIBOLD).child(text);
-        let mut view = div()
+        let view = div()
             .id("settings")
             .track_focus(&self.root)
             .key_context("Settings")
@@ -238,32 +297,9 @@ impl Render for Panel {
                 ),
             )
             .child(heading("Input"))
-            .child(self.button(
-                "choose-input",
-                format!("{}  ▾", self.input_name()),
-                self.choosing_input,
-                Control::Inputs,
-                cx,
-            ));
-        if self.choosing_input {
-            let mut devices = div().flex().flex_col().gap_1().child(self.button(
-                "default",
-                "Windows default microphone",
-                self.prefs.input.is_none(),
-                Control::Input(None),
-                cx,
-            ));
-            for (id, name) in &self.inputs {
-                devices = devices.child(self.button(
-                    id.clone(),
-                    name.clone(),
-                    self.prefs.input.as_ref() == Some(id),
-                    Control::Input(Some(id.clone())),
-                    cx,
-                ));
-            }
-            view = view.child(devices);
-        }
+            .child(self.device_picker(Endpoint::Input, cx))
+            .child(heading("Virtual microphone output"))
+            .child(self.device_picker(Endpoint::Output, cx));
         let mut mix = row();
         for (mode, name) in [
             (Mixing::Stereo, "Stereo"),

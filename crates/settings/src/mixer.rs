@@ -23,23 +23,37 @@ fn history(levels: Vec<[u8; 2]>) -> impl IntoElement {
                 ));
             }
             let stride = w / HISTORY_BLOCKS as f32;
-            for (i, block) in levels.iter().rev().take(HISTORY_BLOCKS).enumerate() {
-                let x = origin.x + w - stride * (i + 1) as f32;
-                // The envelopes share a baseline and scale. Adjacent strokes remain
-                // distinguishable even when bypass sends identical levels through.
-                for (offset, peak, color) in
-                    [(0., block[0], INPUT_COLOR), (0.5, block[1], OUTPUT_COLOR)]
-                {
-                    let height = h * (f32::from(peak) / 60.);
-                    if height > px(0.) {
-                        window.paint_quad(fill(
-                            Bounds::new(
-                                point(x + stride * offset, origin.y + h - height),
-                                size(stride * 0.5, height),
-                            ),
-                            rgb(color),
-                        ));
+            if levels.len() < 2 {
+                return;
+            }
+            let start = origin.x + w - stride * levels.len() as f32;
+            let bottom = origin.y + h - px(1.);
+            for (channel, color) in [(0, INPUT_COLOR), (1, OUTPUT_COLOR)] {
+                let mut trace = gpui::PathBuilder::stroke(px(if channel == 0 { 2.5 } else { 1.5 }));
+                let mut area = gpui::PathBuilder::fill();
+                area.move_to(point(start, bottom));
+                for (i, block) in levels.iter().enumerate() {
+                    let x = start + stride * i as f32;
+                    let y = bottom - (h - px(2.)) * (f32::from(block[channel]) / 60.);
+                    let p = point(x, y);
+                    if i == 0 {
+                        trace.move_to(p);
+                    } else {
+                        trace.line_to(p);
                     }
+                    if channel == 0 {
+                        area.line_to(p);
+                    }
+                }
+                if channel == 0 {
+                    area.line_to(point(origin.x + w - stride, bottom));
+                    area.close();
+                    if let Ok(path) = area.build() {
+                        window.paint_path(path, gpui::rgba(0xb2d3dd23));
+                    }
+                }
+                if let Ok(path) = trace.build() {
+                    window.paint_path(path, rgb(color));
                 }
             }
         },
@@ -283,30 +297,12 @@ impl Panel {
             )
             .child(signal)
             .child(
-                card()
-                    .gap_2()
-                    .child(
-                        row()
-                            .justify_between()
-                            .child(heading(l.text("Channels", "チャンネル")))
-                            .child(mix),
-                    )
-                    .child(
-                        row()
-                            .justify_between()
-                            .child(note(self.device_name(Endpoint::Output)))
-                            .child(self.button(
-                                "mute",
-                                if self.prefs.muted {
-                                    l.text("Unmute output", "ミュートを解除")
-                                } else {
-                                    l.text("Mute output", "出力をミュート")
-                                },
-                                self.prefs.muted,
-                                Control::Mute,
-                                cx,
-                            )),
-                    ),
+                card().gap_2().child(
+                    row()
+                        .justify_between()
+                        .child(heading(l.text("Channels", "チャンネル")))
+                        .child(mix),
+                ),
             )
     }
 }

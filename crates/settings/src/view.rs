@@ -441,10 +441,27 @@ impl Render for Panel {
                         stack()
                             .p_5()
                             .child(
-                                div()
-                                    .text_2xl()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(title),
+                                row()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_2xl()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(title),
+                                    )
+                                    .when(self.page == Page::Mixer, |header| {
+                                        header.child(self.button(
+                                            "mute",
+                                            if self.prefs.muted {
+                                                l.text("Unmute output", "ミュートを解除")
+                                            } else {
+                                                l.text("Mute output", "出力をミュート")
+                                            },
+                                            self.prefs.muted,
+                                            Control::Mute,
+                                            cx,
+                                        ))
+                                    }),
                             )
                             .child(content)
                             .when(!self.error.is_empty(), |v| {

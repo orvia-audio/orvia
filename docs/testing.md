@@ -36,7 +36,15 @@ Run the exact MSI and matching certificate produced by the build. Keep measureme
 | Upgrade and removal | Change input, mute and gain. Install a newer MSI and compare the endpoint ID and settings. Uninstall and verify the device, startup entry and executables are removed. |
 | Boot policy | A test signature requires a prepared test system. A production-ready release for ordinary Secure Boot installations would need a separately authorized signing path and clean-machine testing. |
 
+### Verify mute with an independent recording
+
+Feed a continuous tone to the selected input. Set gain to 100% and turn off noise suppression. Start a WASAPI recording of **Microphone Array (Orvia Audio v1)** and a second recording of the source input. Keep both recorders open while clicking **Mute microphone**, waiting at least six seconds, and clicking **Unmute microphone**. Check that the tone continues in the reference recording throughout. Inspect a settled interval in each phase of the Orvia recording for the original tone, digital silence and the return of the tone.
+
+On Windows 11 Enterprise LTSC 2024 x64 (build 26100.1742), a QEMU line input carried a 440 Hz and 880 Hz tone. The reference recorder used 44.1 kHz and the Orvia recorder used 48 kHz. The source measured −19.1 dBFS RMS in all three intervals. Orvia measured −19.1 dBFS before and after mute. All 168,000 samples in the 3.5-second muted interval were zero in the recorded channel. This test covers the installed driver, audio engine and settings buttons with an emulated input. Hardware compatibility and sustained audio quality need separate measurements.
+
 ## Troubleshooting
+
+- **The adapter appears but its microphone is missing after reinstalling.** Close audio applications. Check the latest Orvia installation entry in `%WINDIR%\inf\setupapi.dev.log`. If Windows reports that the driver update requires a reboot, restart the test machine before opening the recorder. The test MSI can report success while that reboot is pending.
 
 - **Orvia Audio v1 is unavailable.** Check Device Manager for Orvia's Media device. Compare the public certificate with the one used for the installed package. See the [driver guide](../driver/README.md). The engine retries when the adapter appears.
 - **The selected microphone is disconnected.** Reconnect it or choose another input. An explicit selection is retained by endpoint ID. Choosing the Windows default follows later default changes.

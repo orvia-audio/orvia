@@ -94,6 +94,9 @@ fn supervise(dir: &Path) -> Result<()> {
                 .map(stream::Route::metrics)
                 .unwrap_or_default();
             let status = EngineStatus {
+                signal: Default::default(),
+                monitoring: false,
+                monitor_error: None,
                 observed: SystemTime::now(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 message: message.clone(),

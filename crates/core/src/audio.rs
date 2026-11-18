@@ -15,11 +15,82 @@ pub enum Mixing {
     #[default]
     Stereo,
     /// Send the arithmetic mean of left and right to both channels.
+    #[serde(alias = "left", alias = "right")]
     Average,
-    /// Send the left input to both channels.
-    Left,
-    /// Send the right input to both channels.
-    Right,
+}
+
+/// Algorithm applied before gain and monitoring when noise suppression is enabled.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoiseMethod {
+    /// Speech-oriented recurrent neural network.
+    #[default]
+    Rnnoise,
+    /// Adaptive per-frequency subtraction for steady background sounds.
+    Spectral,
+}
+
+/// Signal envelopes and mean-square energies for one aligned 10 ms block.
+/// Measurements are normalized to full scale and taken on either side of the
+/// noise filter, ahead of output gain. No PCM samples are retained here.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BlockLevels {
+    /// Largest absolute sample entering the filter.
+    pub before_peak: f32,
+    /// Largest absolute sample leaving the filter.
+    pub after_peak: f32,
+    /// Input mean-square energy across both channels.
+    pub before_power: f32,
+    /// Output mean-square energy across both channels.
+    pub after_power: f32,
+}
+
+/// Compact pre-gain measurements for the settings window.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct SignalHistory {
+    /// Pairs of input and filtered peaks, in 1 dB steps above −60 dBFS.
+    /// Each pair spans 10 ms, with the earliest pair first.
+    pub peaks: Vec<[u8; 2]>,
+    /// Energy reduction in dB over the newest half second. Absent for silence.
+    pub attenuation_db: Option<f32>,
+}
+
+impl SignalHistory {
+    /// Summarize up to two seconds of consecutive blocks without retaining PCM.
+    pub fn from_blocks<'a>(blocks: impl DoubleEndedIterator<Item = &'a BlockLevels>) -> Self {
+        let mut peaks = Vec::with_capacity(200);
+        let (mut before, mut after) = (0., 0.);
+        let to_scale = |v: f32| (60. + 20. * v.max(0.001).log10()).clamp(0., 60.).round() as u8;
+        for (i, b) in blocks.rev().take(200).enumerate() {
+            peaks.push([to_scale(b.before_peak), to_scale(b.after_peak)]);
+            if i < 50 {
+                before += b.before_power;
+                after += b.after_power;
+            }
+        }
+        peaks.reverse();
+        let count = peaks.len().min(50) as f32;
+        let attenuation_db = (count > 0. && before > 1e-8 * count)
+            .then(|| 10. * (before / after.max(1e-12 * count)).log10());
+        Self {
+            peaks,
+            attenuation_db,
+        }
+    }
+}
+
+fn levels(frames: &[[f32; 2]; BLOCK]) -> (f32, f32) {
+    let (mut peak, mut energy) = (0_f32, 0.);
+    for &s in frames.iter().flatten() {
+        peak = peak.max(s.abs());
+        energy += s * s;
+    }
+    (peak, energy / (2 * BLOCK) as f32)
+}
+
+enum Filter {
+    Rnnoise(Box<DenoiseState<'static>>),
+    Spectral(Box<crate::spectral::Spectral>),
 }
 
 /// Stateful block processor for one uninterrupted segment of microphone input.
@@ -28,7 +99,8 @@ pub enum Mixing {
 /// Mono sources duplicate each sample into both channels. See the [crate example](crate).
 pub struct Processor {
     settings: crate::Settings,
-    filters: Vec<Box<DenoiseState<'static>>>,
+    filters: Vec<Filter>,
+    previous_input: (f32, f32),
 }
 
 impl Processor {
@@ -41,13 +113,21 @@ impl Processor {
             1
         };
         let filters = if settings.suppress_noise && !settings.muted {
-            (0..channels).map(|_| DenoiseState::new()).collect()
+            (0..channels)
+                .map(|_| match settings.noise_method {
+                    NoiseMethod::Rnnoise => Filter::Rnnoise(DenoiseState::new()),
+                    NoiseMethod::Spectral => {
+                        Filter::Spectral(Box::new(crate::spectral::Spectral::new()))
+                    }
+                })
+                .collect()
         } else {
             Vec::new()
         };
         Self {
             settings: settings.clone(),
             filters,
+            previous_input: (0., 0.),
         }
     }
 
@@ -56,9 +136,21 @@ impl Processor {
     /// Non-finite input becomes silence. Gain is limited to 200% and the final
     /// signal is clipped to full scale. A muted block is entirely silent.
     pub fn process(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> f32 {
+        self.process_with_levels(frames).0
+    }
+
+    /// Change linear output gain without clearing filter history. 100 means unity.
+    pub fn set_gain(&mut self, percent: u16) {
+        self.settings.gain_percent = percent.min(200);
+    }
+
+    /// Process one block and return its output peak and pre-gain filter measurements.
+    /// Both filters use overlapping windows. The input envelope is delayed by one
+    /// block to compare the same interval on both sides of the filter.
+    pub fn process_with_levels(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> (f32, BlockLevels) {
         if self.settings.muted {
             frames.fill([0.; 2]);
-            return 0.;
+            return (0., BlockLevels::default());
         }
         for frame in frames.iter_mut() {
             for sample in frame.iter_mut() {
@@ -71,29 +163,53 @@ impl Processor {
             *frame = match self.settings.mixing {
                 Mixing::Stereo => *frame,
                 Mixing::Average => [(frame[0] + frame[1]) * 0.5; 2],
-                Mixing::Left => [frame[0]; 2],
-                Mixing::Right => [frame[1]; 2],
             };
         }
+        let input_levels = levels(frames);
         for (channel, filter) in self.filters.iter_mut().enumerate() {
-            // RNNoise takes signed 16-bit PCM magnitudes represented as floats.
-            let input: [f32; BLOCK] = std::array::from_fn(|i| frames[i][channel] * 32768.);
             let mut output = [0.; BLOCK];
-            filter.process_frame(&mut output, &input);
+            match filter {
+                Filter::Rnnoise(f) => {
+                    let input = std::array::from_fn::<_, BLOCK, _>(|i| frames[i][channel] * 32768.);
+                    f.process_frame(&mut output, &input);
+                    for s in &mut output {
+                        *s /= 32768.;
+                    }
+                }
+                Filter::Spectral(f) => {
+                    f.process(&std::array::from_fn(|i| frames[i][channel]), &mut output)
+                }
+            }
             for (frame, sample) in frames.iter_mut().zip(output) {
-                frame[channel] = sample / 32768.;
+                frame[channel] = sample;
                 if self.settings.mixing != Mixing::Stereo {
                     frame[1] = frame[0];
                 }
             }
         }
+        let (before, after) = if self.filters.is_empty() {
+            (input_levels, input_levels)
+        } else {
+            (
+                std::mem::replace(&mut self.previous_input, input_levels),
+                levels(frames),
+            )
+        };
         let gain = f32::from(self.settings.gain_percent.min(200)) / 100.;
         let mut peak = 0_f32;
         for sample in frames.iter_mut().flatten() {
             *sample = (*sample * gain).clamp(-1., 1.);
             peak = peak.max(sample.abs());
         }
-        peak
+        (
+            peak,
+            BlockLevels {
+                before_peak: before.0,
+                before_power: before.1,
+                after_peak: after.0,
+                after_power: after.1,
+            },
+        )
     }
 }
 
@@ -104,12 +220,7 @@ mod tests {
 
     #[test]
     fn maps_channels_then_applies_gain() {
-        for (mixing, expected) in [
-            (Mixing::Stereo, [1., -0.5]),
-            (Mixing::Average, [0.5; 2]),
-            (Mixing::Left, [1.; 2]),
-            (Mixing::Right, [-0.5; 2]),
-        ] {
+        for (mixing, expected) in [(Mixing::Stereo, [1., -0.5]), (Mixing::Average, [0.5; 2])] {
             let mut frames = [[0.75, -0.25]; BLOCK];
             let mut processor = Processor::new(&Settings {
                 mixing,
@@ -123,29 +234,102 @@ mod tests {
 
     #[test]
     fn suppression_reduces_stationary_noise() {
-        let mut processor = Processor::new(&Settings {
+        for method in [NoiseMethod::Rnnoise, NoiseMethod::Spectral] {
+            let mut processor = Processor::new(&Settings {
+                suppress_noise: true,
+                noise_method: method,
+                mixing: Mixing::Average,
+                ..Default::default()
+            });
+            let mut rng = 17_u32;
+            let (mut original, mut filtered) = (0.0, 0.0);
+            for block in 0..250 {
+                let mut frames: [[f32; 2]; BLOCK] = std::array::from_fn(|_| {
+                    rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    [0.05 * (rng as i32 as f32 / i32::MAX as f32); 2]
+                });
+                let energy = |frames: &[[f32; 2]; BLOCK]| {
+                    frames.iter().map(|f| f64::from(f[0]).powi(2)).sum::<f64>()
+                };
+                let input = energy(&frames);
+                processor.process(&mut frames);
+                if block >= 150 {
+                    original += input;
+                    filtered += energy(&frames);
+                }
+            }
+            assert!(
+                filtered < original * 0.5,
+                "{method:?}: filtered {filtered} of {original}"
+            );
+        }
+    }
+
+    #[test]
+    fn spectral_filter_preserves_the_onset_of_a_new_tone() {
+        let mut p = Processor::new(&Settings {
             suppress_noise: true,
-            mixing: Mixing::Left,
+            noise_method: NoiseMethod::Spectral,
+            mixing: Mixing::Average,
             ..Default::default()
         });
-        let mut rng = 17_u32;
-        let (mut original, mut filtered) = (0.0, 0.0);
-        for block in 0..100 {
-            let mut frames: [[f32; 2]; BLOCK] = std::array::from_fn(|_| {
-                rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-                [0.05 * (rng as i32 as f32 / i32::MAX as f32); 2]
-            });
-            let energy = |frames: &[[f32; 2]; BLOCK]| {
-                frames.iter().map(|f| f64::from(f[0]).powi(2)).sum::<f64>()
-            };
-            let input = energy(&frames);
-            processor.process(&mut frames);
-            if block >= 50 {
-                original += input;
-                filtered += energy(&frames);
-            }
+        for _ in 0..150 {
+            p.process(&mut [[0.; 2]; BLOCK]);
         }
-        assert!(filtered < original * 0.5);
+        let tone =
+            std::array::from_fn(|i| [(i as f32 * std::f32::consts::TAU / 48.).sin() * 0.4; 2]);
+        let mut first = tone;
+        p.process(&mut first);
+        let mut next = tone;
+        let (_, levels) = p.process_with_levels(&mut next);
+        assert!((levels.before_peak - 0.4).abs() < 1e-5);
+        assert!((levels.after_power - levels.before_power).abs() < 1e-4);
+        assert!(
+            next.iter()
+                .zip(tone)
+                .all(|(a, b)| (a[0] - b[0]).abs() < 1e-4 && a[0] == a[1])
+        );
+    }
+
+    #[test]
+    fn output_gain_does_not_change_the_filter_measurement() {
+        let mut p = Processor::new(&Settings::default());
+        for gain in [0, 25, 100, 200] {
+            p.set_gain(gain);
+            let (peak, b) = p.process_with_levels(&mut [[0.25, -0.25]; BLOCK]);
+            assert_eq!(peak, 0.25 * f32::from(gain) / 100.);
+            assert_eq!(b.before_power, 0.0625);
+            assert_eq!(b.after_power, b.before_power);
+        }
+    }
+
+    #[test]
+    fn history_shares_a_scale_and_compares_the_latest_half_second() {
+        let mut blocks = vec![
+            BlockLevels {
+                before_peak: 1.,
+                after_peak: 0.1,
+                before_power: 1.,
+                after_power: 1.
+            };
+            210
+        ];
+        for b in &mut blocks[160..] {
+            b.after_power = 0.25;
+        }
+        let signal = SignalHistory::from_blocks(blocks.iter());
+        assert_eq!(signal.peaks, vec![[60, 40]; 200]);
+        assert!((signal.attenuation_db.unwrap() - 6.0206).abs() < 0.001);
+        assert!(
+            SignalHistory::from_blocks([BlockLevels::default()].iter())
+                .attenuation_db
+                .is_none()
+        );
+        assert!(
+            SignalHistory::from_blocks([].iter())
+                .attenuation_db
+                .is_none()
+        );
     }
 
     #[test]

@@ -303,9 +303,7 @@ impl Render for Panel {
         let mut mix = row();
         for (mode, name) in [
             (Mixing::Stereo, "Stereo"),
-            (Mixing::Average, "Average L + R"),
-            (Mixing::Left, "Left only"),
-            (Mixing::Right, "Right only"),
+            (Mixing::Average, "Mono"),
         ] {
             let selected = mode == self.prefs.mixing;
             let caption = if selected {

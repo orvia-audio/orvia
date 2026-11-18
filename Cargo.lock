@@ -3504,6 +3504,7 @@ version = "0.3.0"
 dependencies = [
  "fs2",
  "nnnoiseless",
+ "rustfft",
  "serde",
  "serde_json",
  "sys-locale",

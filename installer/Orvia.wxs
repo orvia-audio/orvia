@@ -1,0 +1,42 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="Orvia" Manufacturer="Orvia" Version="$(var.Version)"
+           UpgradeCode="FF4E4F65-2891-4DB8-BDBC-C42D9B179C3B" Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Orvia is already installed." Schedule="afterInstallInitialize" />
+    <MediaTemplate EmbedCab="yes" />
+    <Launch Condition="Installed OR (VersionNT64 AND WindowsBuild &gt;= 22000)" Message="Orvia requires Windows 11 x64." />
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Orvia">
+        <Component Id="Settings"><File Id="AppFile" KeyPath="yes" Source="$(var.Bin)\orvia.exe">
+          <Shortcut Id="StartMenu" Directory="ProgramMenuFolder" Name="Orvia" Advertise="yes" />
+        </File></Component>
+        <Component Id="Engine"><File Id="EngineFile" Source="$(var.Bin)\orvia-engine.exe" />
+          <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\Run"
+             Name="Orvia" Value="&quot;[#EngineFile]&quot;" Type="string" />
+        </Component>
+        <Component Id="Notices"><File Source="$(var.Dist)\THIRD-PARTY-NOTICES.txt" /></Component>
+        <Component Id="Runtime"><File Source="$(var.Runtime)" /></Component>
+        <Directory Id="DriverFolder" Name="driver">
+          <Component Id="DeviceSetup"><File Id="Helper" Source="$(var.Work)\orvia-device.exe" /></Component>
+          <Component Id="DriverInf"><File Source="$(var.Driver)\OrviaAudio.inf" /></Component>
+          <Component Id="DriverSys"><File Source="$(var.Driver)\OrviaAudio.sys" /></Component>
+          <Component Id="DriverCat"><File Source="$(var.Driver)\OrviaAudio.cat" /></Component>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="ProgramMenuFolder" />
+    <Feature Id="Product" Title="Orvia" Level="1">
+      <ComponentRef Id="Settings" /><ComponentRef Id="Engine" /><ComponentRef Id="Notices" /><ComponentRef Id="Runtime" />
+      <ComponentRef Id="DeviceSetup" /><ComponentRef Id="DriverInf" /><ComponentRef Id="DriverSys" /><ComponentRef Id="DriverCat" />
+    </Feature>
+    <CustomAction Id="InstallDevice" FileRef="Helper" ExeCommand="install" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="UndoNewDevice" FileRef="Helper" ExeCommand="remove" Execute="rollback" Impersonate="no" Return="ignore" />
+    <CustomAction Id="RemoveDevice" FileRef="Helper" ExeCommand="remove" Execute="deferred" Impersonate="no" Return="check" />
+    <CustomAction Id="RestoreDevice" FileRef="Helper" ExeCommand="install" Execute="rollback" Impersonate="no" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="UndoNewDevice" After="InstallFiles" Condition="NOT Installed AND NOT WIX_UPGRADE_DETECTED" />
+      <Custom Action="InstallDevice" After="UndoNewDevice" Condition="NOT (REMOVE ~= &quot;ALL&quot;)" />
+      <Custom Action="RestoreDevice" Before="RemoveDevice" Condition="REMOVE ~= &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+      <Custom Action="RemoveDevice" Before="RemoveFiles" Condition="REMOVE ~= &quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>

@@ -1,0 +1,47 @@
+# Run from an x64 Native Tools shell after building the test-signed driver.
+[CmdletBinding()]
+param()
+$ErrorActionPreference = 'Stop'
+Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Security/Microsoft.PowerShell.Security.psd1"
+Import-Module "$PSHOME/Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1"
+$root = Split-Path $PSScriptRoot
+$work = New-Item -Type Directory -Force "$root/target/installer"
+$dist = New-Item -Type Directory -Force "$root/dist"
+$driver = "$root/target/driver/package"
+$cer = "$root/target/driver/Orvia-Test.cer"
+function Run([string]$Tool, [string[]]$Arguments) {
+    & $Tool @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "$Tool exited with $LASTEXITCODE" }
+}
+Push-Location $root
+try {
+    $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $cer
+    foreach ($file in 'OrviaAudio.sys','OrviaAudio.cat') {
+        $signature = Get-AuthenticodeSignature -LiteralPath "$driver/$file"
+        if ($signature.SignerCertificate.Thumbprint -ne $cert.Thumbprint) {
+            throw "Build the SYS and CAT with driver/build.ps1 -TestSign before packaging."
+        }
+    }
+    Run cargo @('build','--workspace','--locked','--release')
+    $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
+    $version = ($metadata.packages | Where-Object name -eq 'orvia').version
+    Run cl.exe @('/nologo','/std:c++17','/O2','/EHsc','/MT','/DUNICODE','/D_UNICODE',
+        "/Fo$work/device.obj","/Fe$work/orvia-device.exe","$PSScriptRoot/device.cpp",
+        '/link','setupapi.lib','newdev.lib','cfgmgr32.lib')
+    Run cargo-about @('generate','--locked','-o',"$work/dependencies.txt","$PSScriptRoot/notices.hbs")
+    $notices = @("Orvia $version", (Get-Content LICENSE -Raw),
+        'Microsoft Visual C++ Runtime, Copyright Microsoft Corporation. Distributed under the Visual Studio redistribution terms.',
+        'Orvia Audio driver',
+        (Get-Content driver/LICENSE -Raw), (Get-Content "$work/dependencies.txt" -Raw -Encoding UTF8))
+    [IO.File]::WriteAllText("$dist/THIRD-PARTY-NOTICES.txt", ($notices -join [Environment]::NewLine))
+    $name = "Orvia-$version-windows-x64-test.msi"
+    $runtime = Get-Item "$env:VCToolsRedistDir/x64/Microsoft.VC*.CRT/vcruntime140.dll" | Select-Object -First 1
+    Run wix @('build','-arch','x64','-d',"Runtime=$($runtime.FullName)",'-d',"Version=$version",'-d',"Work=$work",'-d',"Dist=$dist",
+        '-d',"Driver=$driver",'-d',"Bin=$root/target/release",'-intermediateFolder',"$work/wix",
+        '-pdbtype','none','-out',"$dist/$name","$PSScriptRoot/Orvia.wxs")
+    Copy-Item -LiteralPath $cer -Destination "$dist/Orvia-Test.cer" -Force
+    $lines = foreach ($item in $name,'Orvia-Test.cer','THIRD-PARTY-NOTICES.txt') {
+        (Get-FileHash "$dist/$item" -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + $item
+    }
+    [IO.File]::WriteAllLines("$dist/SHA256SUMS.txt", [string[]]$lines)
+} finally { Pop-Location }

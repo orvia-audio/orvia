@@ -16,15 +16,8 @@ Abstract:
 #include <initguid.h>
 #include "definitions.h"
 #include "hw.h"
-#include "savedata.h"
 #include "endpoints.h"
 
-//-----------------------------------------------------------------------------
-// CSaveData statics
-//-----------------------------------------------------------------------------
-
-PSAVEWORKER_PARAM       CSaveData::m_pWorkItems = NULL;
-PDEVICE_OBJECT          CSaveData::m_pDeviceObject = NULL;
 //=============================================================================
 // Classes
 //=============================================================================
@@ -377,7 +370,7 @@ Return Value:
 
     //
     // This sample supports only one instance of this object.
-    // (b/c of CSaveData's static members and Bluetooth HFP logic). 
+    // The transport queue belongs to this single adapter.
     //
     if (InterlockedCompareExchange(&CAdapterCommon::m_AdapterInstances, 1, 0) != 0)
     {
@@ -437,7 +430,7 @@ Return Value:
         m_pHW = NULL;
     }
     
-    CSaveData::DestroyWorkItems();
+
     SAFE_RELEASE(m_pPortClsEtwHelper);
     SAFE_RELEASE(m_pServiceGroupWave);
  
@@ -609,12 +602,6 @@ Return Value:
     
     m_pHW->MixerReset();
 
-    //
-    // Initialize SaveData class.
-    //
-    CSaveData::SetDeviceObject(DeviceObject);   //device object is needed by CSaveData
-    ntStatus = CSaveData::InitializeWorkItems(DeviceObject);
-    IF_FAILED_JUMP(ntStatus, Done);
 Done:
 
     return ntStatus;

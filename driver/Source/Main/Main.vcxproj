@@ -179,16 +179,16 @@
     </DriverSign>
   </ItemDefinitionGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <TargetName>SimpleAudioSample</TargetName>
+    <TargetName>OrviaAudio</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
-    <TargetName>SimpleAudioSample</TargetName>
+    <TargetName>OrviaAudio</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <TargetName>SimpleAudioSample</TargetName>
+    <TargetName>OrviaAudio</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
-    <TargetName>SimpleAudioSample</TargetName>
+    <TargetName>OrviaAudio</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <Link>
@@ -311,6 +311,7 @@
     </ResourceCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="bridge.cpp" />
     <ClCompile Include="adapter.cpp" />
     <ClCompile Include="basetopo.cpp" />
     <ClCompile Include="common.cpp" />

@@ -13,6 +13,8 @@ Orvia is a desktop microphone mixer for Windows, macOS, and Linux. Send a proces
 
 https://github.com/user-attachments/assets/f70d9515-6fc0-45b6-9218-495529a97bc9
 
+[Compare filters on the same recording](https://gh.s7a.dev/orvia/#listen)
+
 ## Getting started
 
 | System | Snapshot installer | Virtual microphone |

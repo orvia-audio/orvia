@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f8f8f4">
+  <meta name="description" content="Mix your microphone for games and recording. Compare three noise filters on the same voice and hear exactly what changes.">
+  <title>Orvia · Microphone mixer</title>
+  <link rel="icon" href="media/orvia.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="player.js" defer></script>
+</head>
+<body>
+  <header class="wrap top">
+    <a class="brand" href="#top" aria-label="Orvia home"><img src="media/orvia.svg" width="37" height="37" alt="">Orvia</a>
+    <nav aria-label="Main navigation"><a href="#listen">Listen</a><a href="#routing">Routing</a><a href="#install">Install</a></nav>
+  </header>
+  <main id="top">
+    <section class="wrap hero">
+      <div class="intro">
+        <h1>Mix your<br>microphone<span>.</span></h1>
+        <p>Give games and recordings a cleaner voice. Keep your original microphone in voice chat.</p>
+        <a class="primary" href="#listen"><svg aria-hidden="true" viewBox="0 0 20 20"><path d="m6 3 11 7-11 7Z"/></svg>Listen to a sample</a>
+      </div>
+      <figure class="screen"><img src="media/mixer.png" width="830" height="640" alt="Orvia mixer with live signal history, four filter choices, gain slider, and headphone monitor."></figure>
+    </section>
+
+    <section class="listening" id="listen" aria-labelledby="listen-title">
+      <div class="wrap">
+        <div class="section-head">
+          <div><h2 id="listen-title">Compare filters</h2><p>Switch on the same word. The recording and gain stay matched.</p></div>
+          <fieldset class="scenes"><legend class="visually-hidden">Background sound</legend>
+            <label><input type="radio" name="scene" value="air-conditioner" checked><span>Air conditioner</span></label>
+            <label><input type="radio" name="scene" value="keyboard"><span>Keyboard typing</span></label>
+          </fieldset>
+        </div>
+        <div class="deck">
+          <div class="modes" role="group" aria-label="Noise filter">
+            <button type="button" data-method="original" aria-pressed="false">Original</button>
+            <button type="button" data-method="deepfilternet3" aria-pressed="true">DeepFilterNet3</button>
+            <button type="button" data-method="rnnoise" aria-pressed="false">RNNoise</button>
+            <button type="button" data-method="webrtc" aria-pressed="false">WebRTC</button>
+          </div>
+          <div class="wave"><canvas id="waveform" aria-hidden="true"></canvas><input id="seek" type="range" aria-label="Playback position" min="0" max="14" step="0.01" value="0"></div>
+          <div class="transport">
+            <button class="play" type="button" id="play"><svg viewBox="0 0 20 20" aria-hidden="true"><path id="play-icon" d="m6 3 11 7-11 7Z"/></svg><span id="play-label">Play</span></button>
+            <button class="replay" type="button" id="replay" aria-label="Replay the last three seconds">↶ 3 s</button>
+            <output id="clock" for="seek">0:00 / 0:14</output>
+          </div>
+        </div>
+        <p id="notice" role="status"></p>
+        <details class="credits"><summary>Recording credits</summary><p>Speech by the <a href="https://commons.wikimedia.org/wiki/File:Speech_12dB_s16.flac">Opus Codec working group</a> (<a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>), <a href="https://commons.wikimedia.org/wiki/File:Air_conditioner_hum_(Gravity_Sound).wav">air conditioner by Gravity Sound</a> (<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>), and <a href="https://commons.wikimedia.org/wiki/File:Keyboard_noise.ogg">keyboard by Yuyudevil</a> (public domain). Orvia mixed and filtered the excerpts at 48 kHz, then aligned their playback.</p></details>
+        <noscript><video controls preload="metadata" src="media/compare-16s.mp4"></video></noscript>
+      </div>
+    </section>
+
+    <section class="wrap routing" id="routing" aria-labelledby="routing-title">
+      <div><h2 id="routing-title">Choose who hears the mix.</h2><p>Select the virtual microphone in the apps you want to process. Monitor the result on your headphones.</p></div>
+      <figure class="signal" aria-label="A physical microphone feeds voice chat directly and feeds games, recorders and headphones through Orvia.">
+        <div class="source"><img src="media/microphone.svg" alt="" width="30" height="30"><b>Your microphone</b></div>
+        <div class="paths">
+          <div class="path original"><div><small>Original input</small><strong>Voice chat</strong></div></div>
+          <div class="path processed"><div><small><img src="media/orvia.svg" alt="" width="20" height="20">Orvia virtual microphone</small><strong>Games &amp; recording</strong></div></div>
+          <div class="headphones"><img src="media/headphones.svg" alt="" width="20" height="20">Headphone monitor</div>
+        </div>
+      </figure>
+    </section>
+    <section class="install" id="install" aria-labelledby="install-title"><div class="wrap">
+      <h2 id="install-title">Get Orvia</h2>
+      <p>Snapshot downloads require access to the Orvia repository.</p>
+      <div class="systems">
+        <div><h3>Windows</h3><p>Windows 11 x64. Use a signed virtual cable with Secure Boot enabled.</p><a href="https://github.com/sya-ri/orvia/actions/workflows/windows.yml">Windows MSI</a></div>
+        <div><h3>macOS</h3><p>Apple Silicon or Intel, macOS 13+. Route audio through BlackHole 2ch.</p><a href="https://github.com/sya-ri/orvia/actions/workflows/desktop.yml">macOS disk image</a></div>
+        <div><h3>Linux</h3><p>Ubuntu 24.04 x64 with PipeWire. The virtual microphone is included.</p><a href="https://github.com/sya-ri/orvia/actions/workflows/desktop.yml">Ubuntu package</a></div>
+      </div>
+    </div></section>
+  </main>
+  <footer class="wrap"><a class="brand" href="#top"><img src="media/orvia.svg" width="26" height="26" alt="">Orvia</a><a href="https://github.com/sya-ri/orvia">GitHub</a><a href="licenses.txt">Licenses</a></footer>
+</body>
+</html>

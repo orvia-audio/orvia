@@ -16,6 +16,6 @@ Find native packages in `dist/`. The macOS snapshot is ad-hoc signed. If Gatekee
 2. Switch between Off and the three filters. Check that the mixer keeps its history and that the headphones follow the processed output.
 3. Unplug and reconnect the input, output and headphones in turn. The engine should recover the selected route without sending audio to a fallback speaker.
 
-On Windows, **VAC Lite** is licensed for private home use unrelated to income generation. A dedicated Elgato Wave Link playback channel can also feed a recording mix. The optional [Windows lab driver](../driver/README.md) has separate signing requirements.
+On Windows, Secure Boot can stay enabled with the signed virtual cables. **VAC Lite** is licensed for private home use unrelated to income generation. A dedicated Elgato Wave Link playback channel can also feed a recording mix. The optional [Windows lab driver](../driver/README.md) has separate signing requirements.
 
-On macOS, choose **BlackHole 2ch** on both sides. On Ubuntu, choose **Orvia Output** in the mixer and **Orvia Microphone** in the receiver. The Linux integration test records a known tone through that route in an isolated PipeWire session. See **Preferences → Audio engine → View log** for connection errors.
+On macOS, drag Orvia from the DMG to Applications. Grant microphone access on first use and choose **BlackHole 2ch** as the virtual output in Orvia and as the input in the receiving app. On Ubuntu, choose **Orvia Output** in the mixer and **Orvia Microphone** in the receiver. The Linux integration test records a known tone through that route in an isolated PipeWire session. See **Preferences → Audio engine → View log** for connection errors.

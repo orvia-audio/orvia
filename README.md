@@ -1,35 +1,28 @@
 # <img src="assets/orvia-wordmark.svg" alt="Orvia" width="560">
 
-Give your game or recorder a cleaner microphone while your voice chat keeps the original. Orvia removes background noise on your own CPU. Listen through headphones, watch the before-and-after signal, and adjust the gain while you speak.
+Orvia is a desktop microphone mixer for Windows, macOS, and Linux. Send a processed microphone to a game or recording app while your voice chat uses the original input.
 
-![Orvia's mixer showing DeepFilterNet3, the live signal history, the gain slider and headphone monitoring](assets/mixer.png)
+![Orvia mixer with live input and filtered signal levels, channel controls, output gain, and headphone monitoring](assets/mixer.png)
 
-[![Play the 16-second comparison. Original at 0:00, DeepFilterNet3 at 0:04, RNNoise at 0:08 and WebRTC at 0:12.](docs/samples/compare-16s.png)](docs/samples/compare-16s.mp4)
+## Features
 
-**[Download the A/B player](docs/samples/listen.html?raw=true)** and open it in your browser. Switch between the original and DeepFilterNet3 mid-word, try another filter, or listen to keyboard noise instead.
+- **Routing.** Connect a physical input to a virtual microphone that each app can select independently.
+- **Mixing.** Keep stereo channels separate or mix them to mono. Adjust output gain from 0% to 200%.
+- **Noise suppression.** Process speech locally with DeepFilterNet3, RNNoise, or WebRTC.
+- **Monitoring.** Listen to the processed signal through your headphones and watch input and filtered levels in real time.
 
-<details>
-<summary>Lossless clips and measurements</summary>
+https://github.com/user-attachments/assets/f70d9515-6fc0-45b6-9218-495529a97bc9
 
-| Filter | Keyboard typing | Air conditioner |
+## Getting started
+
+| System | Snapshot installer | Virtual microphone |
 | --- | --- | --- |
-| Off | [Original recording](docs/samples/keyboard-original.flac?raw=true) | [Original recording](docs/samples/air-conditioner-original.flac?raw=true) |
-| DeepFilterNet3 | [Listen · 28.2 dB](docs/samples/keyboard-deepfilternet3.flac?raw=true) | [Listen · 40.6 dB](docs/samples/air-conditioner-deepfilternet3.flac?raw=true) |
-| RNNoise | [Listen · 39.9 dB](docs/samples/keyboard-rnnoise.flac?raw=true) | [Listen · 54.8 dB](docs/samples/air-conditioner-rnnoise.flac?raw=true) |
-| WebRTC | [Listen · 23.1 dB](docs/samples/keyboard-webrtc.flac?raw=true) | [Listen · 17.7 dB](docs/samples/air-conditioner-webrtc.flac?raw=true) |
+| Windows 11 x64 | [MSI](https://github.com/sya-ri/orvia/actions/workflows/windows.yml) | [Virtual Audio Cable](https://vac.muzychenko.net/en/download.htm) or an Elgato Wave Link mix |
+| macOS 13+ | [DMG for Apple Silicon or Intel](https://github.com/sya-ri/orvia/actions/workflows/desktop.yml) | [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole) |
+| Ubuntu 24.04 x64 with PipeWire | [DEB](https://github.com/sya-ri/orvia/actions/workflows/desktop.yml) | Orvia Microphone, included in the package |
 
-The dB values measure background reduction in the second before speech. On these two recordings, RNNoise removed the most noise during the pause. DeepFilterNet3 scored highest for speech intelligibility. [Audio credits and measurements](docs/samples/CREDITS.md)
+1. Install Orvia and the virtual audio device for your system. On Ubuntu, sign out and back in after installation.
+2. In **Devices**, choose your physical microphone and virtual output. In **Mixer**, set the gain and turn on headphone monitoring if you want to hear the result.
+3. In your game or recorder, select the virtual microphone. Leave your physical input selected in apps that should receive the original sound.
 
-</details>
-
-## Get started
-
-| System | Install | Microphone for your game or recorder |
-| --- | --- | --- |
-| Windows 11 x64 | Install the [MSI](https://github.com/sya-ri/orvia/actions/workflows/windows.yml) and a supported virtual cable. Secure Boot can stay on. | The recording side of [Virtual Audio Cable](https://vac.muzychenko.net/en/download.htm) or an Elgato Wave Link mix |
-| macOS 13+ | Open the [DMG for your Mac](https://github.com/sya-ri/orvia/actions/workflows/desktop.yml), drag Orvia to Applications and install [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole). Allow microphone access when prompted. | BlackHole 2ch |
-| Ubuntu 24.04 x64 with PipeWire | Install the [DEB](https://github.com/sya-ri/orvia/actions/workflows/desktop.yml) and sign out and back in to load its virtual microphone. | Orvia Microphone |
-
-In **Devices**, select your physical microphone and the matching virtual output. DeepFilterNet3 is on by default. You can switch filters in **Mixer**. In apps that should hear the original, keep the physical microphone selected.
-
-[Build and verify](docs/testing.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)
+[Listening samples and A/B player](docs/samples/) · [Build and test](docs/testing.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)

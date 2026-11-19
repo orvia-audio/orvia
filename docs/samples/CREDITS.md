@@ -1,4 +1,4 @@
-# Listening samples
+# Measurements and audio credits
 
 | Recording | Credit | Terms |
 | --- | --- | --- |
@@ -8,7 +8,7 @@
 
 Each 14-second mix uses the full 10.8-second speech recording starting at 2 seconds. The backgrounds were downmixed to mono, resampled to 48 kHz, trimmed to 14 seconds and centered to remove DC offset. Noise was set 5 dB below the speech excerpt by RMS. One common gain per mix set its peak to 0.8 full scale.
 
-Orvia processed each mix once per filter, in mono at 100% gain. The lossless clips use 16-bit FLAC. Filter delay was removed by cross-correlation with clean speech. All eight FLACs retain the same level and duration. The 16-second H.264/AAC video repeats the 0.70–4.70 second excerpt of the air conditioner mix in four versions. Each waveform shows the corresponding audio at the same scale.
+Orvia processed each mix once per filter, in mono at 100% gain. The lossless clips use 16-bit FLAC. Filter delay was removed by cross-correlation with clean speech. All eight FLACs retain the same level and duration. The [16-second H.264/AAC video](compare-16s.mp4) repeats the 0.70–4.70 second excerpt of the air conditioner mix in four versions. Each waveform shows the corresponding audio at the same scale.
 
 | Filter | Typing reduction | Typing STOI | Air conditioner reduction | Air conditioner STOI |
 | --- | ---: | ---: | ---: | ---: |

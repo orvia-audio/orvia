@@ -1,56 +1,21 @@
-# Packaging and verifying Orvia
+# Build and verify Orvia
 
-## Build an installer
+Use Rust 1.93.1. Build both executables with `cargo build --workspace --locked` and launch `target/debug/orvia` (`orvia.exe` on Windows). The mixer starts the engine beside it.
 
-Use an x64 Native Tools shell. Install the Rust prerequisites from the README and put WiX 4.0.6 (`wix`) and cargo-about 0.9.3 (`cargo-about`) on PATH. The WiX .NET tool also requires a compatible .NET runtime. Run `powershell -NoProfile -File installer\build.ps1`. The standard MSI, third-party notices and SHA-256 checksums appear in `dist`. This package needs no WDK, driver package or certificate and leaves third-party virtual devices under their own installer's control.
+| Target | Build requirements | Package |
+| --- | --- | --- |
+| Windows x64 | MSVC 2022 C++ tools, Windows SDK, WiX 4.0.6 and cargo-about 0.9.3 | Run `installer/build.ps1` from an x64 Native Tools shell. |
+| macOS | Xcode Command Line Tools, jq and cargo-about 0.9.3 | Run `MACOSX_DEPLOYMENT_TARGET=13.0 bash installer/desktop.sh` for a native disk image. |
+| Ubuntu 24.04 amd64 | Install the packages listed in the [desktop workflow](../.github/workflows/desktop.yml), plus jq and cargo-about 0.9.3. | Run `bash installer/desktop.sh` for a DEB with a PipeWire virtual sink and capture source. |
 
-For the optional lab edition, also put NuGet CLI on PATH and run the following commands.
+Find native packages in `dist/`. The macOS snapshot is ad-hoc signed. If Gatekeeper blocks the first launch, review the app under **System Settings → Privacy & Security**. Quit Orvia from its menu before replacing or removing the macOS or Linux app. Windows Installer resumes an active engine after an upgrade or repair.
 
-~~~bat
-nuget install Microsoft.Windows.WDK.x64 -Version 10.0.26100.6584 -OutputDirectory target\wdk -Source https://api.nuget.org/v3/index.json -NonInteractive
-powershell -NoProfile -File driver\build.ps1 -TestSign
-powershell -NoProfile -File installer\build.ps1 -WithTestDriver
-~~~
+## Audio routing checks
 
-The lab artifacts are in `dist/lab`. Compare the MSI and public test certificate with the hashes from the same build. Both editions run the engine and settings window in the signed-in user's session. Uninstall the current edition before switching between them. The per-user settings survive removal.
+1. Select a physical input and a virtual output. Record from both devices while moving gain from 100% to 0% and back. Only the virtual recording should change.
+2. Switch between Off and the three filters. Check that the mixer keeps its history and that the headphones follow the processed output.
+3. Unplug and reconnect the input, output and headphones in turn. The engine should recover the selected route without sending audio to a fallback speaker.
 
-The lab installer owns `ROOT\ORVIAAUDIO\0000` and its driver package. A lab upgrade keeps the device node and the per-user settings. Existing settings without an output ID continue to use Orvia Audio v1 when it is available.
+On Windows, **VAC Lite** is licensed for private home use unrelated to income generation. A dedicated Elgato Wave Link playback channel can also feed a recording mix. The optional [Windows lab driver](../driver/README.md) has separate signing requirements.
 
-## Automated checks
-
-The Windows workflow checks formatting, Clippy, Rustdoc links and missing documentation, unit tests and doctests. It builds and test-signs the x64 driver, checks the INF, generates a catalog, and packages development artifacts. It does not publish a GitHub Release.
-
-The deterministic audio tests cover channel selection, suppression of stationary noise, gain, clipping, monitor isolation, stale queue recovery and rate conversion. Capture supports float shared formats from 8 to 48 kHz. For multichannel inputs it uses the first two channels. Output negotiates float or 16-bit PCM at the available rate closest to 48 kHz. On multichannel monitoring devices Orvia uses the front stereo pair. The processor runs at 48 kHz regardless of the endpoint rates.
-
-## Verification on a test machine
-
-For the standard edition, use a Secure Boot system and a vendor-signed cable. Compare simultaneous captures of the physical microphone and the cable while varying suppression and gain. Check that the Windows defaults remain unchanged and that disabling the selected cable stops output until it returns. The lab edition instead requires its matching test certificate. Keep measurements with the build commit, Windows build, endpoint formats, application versions and boot policy.
-
-| Check | Procedure and evidence |
-| --- | --- |
-| First install | Install on a clean machine with the appropriate boot policy for the edition. Open settings as a standard user. Record the capture endpoint ID and check that the default speakers remain usable. |
-| Delivery | Record speech in Windows Sound Recorder, then in a browser call and a desktop calling app. Feed distinct signals into each channel. Check independent stereo and a centered mono average. Open two consumers at once. |
-| Quality | Compare a fixed speech-and-noise sample with Off, RNNoise, WebRTC and DeepFilterNet3. Include a noise-only interval before speech. Compare both envelopes during pauses and speech. Drag the gain slider and check the pre-gain comparison stays stable. Listen for clipped consonants, pumping and switch noise. Inspect clipping at 100% and 200% gain. |
-| Recovery | Unplug the selected microphone, disable and re-enable it, sleep and resume, then restart the engine. Verify silence during loss and no buffered replay. |
-| Timing | During an extended run and a separate high-load run, log elapsed time, missing and dropped frames, CPU utilization and loopback impulse delay. Establish pass thresholds from measured baseline data. |
-| Input diversity | Cover a single-channel microphone, a stereo or multichannel USB interface, and a wireless headset. The Steinberg UR12 and Razer Barracuda X are example devices. Record the format Windows actually negotiates. |
-| Accessibility | Operate every control using Tab, Shift+Tab, Space and Enter. Check focus visibility, Windows contrast themes, 200% scaling and Narrator. |
-| Upgrade and removal | Leave the engine running with the window closed. Upgrade and verify a new process in the same desktop session, the new version and the same settings. Repair with the window open and verify both processes return. Repeat with the engine stopped and check it stays stopped. Uninstall and check that the startup entry and executables are removed. A third-party cable belongs to its vendor. Only the lab MSI removes its own device. |
-| Boot policy | Verify that the standard MSI works with Secure Boot enabled and test signing off. Use the lab MSI only in an environment prepared for its test signature. |
-
-### Verify output gain with an independent recording
-
-Feed a continuous tone to the selected input. Turn off suppression and record the physical input and virtual microphone simultaneously. Move output gain from 100% to 0% and back to 100%, leaving six seconds at each setting. Check that the physical recording stays at the same level and the virtual output reaches digital silence at 0%.
-
-## Troubleshooting
-
-- **The adapter appears but its microphone is missing after reinstalling.** Close audio applications. Check the latest Orvia installation entry in `%WINDIR%\inf\setupapi.dev.log`. If Windows reports that the driver update requires a reboot, restart the test machine before opening the recorder. The test MSI can report success while that reboot is pending.
-
-- **No virtual output found.** Install a supported virtual audio device, enable its playback endpoint in Sound settings, then reopen the output picker. Both sides of Virtual Audio Cable normally have the same name. Choose its playback side in Orvia and its recording side in downstream apps.
-- **Selected virtual output is disconnected.** Reconnect or enable the device. Orvia retries the saved endpoint and never falls back to the default speakers. If reinstalling a cable changes its endpoint ID, select it again.
-- **The selected microphone is disconnected.** Reconnect it or choose another input. An explicit selection is retained by endpoint ID. Choosing the Windows default follows later default changes.
-- **Only one side carries speech.** Choose Mono to send the average of both channels to both outputs. A microphone on just one channel becomes 6 dB quieter at unity gain.
-- **No compatible shared format.** Check microphone access for desktop apps in Windows Privacy settings and try a 48 kHz shared format under Sound settings.
-- **No public release is available.** The anonymous GitHub lookup cannot see private releases. Open releases in a signed-in browser.
-
-When reporting a problem, include the application version, driver version from Device Manager, Windows build, selected format, status text and changes in the frame counters. While settings is open, `%LOCALAPPDATA%\Orvia\status.json` contains a timestamped snapshot. Neither the snapshot nor the normal driver path records microphone audio.
+On macOS, choose **BlackHole 2ch** on both sides. On Ubuntu, choose **Orvia Output** in the mixer and **Orvia Microphone** in the receiver. The Linux integration test records a known tone through that route in an isolated PipeWire session. See **Preferences → Audio engine → View log** for connection errors.

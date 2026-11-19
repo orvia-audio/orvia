@@ -55,13 +55,18 @@ impl Panel {
         let disabled = (matches!(control, Control::RestartEngine) && self.restarting)
             || (matches!(control, Control::CheckUpdate) && self.updates.checking)
             || match control {
-                Control::TestRecord => !self.can_record_test(),
-                Control::TestPlay => self.test.clip.is_none() || self.test.recording.is_some(),
+                Control::Test(action) => !self.test_action_enabled(action),
                 Control::TestTake(_) => self.test.busy(),
                 Control::Choose(Endpoint::TestSpeaker | Endpoint::TestSource) => self.test.busy(),
                 _ => false,
             };
         let leading = match &control {
+            Control::Test(TestAction::Record) => Some("microphone.svg"),
+            Control::Test(TestAction::Play) => Some("player-play.svg"),
+            Control::Test(TestAction::FinishRecording | TestAction::StopPlayback) => {
+                Some("player-stop.svg")
+            }
+            Control::Test(TestAction::Retake) => Some("refresh.svg"),
             Control::RestartEngine => Some("refresh.svg"),
             Control::Page(Page::Log) => Some("activity.svg"),
             Control::CheckUpdate => Some("refresh.svg"),
@@ -78,6 +83,7 @@ impl Panel {
             _ => None,
         };
         let wide = trigger.is_some();
+        let primary = matches!(control, Control::Test(action) if action != TestAction::Retake);
         div()
             .id(id.into())
             .flex()
@@ -85,6 +91,11 @@ impl Panel {
             .gap_2()
             .when(wide, |d| d.w_full())
             .tab_index(0)
+            .when(primary, |d| {
+                d.track_focus(&self.test_primary_focus)
+                    .w(px(148.))
+                    .justify_center()
+            })
             .when_some(trigger, |d, side| {
                 d.track_focus(&self.picker_anchors[side as usize].focus)
             })
@@ -111,6 +122,11 @@ impl Panel {
                     }
                 }
                 p.activate(control.clone(), cx);
+                if matches!(control, Control::Test(TestAction::Retake))
+                    && p.test.recording.is_some()
+                {
+                    w.focus(&p.test_primary_focus);
+                }
             }))
             .when(disabled, |d| d.opacity(0.55))
             .when_some(leading, |d, icon| d.child(glyph(icon, 16., INK)))
@@ -265,18 +281,17 @@ impl Panel {
         use microphone_test::Take;
         let l = self.prefs.language;
         let recording = self.test.recording.as_ref();
-        let playing = self.test.playback.is_some();
+        let action = self.test.primary_action();
         let length = recording
             .map(|r| r.duration())
             .or_else(|| self.test.clip.as_ref().map(|c| c.duration()))
             .unwrap_or_default();
         let limit = orvia_engine::mic_test::LIMIT.as_secs();
-        let status = if recording.is_some() {
-            l.text("Recording", "録音中")
-        } else if playing {
-            l.text("Playing", "再生中")
-        } else {
-            self.state_label()
+        let status = match action {
+            TestAction::FinishRecording => l.text("Recording", "録音中"),
+            TestAction::StopPlayback => l.text("Playing", "再生中"),
+            TestAction::Play => l.text("Recorded", "録音済み"),
+            _ => self.state_label(),
         };
         stack()
             .child(
@@ -316,44 +331,36 @@ impl Panel {
                             .child(note(status)),
                     )
                     .child(self.picker(Endpoint::TestSource, cx))
-                    .child(
-                        row()
-                            .justify_between()
-                            .child(self.button(
-                                "test-record",
-                                if recording.is_some() {
-                                    l.text("Stop recording", "録音を停止")
-                                } else if self.test.clip.is_some() {
-                                    l.text("Retake", "録り直す")
-                                } else {
-                                    l.text("Record", "録音")
-                                },
-                                recording.is_some(),
-                                Control::TestRecord,
-                                cx,
-                            ))
-                            .child(note(format!("{:.1} / {limit} s", length.as_secs_f32()))),
-                    ),
-            )
-            .child(
-                card()
                     .child(heading(
                         l.text("Playback device", "再生先"),
                         "headphones.svg",
                         TERRACOTTA,
                     ))
                     .child(self.picker(Endpoint::TestSpeaker, cx))
-                    .child(row().child(self.button(
-                        "test-play",
-                        if playing {
-                            l.text("Stop playback", "再生を停止")
-                        } else {
-                            l.text("Play recording", "録音を再生")
-                        },
-                        playing,
-                        Control::TestPlay,
-                        cx,
-                    ))),
+                    .child(
+                        row()
+                            .border_t_1()
+                            .border_color(rgb(LINE))
+                            .pt_3()
+                            .child(self.button(
+                                "test-primary",
+                                action.label(l),
+                                true,
+                                Control::Test(action),
+                                cx,
+                            ))
+                            .child(note(format!("{:.1} / {limit} s", length.as_secs_f32())))
+                            .child(div().flex_1())
+                            .when(self.test.clip.is_some(), |d| {
+                                d.child(self.button(
+                                    "test-retake",
+                                    TestAction::Retake.label(l),
+                                    false,
+                                    Control::Test(TestAction::Retake),
+                                    cx,
+                                ))
+                            }),
+                    ),
             )
     }
 

@@ -2,6 +2,28 @@
 use super::*;
 use orvia_engine::mic_test::{self, Clip, Playback, Recording};
 
+/// The operation shown on a microphone test button when it was rendered.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum TestAction {
+    Record,
+    FinishRecording,
+    Play,
+    StopPlayback,
+    Retake,
+}
+
+impl TestAction {
+    pub(super) fn label(self, l: Language) -> &'static str {
+        match self {
+            Self::Record => l.text("Record", "録音"),
+            Self::FinishRecording => l.text("Stop recording", "録音を停止"),
+            Self::Play => l.text("Play recording", "録音を再生"),
+            Self::StopPlayback => l.text("Stop playback", "再生を停止"),
+            Self::Retake => l.text("Retake", "録り直す"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(super) enum Take {
     #[default]
@@ -34,6 +56,18 @@ pub(super) struct MicTest {
 impl MicTest {
     pub(super) fn busy(&self) -> bool {
         self.recording.is_some() || self.playback.is_some()
+    }
+
+    pub(super) fn primary_action(&self) -> TestAction {
+        if self.recording.is_some() {
+            TestAction::FinishRecording
+        } else if self.playback.is_some() {
+            TestAction::StopPlayback
+        } else if self.clip.is_some() {
+            TestAction::Play
+        } else {
+            TestAction::Record
+        }
     }
 }
 
@@ -90,32 +124,58 @@ impl Panel {
         });
     }
 
-    pub(super) fn can_record_test(&self) -> bool {
-        self.test.recording.is_some()
-            || (self.test.playback.is_none()
-                && self.test.source.is_some()
-                && self
-                    .status
-                    .as_ref()
-                    .is_some_and(|s| s.message.starts_with("Streaming")))
+    pub(super) fn test_action_enabled(&self, action: TestAction) -> bool {
+        let primary = self.test.primary_action();
+        match action {
+            TestAction::Record | TestAction::Retake => {
+                let expected = if action == TestAction::Retake {
+                    TestAction::Play
+                } else {
+                    TestAction::Record
+                };
+                primary == expected
+                    && self.test.source.is_some()
+                    && self
+                        .status
+                        .as_ref()
+                        .is_some_and(|s| s.message.starts_with("Streaming"))
+            }
+            _ => action == primary,
+        }
     }
 
-    pub(super) fn record_test(&mut self) {
-        if let Some(recording) = self.test.recording.take() {
-            self.test.recording_route = None;
-            let path = self.test.take.path(&self.dir);
-            let result = recording.finish().and_then(|clip| {
-                fs::create_dir_all(self.dir.join("mic-test"))?;
-                clip.save(&path)?;
-                Ok(clip)
-            });
-            match result {
-                Ok(clip) => self.test.clip = Some(clip),
-                Err(e) => self.test_error(e),
-            }
-        } else if self.can_record_test()
-            && let Some(id) = &self.test.source
-        {
+    pub(super) fn run_test_action(&mut self, action: TestAction) {
+        // An automatic stop can land between a button press and its click.
+        if !self.test_action_enabled(action) {
+            return;
+        }
+        match action {
+            TestAction::Record | TestAction::Retake => self.start_test_recording(),
+            TestAction::FinishRecording => self.finish_test_recording(),
+            TestAction::Play => self.play_test(),
+            TestAction::StopPlayback => self.test.playback = None,
+        }
+    }
+
+    pub(super) fn finish_test_recording(&mut self) {
+        let Some(recording) = self.test.recording.take() else {
+            return;
+        };
+        self.test.recording_route = None;
+        let path = self.test.take.path(&self.dir);
+        let result = recording.finish().and_then(|clip| {
+            fs::create_dir_all(self.dir.join("mic-test"))?;
+            clip.save(&path)?;
+            Ok(clip)
+        });
+        match result {
+            Ok(clip) => self.test.clip = Some(clip),
+            Err(e) => self.test_error(e),
+        }
+    }
+
+    fn start_test_recording(&mut self) {
+        if let Some(id) = &self.test.source {
             match Recording::start(id) {
                 Ok(recording) => {
                     self.error.clear();
@@ -131,13 +191,8 @@ impl Panel {
         }
     }
 
-    pub(super) fn play_test(&mut self) {
-        if self.test.playback.take().is_some() {
-            return;
-        }
-        if self.test.recording.is_none()
-            && let Some(clip) = &self.test.clip
-        {
+    fn play_test(&mut self) {
+        if let Some(clip) = &self.test.clip {
             match clip.play(self.test.speaker.as_deref()) {
                 Ok(playback) => {
                     self.error.clear();
@@ -183,7 +238,7 @@ impl Panel {
                 self.test.recording = None;
                 self.test_error(error);
             } else if recording.duration() >= mic_test::LIMIT {
-                self.record_test();
+                self.finish_test_recording();
             } else if timeout {
                 self.test.recording = None;
                 self.error = self

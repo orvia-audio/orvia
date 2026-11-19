@@ -5,6 +5,7 @@ use gpui::{
     Application, Bounds, Context, FocusHandle, KeyBinding, SharedString, Timer, TitlebarOptions,
     Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
+use microphone_test::TestAction;
 use orvia_core::{EngineStatus, Language, Mixing, NoiseMethod, Settings, data_dir, read_json};
 use semver::Version;
 use std::{
@@ -51,8 +52,7 @@ enum Control {
     Select(Endpoint, Option<String>),
     Mix(Mixing),
     Noise(Option<NoiseMethod>),
-    TestRecord,
-    TestPlay,
+    Test(TestAction),
     TestTake(microphone_test::Take),
     RestartEngine,
     DismissError,
@@ -82,6 +82,7 @@ struct Panel {
     outputs: Vec<(String, String)>,
     monitors: Vec<(String, String)>,
     test: microphone_test::MicTest,
+    test_primary_focus: FocusHandle,
     page: Page,
     logo: std::sync::Arc<gpui::Image>,
     choosing: Option<Endpoint>,
@@ -201,6 +202,7 @@ impl Panel {
             outputs: orvia_engine::outputs().unwrap_or_default(),
             monitors: orvia_engine::monitors().unwrap_or_default(),
             test: Default::default(),
+            test_primary_focus: cx.focus_handle().tab_stop(true),
             page: Page::Mixer,
             logo: std::sync::Arc::new(gpui::Image::from_bytes(
                 gpui::ImageFormat::Png,
@@ -242,9 +244,7 @@ impl Panel {
             Control::Page(page) => {
                 if self.page != page {
                     if self.page == Page::MicTest {
-                        if self.test.recording.is_some() {
-                            self.record_test();
-                        }
+                        self.finish_test_recording();
                         self.test = Default::default();
                     }
                     if page == Page::MicTest {
@@ -292,9 +292,8 @@ impl Panel {
                 self.test.speaker = id;
                 self.choosing = None;
             }
-            Control::TestRecord => self.record_test(),
+            Control::Test(action) => self.run_test_action(action),
             Control::TestTake(take) => self.select_take(take),
-            Control::TestPlay => self.play_test(),
             Control::RestartEngine if !self.restarting => {
                 self.restarting = true;
                 self.error.clear();

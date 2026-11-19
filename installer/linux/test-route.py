@@ -12,8 +12,9 @@ import tempfile
 import time
 
 
-def wait_for(check, message):
-    for _ in range(100):
+def wait_for(check, message, timeout=10):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if check():
             return
         time.sleep(0.1)
@@ -25,7 +26,7 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
            "PULSE_SERVER": f"unix:{tmp}/pulse/native"}
 
     def run(*args):
-        return subprocess.run(args, env=env, check=True, capture_output=True, text=True).stdout
+        return subprocess.run(args, env=env, check=True, capture_output=True, text=True, timeout=15).stdout
 
     def start(*args, **kwargs):
         process = subprocess.Popen(args, env=env, **kwargs)
@@ -52,11 +53,12 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     run("pactl", "load-module", "module-null-sink", "sink_name=test_input", "rate=48000")
     run("pactl", "load-module", "module-remap-source", "master=test_input.monitor",
         "source_name=test_microphone")
+    run("pactl", "load-module", "module-null-sink", "sink_name=test_headphones", "rate=48000")
     state = Path(tmp, "orvia")
     state.mkdir()
     (state / "settings.json").write_text(json.dumps({
         "input": "pulseaudio:test_microphone", "output": "pulseaudio:orvia_output",
-        "gain_percent": 100, "suppress_noise": False,
+        "gain_percent": 100, "suppress_noise": False, "monitor": "pulseaudio:test_headphones",
     }))
     (state / "observe").touch()
     engine = start("orvia-engine")
@@ -93,6 +95,48 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     wait_for(window_visible, "The installed mixer window did not appear")
     (state / "close-window").touch()
     assert mixer.wait(timeout=10) == 0
+
+    def pulse_devices(kind):
+        return json.loads(run("pactl", "--format=json", "list", kind))
+
+    def device_index(kind, name):
+        return next(d["index"] for d in pulse_devices(kind) if d["name"] == name)
+
+    source = device_index("sources", "orvia_microphone")
+    headphones = device_index("sinks", "test_headphones")
+
+    def recording():
+        return any(s["source"] == source for s in pulse_devices("source-outputs"))
+
+    def playing():
+        return any(s["sink"] == headphones for s in pulse_devices("sink-inputs"))
+
+    test_panel = start("orvia", "--mic-test")
+    window = run("xdotool", "search", "--sync", "--onlyvisible", "--name", "Orvia .*Mic test").splitlines()[0]
+    run("xdotool", "windowfocus", "--sync", window)
+    # With an empty take, the primary button is the last control in the panel.
+    run("xdotool", "key", "--delay", "250", "shift+Tab", "Return")
+    wait_for(recording, "The primary button did not start recording")
+    time.sleep(1)
+    run("xdotool", "key", "Return")
+    take = state / "mic-test" / "before.wav"
+    wait_for(take.is_file, "Stopping the recording did not save a take")
+    first = take.read_bytes()
+    run("xdotool", "key", "Return")
+    wait_for(playing, "The next activation of the primary button did not play the take")
+    wait_for(lambda: not playing(), "Playback did not finish")
+    assert take.read_bytes() == first and not recording()
+
+    # Retake is a separate control. It returns focus to the primary button.
+    run("xdotool", "key", "--delay", "250", "Tab", "Return")
+    wait_for(recording, "Retake did not start a new recording")
+    wait_for(lambda: take.stat().st_size > len(first), "The automatic stop did not save the retake", timeout=16)
+    second = take.read_bytes()
+    run("xdotool", "key", "Return")
+    wait_for(playing, "The primary button did not play the automatically stopped retake")
+    assert take.read_bytes() == second and not recording()
+    test_panel.terminate()
+    test_panel.wait(timeout=10)
     assert engine.poll() is None
     (state / f"stop-engine-{engine.pid}").touch()
     assert engine.wait(timeout=10) == 0

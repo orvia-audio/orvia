@@ -144,10 +144,11 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     # Retake is a separate control. It returns focus to the primary button.
     run("xdotool", "key", "--delay", "250", "Tab", "Return")
     wait_for(recording, "Retake did not start a new recording")
-    read_passage("orvia_output", speech[:speech_rate])
+    mid_sentence = int(speech_rate * 1.34)
+    read_passage("orvia_output", speech[:mid_sentence])
     time.sleep(11)
     assert recording() and take.read_bytes() == first, "A pause mid-passage must not end the take"
-    read_passage("orvia_output")
+    read_passage("orvia_output", speech[mid_sentence:])
     wait_for(lambda: take.stat().st_size > len(first), "Reading the passage did not finish the retake", timeout=45)
     second = take.read_bytes()
     run("xdotool", "key", "Return")

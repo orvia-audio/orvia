@@ -17,7 +17,7 @@ fn japanese(l: Language) -> bool {
 fn advance(text: &str, ja: bool, mut progress: usize) -> usize {
     // Match ordered anchors through the final word, allowing recognition errors between them.
     let words: &[&str] = if ja {
-        &["まどを", "あけると", "かぜが", "はいってきました"]
+        &["まど", "あけると", "かぜが", "はいってきました"]
     } else {
         &["open", "window", "cool", "breeze"]
     };
@@ -197,6 +197,7 @@ mod tests {
     #[test]
     fn pauses_and_unrelated_words_cannot_finish_the_passage() {
         assert_eq!(advance("窓を開けると", true, 0), 2);
+        assert_eq!(advance("マドオオあけると", true, 0), 2);
         assert_eq!(advance("", true, 2), 2);
         assert_eq!(advance("入ってきました", true, 2), 2);
         assert_eq!(advance("涼しい風が入って来ました。", true, 2), 4);

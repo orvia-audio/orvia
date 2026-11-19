@@ -613,29 +613,27 @@ impl Render for Panel {
             .track_focus(&self.root)
             .key_context("Settings")
             .on_mouse_move(cx.listener(|p, event: &gpui::MouseMoveEvent, _, cx| {
-                if p.dragging_gain {
+                if let Some(slider) = p.dragging_slider {
                     if event.pressed_button == Some(gpui::MouseButton::Left) {
-                        p.gain_at(event.position.x, cx);
+                        p.slide_at(slider, event.position.x, cx);
                     } else {
-                        p.dragging_gain = false;
+                        p.dragging_slider = None;
                     }
                 }
             }))
             .on_mouse_up(
                 gpui::MouseButton::Left,
                 cx.listener(|p, event: &gpui::MouseUpEvent, _, cx| {
-                    if p.dragging_gain {
-                        p.gain_at(event.position.x, cx);
-                        p.dragging_gain = false;
+                    if let Some(slider) = p.dragging_slider.take() {
+                        p.slide_at(slider, event.position.x, cx);
                     }
                 }),
             )
             .on_mouse_up_out(
                 gpui::MouseButton::Left,
                 cx.listener(|p, event: &gpui::MouseUpEvent, _, cx| {
-                    if p.dragging_gain {
-                        p.gain_at(event.position.x, cx);
-                        p.dragging_gain = false;
+                    if let Some(slider) = p.dragging_slider.take() {
+                        p.slide_at(slider, event.position.x, cx);
                     }
                 }),
             )

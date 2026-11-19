@@ -55,27 +55,41 @@ enum Control {
     Test(TestAction),
     RestartEngine,
     DismissError,
-    Gain(u16),
+    Slide(Slider, u16),
     AutomaticUpdates,
     CheckUpdate,
     Releases,
 }
 
-/// Geometry and keyboard focus of a device selector in the scrolling page.
-struct PickerAnchor {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slider {
+    Gain,
+    Suppression,
+}
+
+/// Geometry and keyboard focus of a measured control in the scrolling page.
+struct ControlAnchor {
     bounds: std::rc::Rc<std::cell::Cell<Bounds<gpui::Pixels>>>,
     focus: FocusHandle,
 }
 
+impl ControlAnchor {
+    fn new(cx: &Context<Panel>) -> Self {
+        Self {
+            bounds: Default::default(),
+            focus: cx.focus_handle().tab_stop(true),
+        }
+    }
+}
+
 struct Panel {
-    picker_anchors: [PickerAnchor; 5],
+    picker_anchors: [ControlAnchor; 5],
     picker_cursor: usize,
     picker_scroll: gpui::ScrollHandle,
     dir: PathBuf,
     root: FocusHandle,
-    gain_focus: FocusHandle,
-    gain_bounds: std::rc::Rc<std::cell::Cell<Option<Bounds<gpui::Pixels>>>>,
-    dragging_gain: bool,
+    slider_anchors: [ControlAnchor; 2],
+    dragging_slider: Option<Slider>,
     prefs: Settings,
     inputs: Vec<(String, String)>,
     outputs: Vec<(String, String)>,
@@ -187,15 +201,11 @@ impl Panel {
             updates: updates::Updates::load(&dir),
             dir,
             root,
-            gain_focus: cx.focus_handle().tab_stop(true),
-            picker_anchors: std::array::from_fn(|_| PickerAnchor {
-                bounds: Default::default(),
-                focus: cx.focus_handle().tab_stop(true),
-            }),
+            slider_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
+            picker_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
             picker_cursor: 0,
             picker_scroll: gpui::ScrollHandle::new(),
-            gain_bounds: Default::default(),
-            dragging_gain: false,
+            dragging_slider: None,
             prefs,
             inputs,
             outputs: orvia_engine::outputs().unwrap_or_default(),
@@ -348,7 +358,8 @@ impl Panel {
                             settings.noise_method = method;
                         }
                     }
-                    Control::Gain(percent) => settings.gain_percent = percent,
+                    Control::Slide(Slider::Gain, percent) => settings.gain_percent = percent,
+                    Control::Slide(Slider::Suppression, db) => settings.deep_filter_limit_db = db,
                     _ => unreachable!(),
                 })
                 .map(|saved| self.prefs = saved);

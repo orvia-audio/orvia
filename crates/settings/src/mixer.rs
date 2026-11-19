@@ -76,22 +76,41 @@ fn legend(label: &'static str, color: u32) -> gpui::Div {
         .child(label)
 }
 
+impl Slider {
+    fn max(self) -> u16 {
+        match self {
+            Self::Gain => 200,
+            Self::Suppression => Settings::UNLIMITED_ATTENUATION_DB,
+        }
+    }
+
+    fn value(self, prefs: &Settings) -> u16 {
+        match self {
+            Self::Gain => prefs.gain_percent,
+            Self::Suppression => prefs.deep_filter_limit_db,
+        }
+        .min(self.max())
+    }
+}
+
 impl Panel {
-    pub(super) fn gain_at(&mut self, x: Pixels, cx: &mut Context<Self>) {
-        if let Some(bounds) = self.gain_bounds.get().filter(|b| b.size.width > px(0.)) {
+    pub(super) fn slide_at(&mut self, slider: Slider, x: Pixels, cx: &mut Context<Self>) {
+        let bounds = self.slider_anchors[slider as usize].bounds.get();
+        if bounds.size.width > px(0.) {
             let ratio = ((x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
-            let value = (ratio * 200.).round() as u16;
-            if value != self.prefs.gain_percent {
-                self.activate(Control::Gain(value), cx);
+            let value = (ratio * f32::from(slider.max())).round() as u16;
+            if value != slider.value(&self.prefs) {
+                self.activate(Control::Slide(slider, value), cx);
             }
         }
     }
 
-    fn slider(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let measured = self.gain_bounds.clone();
-        let fraction = f32::from(self.prefs.gain_percent.min(200)) / 200.;
+    fn slider(&self, slider: Slider, cx: &mut Context<Self>) -> impl IntoElement {
+        let anchor = &self.slider_anchors[slider as usize];
+        let measured = anchor.bounds.clone();
+        let fraction = f32::from(slider.value(&self.prefs)) / f32::from(slider.max());
         let track = canvas(
-            move |bounds, _, _| measured.set(Some(bounds)),
+            move |bounds, _, _| measured.set(bounds),
             move |bounds, _, window, _| {
                 let x = bounds.origin.x;
                 let y = bounds.center().y;
@@ -104,10 +123,12 @@ impl Panel {
                     Bounds::new(point(x, y - px(2.)), size(w * fraction, px(4.))),
                     rgb(0xa9472c),
                 ));
-                window.paint_quad(fill(
-                    Bounds::new(point(x + w * 0.5, y - px(4.)), size(px(1.), px(8.))),
-                    rgb(MUTED),
-                ));
+                if slider == Slider::Gain {
+                    window.paint_quad(fill(
+                        Bounds::new(point(x + w * 0.5, y - px(4.)), size(px(1.), px(8.))),
+                        rgb(MUTED),
+                    ));
+                }
                 let mut thumb = fill(
                     Bounds::new(
                         point(x + w * fraction - px(8.), y - px(8.)),
@@ -122,8 +143,11 @@ impl Panel {
         .w_full()
         .h(px(25.));
         div()
-            .id("gain-slider")
-            .track_focus(&self.gain_focus)
+            .id(match slider {
+                Slider::Gain => "gain-slider",
+                Slider::Suppression => "suppression-slider",
+            })
+            .track_focus(&anchor.focus)
             .px_2()
             .rounded_md()
             .border_1()
@@ -132,14 +156,14 @@ impl Panel {
             .cursor_pointer()
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|p, event: &gpui::MouseDownEvent, window, cx| {
-                    window.focus(&p.gain_focus);
-                    p.dragging_gain = true;
-                    p.gain_at(event.position.x, cx);
+                cx.listener(move |p, event: &gpui::MouseDownEvent, window, cx| {
+                    window.focus(&p.slider_anchors[slider as usize].focus);
+                    p.dragging_slider = Some(slider);
+                    p.slide_at(slider, event.position.x, cx);
                 }),
             )
-            .on_key_down(cx.listener(|p, event: &gpui::KeyDownEvent, _, cx| {
-                let value = p.prefs.gain_percent.min(200);
+            .on_key_down(cx.listener(move |p, event: &gpui::KeyDownEvent, _, cx| {
+                let value = slider.value(&p.prefs);
                 let step = if event.keystroke.modifiers.shift {
                     10
                 } else {
@@ -147,12 +171,12 @@ impl Panel {
                 };
                 let next = match event.keystroke.key.as_str() {
                     "left" | "down" => value.saturating_sub(step),
-                    "right" | "up" => (value + step).min(200),
+                    "right" | "up" => (value + step).min(slider.max()),
                     "home" => 0,
-                    "end" => 200,
+                    "end" => slider.max(),
                     _ => return,
                 };
-                p.activate(Control::Gain(next), cx);
+                p.activate(Control::Slide(slider, next), cx);
                 cx.stop_propagation();
             }))
             .child(track)
@@ -286,7 +310,7 @@ impl Panel {
                             .child(format!("{}%", self.prefs.gain_percent)),
                     ),
             )
-            .child(self.slider(cx))
+            .child(self.slider(Slider::Gain, cx))
             .child(
                 div()
                     .px_2()
@@ -314,6 +338,22 @@ impl Panel {
                             ))
                             .child(methods),
                     )
+                    .when(selected == Some(NoiseMethod::DeepFilterNet3), |card| {
+                        let db = self.prefs.deep_filter_limit_db;
+                        let limit = if db >= Settings::UNLIMITED_ATTENUATION_DB {
+                            l.text("Unlimited", "上限なし").to_owned()
+                        } else {
+                            format!("{db} dB")
+                        };
+                        card.child(
+                            row()
+                                .justify_between()
+                                .text_sm()
+                                .child(l.text("Suppression limit", "抑制の上限"))
+                                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(limit)),
+                        )
+                        .child(self.slider(Slider::Suppression, cx))
+                    })
                     .child(
                         row()
                             .justify_between()

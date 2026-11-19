@@ -12,7 +12,7 @@ gpui = { version = "=0.2.2", default-features = false, features = ["windows-mani
 rust-embed = { version = "8", features = ["debug-embed"] }
 orvia-core = { path = "../core" }
 orvia-engine = { path = "../engine" }
-semver = "1"
+semver = { version = "1", features = ["serde"] }
 ureq = { version = "3", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 fs2 = "0.4"
@@ -28,4 +28,4 @@ workspace = true
 
 [build-dependencies]
 embed-resource = "3"
-resvg = { version = "0.45", default-features = false }
+resvg = { version = "0.50.0", default-features = false }

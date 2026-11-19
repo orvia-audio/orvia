@@ -12,14 +12,14 @@ orvia-core = { path = "../core" }
 cpal = "0.18.2"
 anyhow = "1"
 fs2 = "0.4"
-rtrb = "0.3"
+rtrb = "0.4.1"
 time = { version = "0.3", features = ["local-offset"] }
 [target.'cfg(windows)'.dependencies]
 tray-item = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-tao = { version = "0.34", default-features = false }
-tray-icon = { version = "0.21", default-features = false }
+tao = { version = "0.37.3", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
@@ -30,4 +30,4 @@ workspace = true
 
 [build-dependencies]
 embed-resource = "3"
-resvg = { version = "0.45", default-features = false }
+resvg = { version = "0.50.0", default-features = false }

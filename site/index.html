@@ -14,7 +14,7 @@
   <a class="skip" href="#listen">Skip to audio player</a>
   <header class="bar"><div class="wrap">
     <span class="brand"><img src="media/orvia.svg" width="31" height="31" alt="">Orvia</span>
-    <a class="github-link" href="https://github.com/sya-ri/orvia" aria-label="Orvia on GitHub" title="Orvia on GitHub"><img src="media/brand-github.svg" width="24" height="24" alt=""></a>
+    <a class="github-link" href="https://github.com/sya-ri/orvia" aria-label="Orvia on GitHub" title="Orvia on GitHub"><img src="media/brand-github.svg" width="30" height="30" alt=""></a>
   </div></header>
   <main class="wrap" id="top">
     <div class="overview">
@@ -38,7 +38,7 @@
         <div class="wave"><canvas id="waveform" aria-hidden="true"></canvas><input id="seek" type="range" aria-label="Playback position" min="0" max="14" step="0.01" value="0"></div>
         <div class="transport">
           <button class="play" type="button" id="play"><svg viewBox="0 0 20 20" aria-hidden="true"><path id="play-icon" d="m6 3 11 7-11 7Z"/></svg><span id="play-label">Play</span></button>
-          <button class="replay" type="button" id="replay" aria-label="Replay the last three seconds">↶ 3 s</button>
+          <button class="replay" type="button" id="replay" aria-label="Replay the last three seconds"><img src="media/refresh.svg" width="16" height="16" alt="">3 s</button>
           <output id="clock" for="seek">0:00 / 0:14</output>
           <a class="sample-credits" href="sample-credits.html">Audio credits</a>
         </div>
@@ -51,11 +51,11 @@
       <div class="mixer-controls">
         <h2 id="mixer-title">Inside the mixer</h2>
         <dl>
-          <dt>Local noise suppression</dt>
+          <dt><img src="media/filter.svg" width="20" height="20" alt="">Local noise suppression</dt>
           <dd>Process your voice on your computer with DeepFilterNet3, RNNoise, or WebRTC.</dd>
-          <dt>Signal history</dt>
+          <dt><img src="media/activity.svg" width="20" height="20" alt="">Signal history</dt>
           <dd>Watch your mic level before and after noise suppression as you speak.</dd>
-          <dt>Channels and gain</dt>
+          <dt><img src="media/volume.svg" width="20" height="20" alt="">Channels and gain</dt>
           <dd>Keep stereo or mix down to mono. Set output gain from 0% to 200%.</dd>
         </dl>
       </div>

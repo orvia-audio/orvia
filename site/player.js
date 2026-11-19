@@ -1,7 +1,7 @@
 "use strict";
 
 const methods = [...document.querySelectorAll("[data-method]")];
-const sceneInputs = [...document.querySelectorAll("[name=scene]")];
+const sceneSelect = document.getElementById("scene");
 const canvas = document.getElementById("waveform");
 const seek = document.getElementById("seek");
 const play = document.getElementById("play");
@@ -64,16 +64,16 @@ function draw() {
   const t = position();
   const cursor = Math.min(w - 1, Math.round(w * t / seconds));
   ctx.clearRect(0, 0, w, h);
-  ctx.fillStyle = "#344542";
+  ctx.fillStyle = "#cbd4ce";
   ctx.fillRect(0, Math.floor(h / 2), w, ratio);
   const peaks = tracks.get(scene + "-" + method)?.peaks || [];
   const dx = w / peaks.length;
   peaks.forEach(([low, high], i) => {
     const x = i * dx;
-    ctx.fillStyle = x <= cursor ? "#ffad85" : "#adcbc2";
+    ctx.fillStyle = x <= cursor ? "#a7492b" : "#566e67";
     ctx.fillRect(x, h / 2 - high * h * .57, Math.max(1, dx), Math.max(ratio, (high - low) * h * .57));
   });
-  ctx.fillStyle = "#ffad85";
+  ctx.fillStyle = "#a7492b";
   ctx.fillRect(cursor, 0, Math.max(2, ratio), h);
   seek.value = String(t);
   seek.setAttribute("aria-valuetext", t.toFixed(1) + " seconds");
@@ -164,10 +164,10 @@ play.addEventListener("click", async () => {
   }
 });
 
-for (const input of sceneInputs) input.addEventListener("change", () => {
-  if (!input.checked || scene === input.value) return;
+sceneSelect.addEventListener("change", () => {
+  if (scene === sceneSelect.value) return;
   disconnect();
-  scene = input.value;
+  scene = sceneSelect.value;
   draw();
   void loadScene();
 });

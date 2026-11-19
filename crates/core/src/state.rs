@@ -63,6 +63,9 @@ pub struct Settings {
     pub suppress_noise: bool,
     /// Selected noise filter. New configurations use DeepFilterNet3.
     pub noise_method: crate::NoiseMethod,
+    /// Maximum DeepFilterNet3 attenuation in dB. Zero passes delayed dry audio
+    /// and values at or above [`Self::UNLIMITED_ATTENUATION_DB`] use full suppression.
+    pub deep_filter_limit_db: u16,
     /// Linear gain as a percentage, limited to 200 at processing time.
     pub gain_percent: u16,
 }
@@ -79,6 +82,7 @@ impl Default for Settings {
             mixing: Default::default(),
             suppress_noise: true,
             noise_method: Default::default(),
+            deep_filter_limit_db: Self::UNLIMITED_ATTENUATION_DB,
             gain_percent: 100,
         }
     }
@@ -164,6 +168,9 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
 }
 
 impl Settings {
+    /// DeepFilterNet3's sentinel for unrestricted attenuation, also the legacy default.
+    pub const UNLIMITED_ATTENUATION_DB: u16 = 100;
+
     /// Whether the open audio streams can be reused. Processing controls are
     /// applied at a block boundary without clearing the signal history.
     pub fn same_signal_path(&self, other: &Self) -> bool {
@@ -247,6 +254,19 @@ mod tests {
             assert_eq!(settings.mixing, crate::Mixing::Average);
             assert!(settings.suppress_noise);
         }
+    }
+
+    #[test]
+    fn old_preferences_keep_unlimited_suppression_and_remember_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        fs::write(&path, b"{}").unwrap();
+        assert_eq!(
+            Settings::load(&path).unwrap().deep_filter_limit_db,
+            Settings::UNLIMITED_ATTENUATION_DB
+        );
+        Settings::update(&path, |s| s.deep_filter_limit_db = 12).unwrap();
+        assert_eq!(Settings::load(&path).unwrap().deep_filter_limit_db, 12);
     }
 
     #[test]

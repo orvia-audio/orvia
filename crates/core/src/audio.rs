@@ -121,7 +121,11 @@ impl Processor {
             (0..channels)
                 .map(|_| match settings.noise_method {
                     NoiseMethod::Rnnoise => Filter::Rnnoise(DenoiseState::new()),
-                    NoiseMethod::DeepFilterNet3 => Filter::DeepFilterNet3(Box::default()),
+                    NoiseMethod::DeepFilterNet3 => {
+                        let mut filter = Box::new(dfn3_rs::Denoiser::new());
+                        filter.set_attenuation_limit(f32::from(settings.deep_filter_limit_db));
+                        Filter::DeepFilterNet3(filter)
+                    }
                     NoiseMethod::WebRtc => {
                         let config = sonora::Config {
                             noise_suppression: Some(sonora::config::NoiseSuppression {
@@ -164,6 +168,23 @@ impl Processor {
     /// Change linear output gain without clearing filter history. 100 means unity.
     pub fn set_gain(&mut self, percent: u16) {
         self.settings.gain_percent = percent.min(200);
+    }
+
+    /// Ramp DeepFilterNet3 to a new attenuation limit over 20 ms while preserving
+    /// its history and delay. Call between blocks. Other filters ignore the limit.
+    pub fn set_deep_filter_limit(&mut self, db: u16) {
+        if db == self.settings.deep_filter_limit_db {
+            return;
+        }
+        self.settings.deep_filter_limit_db = db;
+        for filter in &mut self.filters {
+            if let Filter::DeepFilterNet3(denoiser) = filter {
+                denoiser.set_attenuation_limit_smooth(
+                    f32::from(db),
+                    std::time::Duration::from_millis(20),
+                );
+            }
+        }
     }
 
     /// Process one block and return its output peak and pre-gain filter measurements.
@@ -254,6 +275,47 @@ mod tests {
             });
             processor.process(&mut frames);
             assert!(frames.iter().all(|frame| *frame == expected));
+        }
+    }
+
+    #[test]
+    fn live_limit_changes_preserve_both_channels_and_the_model_history() {
+        let mut processor = Processor::new(&Settings {
+            deep_filter_limit_db: 12,
+            ..Settings::default()
+        });
+        let mut reference: [Box<dfn3_rs::Denoiser>; 2] = std::array::from_fn(|_| {
+            let mut d = Box::<dfn3_rs::Denoiser>::default();
+            d.set_attenuation_limit(12.);
+            d
+        });
+        for block in 0..36 {
+            let limit = match block {
+                10 => Some(0),
+                18 => Some(12),
+                26 => Some(Settings::UNLIMITED_ATTENUATION_DB),
+                _ => None,
+            };
+            if let Some(db) = limit {
+                processor.set_deep_filter_limit(db);
+                for filter in &mut reference {
+                    filter.set_attenuation_limit_smooth(
+                        f32::from(db),
+                        std::time::Duration::from_millis(20),
+                    );
+                }
+            }
+            let mut frames = std::array::from_fn(|i| {
+                let phase = (block * BLOCK + i) as f32 * 0.04;
+                [0.08 * phase.sin(), 0.02 * (phase * 1.5).cos()]
+            });
+            let input = frames;
+            processor.process(&mut frames);
+            for (ch, filter) in reference.iter_mut().enumerate() {
+                let mut expected = [0.; BLOCK];
+                filter.process(&input.map(|f| f[ch]), &mut expected);
+                assert_eq!(frames.map(|f| f[ch]), expected);
+            }
         }
     }
 

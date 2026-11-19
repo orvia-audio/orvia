@@ -57,6 +57,7 @@ struct Counters {
 
 pub(super) struct Route {
     gain: Arc<AtomicU16>,
+    deep_filter_limit: Arc<AtomicU16>,
     processing: (Mixing, Option<NoiseMethod>),
     replacements: Producer<Processor>,
     retired: Consumer<Processor>,
@@ -115,6 +116,8 @@ impl Route {
         let (mut envelope_tx, incoming_levels) = RingBuffer::new(200);
         let gain = Arc::new(AtomicU16::new(settings.gain_percent));
         let live_gain = gain.clone();
+        let deep_filter_limit = Arc::new(AtomicU16::new(settings.deep_filter_limit_db));
+        let live_limit = deep_filter_limit.clone();
         let monitor = Monitor::default();
         let feed = monitor.feed.clone();
         let mut processor = Processor::new(settings);
@@ -144,6 +147,7 @@ impl Route {
                                 let _ = return_processor.push(old);
                             }
                             processor.set_gain(live_gain.load(Relaxed));
+                            processor.set_deep_filter_limit(live_limit.load(Relaxed));
                             let (peak, levels) = processor.process_with_levels(&mut block);
                             let _ = envelope_tx.push((stamp, levels));
                             meter.peak.fetch_max(peak.to_bits(), Relaxed);
@@ -173,6 +177,7 @@ impl Route {
         output_stream.play()?;
         Ok(Self {
             gain,
+            deep_filter_limit,
             processing: (settings.mixing, settings.active_noise_method()),
             replacements,
             retired,
@@ -196,6 +201,8 @@ impl Route {
 
     pub(super) fn update_controls(&mut self, settings: &Settings) {
         self.gain.store(settings.gain_percent, Relaxed);
+        self.deep_filter_limit
+            .store(settings.deep_filter_limit_db, Relaxed);
         let _ = self.retired.pop();
         let requested = (settings.mixing, settings.active_noise_method());
         if self.processing != requested

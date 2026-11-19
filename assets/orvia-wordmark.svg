@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="208" viewBox="0 0 720 208" role="img" aria-labelledby="title">
+  <title id="title">Orvia</title>
+  <defs>
+    <linearGradient id="coral" x1="14" y1="8" x2="102" y2="112" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFD198"/>
+      <stop offset="1" stop-color="#F07860"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="208" rx="24" fill="#242A2B"/>
+  <g transform="translate(156 44)" fill="none" stroke="url(#coral)" stroke-width="9">
+    <circle cx="60" cy="60" r="49"/>
+    <circle cx="60" cy="60" r="23.5"/>
+  </g>
+  <text x="300" y="137" fill="#F7F5F1" font-family="Segoe UI, Arial, sans-serif" font-size="94" font-weight="600" letter-spacing="-3">Orvia</text>
+</svg>

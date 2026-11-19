@@ -1,6 +1,6 @@
-# <img src="assets/orvia.svg" alt="" width="40" height="40" align="center"> Orvia
+# <img src="assets/orvia-wordmark.svg" alt="Orvia" width="720">
 
-Orvia sends one microphone through channel mixing, optional noise suppression, gain to a virtual audio device. A game or recorder can use the processed signal while a call uses the original microphone. Closing the settings window leaves the audio engine running.
+Orvia sends one microphone through channel mixing, optional noise suppression and gain to a virtual audio device. A game or recorder can use the processed signal while a call uses the original microphone. Closing the settings window leaves the audio engine running.
 
 **Windows 11 x64 with Secure Boot enabled.** The standard MSI installs the application. Install a supported, production-signed virtual audio device separately. The private development builds are available as artifacts of the Windows workflow.
 

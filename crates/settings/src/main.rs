@@ -10,7 +10,6 @@ use serde::Deserialize;
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    process::Command,
     time::{Duration, Instant},
 };
 
@@ -48,7 +47,7 @@ enum Control {
     Select(Endpoint, Option<String>),
     Mix(Mixing),
     Noise(Option<NoiseMethod>),
-    Mute,
+    RestartEngine,
     Gain(u16),
     CheckUpdate,
     Releases,
@@ -80,6 +79,7 @@ struct Panel {
     error: String,
     update: String,
     checking: bool,
+    restarting: bool,
 }
 
 impl Panel {
@@ -97,7 +97,7 @@ impl Panel {
                 ..Default::default()
             }
         });
-        if let Err(e) = start_engine() {
+        if let Err(e) = engine_control::start() {
             error = format!(
                 "{} · {e}",
                 prefs
@@ -135,7 +135,13 @@ impl Panel {
                 let prefs = Settings::load(&poll_dir.join("settings.json")).ok();
                 if this
                     .update(cx, |p, cx| {
-                        p.status = status;
+                        p.status = status.or_else(|| {
+                            p.status.take().filter(|s| {
+                                s.observed
+                                    .elapsed()
+                                    .is_ok_and(|age| age < Duration::from_secs(2))
+                            })
+                        });
                         if let Some(prefs) = prefs {
                             p.prefs = prefs;
                         }
@@ -176,6 +182,7 @@ impl Panel {
             error,
             update: String::new(),
             checking: false,
+            restarting: false,
         }
     }
 
@@ -186,7 +193,6 @@ impl Panel {
                 self.choosing = None;
             }
             Control::Monitor if self.prefs.monitor.is_none() => {
-                self.page = Page::Devices;
                 self.activate(Control::Choose(Endpoint::Monitor), cx);
             }
             Control::Choose(side) => {
@@ -204,6 +210,29 @@ impl Panel {
                     self.reset_picker_cursor(side);
                 }
             }
+            Control::RestartEngine if !self.restarting => {
+                self.restarting = true;
+                self.error.clear();
+                let dir = self.dir.clone();
+                let task = cx
+                    .background_executor()
+                    .spawn(async move { engine_control::restart(&dir) });
+                cx.spawn(async move |this, cx| {
+                    let result = task.await;
+                    let _ = this.update(cx, |p, cx| {
+                        p.restarting = false;
+                        if let Err(e) = result {
+                            p.error = format!(
+                                "{} · {e}",
+                                p.prefs.language.text("Restart failed", "再起動できません")
+                            );
+                        }
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            Control::RestartEngine => {}
             Control::CheckUpdate if !self.checking => {
                 self.checking = true;
                 self.update = self
@@ -247,7 +276,6 @@ impl Panel {
                         self.update.clear();
                     }
                     Control::Monitor => settings.monitor_enabled = !settings.monitor_enabled,
-                    Control::Mute => settings.muted = !settings.muted,
                     Control::Noise(method) => {
                         settings.suppress_noise = method.is_some();
                         if let Some(method) = method {
@@ -275,13 +303,9 @@ impl Panel {
     }
 }
 
+mod engine_control;
 mod icons;
 mod view;
-
-fn start_engine() -> io::Result<()> {
-    let engine = std::env::current_exe()?.with_file_name("orvia-engine.exe");
-    Command::new(engine).spawn().map(|_| ())
-}
 
 #[derive(Deserialize)]
 struct Release {

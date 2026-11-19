@@ -52,9 +52,9 @@ impl Panel {
         control: Control,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let disabled = matches!(control, Control::RestartEngine) && self.restarting;
         let leading = match &control {
-            Control::Mute if self.prefs.muted => Some("microphone.svg"),
-            Control::Mute => Some("microphone-off.svg"),
+            Control::RestartEngine => Some("refresh.svg"),
             Control::CheckUpdate => Some("refresh.svg"),
             Control::Releases => Some("external-link.svg"),
             _ => None,
@@ -100,6 +100,7 @@ impl Panel {
                 }
                 p.activate(control.clone(), cx);
             }))
+            .when(disabled, |d| d.opacity(0.55))
             .when_some(leading, |d, icon| d.child(glyph(icon, 16., INK)))
             .child(
                 div()
@@ -242,20 +243,6 @@ impl Panel {
 
     fn devices(&self, cx: &mut Context<Self>) -> gpui::Div {
         let l = self.prefs.language;
-        let monitor_on = self.prefs.monitor_enabled;
-        let status = self.status.as_ref();
-        let message = if self.prefs.muted {
-            l.text("Output muted", "出力はミュート中です")
-        } else if status.is_some_and(|s| s.monitor_error.is_some()) {
-            l.text(
-                "Headphones unavailable. The virtual output is independent.",
-                "ヘッドホンに接続できません。仮想出力は引き続き使用できます。",
-            )
-        } else if status.is_some_and(|s| s.monitoring) {
-            l.text("Playing processed audio", "加工後の音声を再生中")
-        } else {
-            l.text("Waiting for the audio route", "音声経路の接続待ち")
-        };
         stack()
             .child(
                 card()
@@ -273,36 +260,42 @@ impl Panel {
                         "route.svg",
                         TERRACOTTA,
                     ))
-                    .child(self.picker(Endpoint::Output, cx))
-                    .child(note(l.text(
-                        "Choose the recording side of this cable in your game or recorder.",
-                        "ゲームや録音アプリでは、このケーブルの録音側を選びます。",
-                    ))),
+                    .child(self.picker(Endpoint::Output, cx)),
             )
+    }
+
+    fn monitor(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let l = self.prefs.language;
+        let enabled = self.prefs.monitor_enabled;
+        let status = self.status.as_ref();
+        let warning = if !enabled {
+            None
+        } else if self.prefs.muted {
+            Some(l.text("Muted", "ミュート中"))
+        } else if status.is_some_and(|s| s.monitor_error.is_some()) {
+            Some(l.text("Headphones unavailable", "ヘッドホン未接続"))
+        } else if !status.is_some_and(|s| s.monitoring) {
+            Some(l.text("Waiting for audio", "音声入力待ち"))
+        } else {
+            None
+        };
+        card()
+            .gap_2()
             .child(
-                card()
+                row()
+                    .justify_between()
+                    .child(heading(
+                        l.text("Headphone monitor", "ヘッドホンモニター"),
+                        "headphones.svg",
+                        TERRACOTTA,
+                    ))
                     .child(
-                        div()
-                            .flex()
-                            .justify_between()
-                            .items_center()
-                            .child(heading(
-                                l.text("Headphone monitor", "ヘッドホンモニター"),
-                                "headphones.svg",
-                                TERRACOTTA,
-                            ))
-                            .child(self.switch("monitor", monitor_on, Control::Monitor, cx)),
-                    )
-                    .child(self.picker(Endpoint::Monitor, cx))
-                    .child(note(if monitor_on {
-                        message
-                    } else {
-                        l.text(
-                            "Listen to the processed microphone on a separate device.",
-                            "加工後のマイク音を選んだヘッドホンで確認できます。",
-                        )
-                    })),
+                        row()
+                            .when_some(warning, |d, message| d.child(note(message)))
+                            .child(self.switch("monitor", enabled, Control::Monitor, cx)),
+                    ),
             )
+            .child(self.picker(Endpoint::Monitor, cx))
     }
 
     fn preferences(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -333,10 +326,6 @@ impl Panel {
                         TERRACOTTA,
                     ))
                     .child(note(format!("Orvia {}", env!("CARGO_PKG_VERSION"))))
-                    .child(note(l.text(
-                        "Closing the window keeps Orvia in the notification area.",
-                        "画面を閉じても通知領域の Orvia は動作を続けます。",
-                    )))
                     .child(
                         row()
                             .child(self.button(
@@ -357,6 +346,41 @@ impl Panel {
                     .when(!self.update.is_empty(), |v| {
                         v.child(note(self.update.clone()))
                     }),
+            )
+            .child(
+                card()
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(heading(
+                                l.text("Audio engine", "音声エンジン"),
+                                "activity.svg",
+                                TERRACOTTA,
+                            ))
+                            .child(self.button(
+                                "restart-engine",
+                                if self.restarting {
+                                    l.text("Restarting…", "再起動中…")
+                                } else {
+                                    l.text("Restart", "再起動")
+                                },
+                                false,
+                                Control::RestartEngine,
+                                cx,
+                            )),
+                    )
+                    .when_some(
+                        self.status
+                            .as_ref()
+                            .filter(|s| s.version != env!("CARGO_PKG_VERSION")),
+                        |d, s| {
+                            d.child(note(format!(
+                                "{}  {}",
+                                l.text("Running version", "実行中のバージョン"),
+                                s.version
+                            )))
+                        },
+                    ),
             )
             .when_some(self.status.as_ref(), |v, s| {
                 v.child(
@@ -490,27 +514,10 @@ impl Render for Panel {
                         stack()
                             .p_5()
                             .child(
-                                row()
-                                    .justify_between()
-                                    .child(
-                                        div()
-                                            .text_2xl()
-                                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                                            .child(title),
-                                    )
-                                    .when(self.page == Page::Mixer, |header| {
-                                        header.child(self.button(
-                                            "mute",
-                                            if self.prefs.muted {
-                                                l.text("Unmute output", "ミュートを解除")
-                                            } else {
-                                                l.text("Mute output", "出力をミュート")
-                                            },
-                                            self.prefs.muted,
-                                            Control::Mute,
-                                            cx,
-                                        ))
-                                    }),
+                                div()
+                                    .text_2xl()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(title),
                             )
                             .child(content)
                             .when(!self.error.is_empty(), |v| {

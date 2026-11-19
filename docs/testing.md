@@ -40,7 +40,7 @@ For the standard edition, use a Secure Boot system and a vendor-signed cable. Co
 
 ### Verify mute with an independent recording
 
-Feed a continuous tone to the selected input. Set gain to 100% and turn off noise suppression. Start a WASAPI recording of **Microphone Array (Orvia Audio v1)** and a second recording of the source input. Keep both recorders open while clicking **Mute output**, waiting at least six seconds, and clicking **Unmute output**. Check that the tone continues in the reference recording throughout. Inspect a settled interval in each phase of the Orvia recording for the original tone, digital silence and the return of the tone.
+Feed a continuous tone to the selected input. Set gain to 100% and turn off noise suppression. Start a WASAPI recording of **Microphone Array (Orvia Audio v1)** and a second recording of the source input. Keep both recorders open while choosing **Mute output** in the notification area, waiting at least six seconds, and choosing **Unmute output**. Check that the tone continues in the reference recording throughout. Inspect a settled interval in each phase of the Orvia recording for the original tone, digital silence and the return of the tone.
 
 On Windows 11 Enterprise LTSC 2024 x64 (build 26100.1742), a QEMU line input carried a 440 Hz and 880 Hz tone. The reference recorder used 44.1 kHz and the Orvia recorder used 48 kHz. The source measured −19.1 dBFS RMS in all three intervals. Orvia measured −19.1 dBFS before and after mute. All 168,000 samples in the 3.5-second muted interval were zero in the recorded channel. This test covers the installed driver, audio engine and settings buttons with an emulated input. Hardware compatibility and sustained audio quality need separate measurements.
 

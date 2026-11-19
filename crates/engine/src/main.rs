@@ -33,6 +33,8 @@ fn main() -> Result<()> {
 }
 
 fn supervise(dir: &Path) -> Result<()> {
+    let stop_request = dir.join(format!("stop-engine-{}", std::process::id()));
+    let _ = fs::remove_file(&stop_request);
     let mut running: Option<stream::Route> = None;
     let mut previous: Option<Settings> = None;
     let mut tray = tray::Tray::new().ok();
@@ -42,6 +44,9 @@ fn supervise(dir: &Path) -> Result<()> {
     let mut message = String::new();
     let mut was_observed = false;
     loop {
+        if stop_request.exists() {
+            return Ok(());
+        }
         let now = Instant::now();
         if tray.is_none() && tray_attempt.elapsed() >= Duration::from_secs(10) {
             tray = tray::Tray::new().ok();

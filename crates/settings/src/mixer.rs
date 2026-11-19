@@ -6,7 +6,7 @@ const INPUT_COLOR: u32 = 0xb2d3dd;
 const OUTPUT_COLOR: u32 = 0xffaa82;
 const HISTORY_BLOCKS: usize = 200;
 
-fn history(levels: Vec<[u8; 2]>) -> impl IntoElement {
+fn history(levels: Vec<[u8; 2]>, filtered: bool) -> impl IntoElement {
     canvas(
         |_, _, _| (),
         move |bounds, _, window, _| {
@@ -28,7 +28,11 @@ fn history(levels: Vec<[u8; 2]>) -> impl IntoElement {
             }
             let start = origin.x + w - stride * levels.len() as f32;
             let bottom = origin.y + h - px(1.);
-            for (channel, color) in [(0, INPUT_COLOR), (1, OUTPUT_COLOR)] {
+            for (channel, color) in [INPUT_COLOR, OUTPUT_COLOR]
+                .into_iter()
+                .take(if filtered { 2 } else { 1 })
+                .enumerate()
+            {
                 let mut trace = gpui::PathBuilder::stroke(px(if channel == 0 { 2.5 } else { 1.5 }));
                 let mut area = gpui::PathBuilder::fill();
                 area.move_to(point(start, bottom));
@@ -160,6 +164,8 @@ impl Panel {
             .status
             .as_ref()
             .filter(|s| !self.prefs.muted && s.message.starts_with("Streaming"));
+        let outdated = live
+            .is_some_and(|s| s.signal.peaks.is_empty() && s.version != env!("CARGO_PKG_VERSION"));
         let levels = live.map(|s| s.signal.peaks.as_slice()).unwrap_or_default();
         let peak = live.map_or(0., |s| s.peak);
         let output = if peak > 0.00001 {
@@ -170,7 +176,8 @@ impl Panel {
         let change = live
             .and_then(|s| s.signal.attenuation_db)
             .map_or_else(|| "—".into(), |v| format!("{:.1} dB", v));
-        let selected = self.prefs.suppress_noise.then_some(self.prefs.noise_method);
+        let selected = self.prefs.active_noise_method();
+        let filtered = selected.is_some();
         let mut methods = row();
         for (id, label, method) in [
             ("bypass", l.text("Off", "オフ"), None),
@@ -216,20 +223,28 @@ impl Panel {
                         "wave-sine.svg",
                         CORAL,
                     ))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(rgb(CORAL))
-                            .child(self.state_label()),
-                    ),
+                    .child(div().text_sm().text_color(rgb(CORAL)).child(if outdated {
+                        l.text("Restart engine in Preferences", "設定でエンジンを再起動")
+                    } else {
+                        self.state_label()
+                    })),
             )
             .child(
                 row()
                     .justify_between()
                     .child(
                         row()
-                            .child(legend(l.text("Before", "抑制前"), INPUT_COLOR))
-                            .child(legend(l.text("After", "抑制後"), OUTPUT_COLOR)),
+                            .child(legend(
+                                if filtered {
+                                    l.text("Before", "抑制前")
+                                } else {
+                                    l.text("Input", "入力")
+                                },
+                                INPUT_COLOR,
+                            ))
+                            .when(filtered, |d| {
+                                d.child(legend(l.text("After", "抑制後"), OUTPUT_COLOR))
+                            }),
                     )
                     .child(
                         div()
@@ -238,14 +253,16 @@ impl Panel {
                             .child(l.text("2 s   ·   −60 to 0 dBFS", "2 秒   ·   −60 ～ 0 dBFS")),
                     ),
             )
-            .child(history(levels.to_vec()))
+            .child(history(levels.to_vec(), filtered))
             .child(
                 row()
                     .justify_between()
-                    .child(div().text_sm().child(format!(
-                        "{}  {change}",
-                        l.text("Pre-gain attenuation", "ゲイン適用前の減衰量")
-                    )))
+                    .when(filtered, |d| {
+                        d.child(div().text_sm().child(format!(
+                            "{}  {change}",
+                            l.text("Pre-gain attenuation", "ゲイン適用前の減衰量")
+                        )))
+                    })
                     .child(
                         div()
                             .text_sm()
@@ -286,39 +303,28 @@ impl Panel {
             .child(
                 card()
                     .gap_2()
-                    .child(heading(
-                        l.text("Noise suppression", "ノイズ抑制"),
-                        "filter.svg",
-                        TERRACOTTA,
-                    ))
-                    .child(methods)
-                    .child(note(match selected {
-                        None => l.text(
-                            "The signal passes through at its original level.",
-                            "入力信号をそのまま通します。",
-                        ),
-                        Some(NoiseMethod::Rnnoise) => l.text(
-                            "For speech with changing background noise.",
-                            "周囲の音が変化する環境での会話向けです。",
-                        ),
-                        Some(NoiseMethod::Spectral) => l.text(
-                            "Adapts to steady sounds such as fans and hum.",
-                            "ファンや空調など、持続する音に合わせて低減します。",
-                        ),
-                    })),
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(heading(
+                                l.text("Noise suppression", "ノイズ抑制"),
+                                "filter.svg",
+                                TERRACOTTA,
+                            ))
+                            .child(methods),
+                    )
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(heading(
+                                l.text("Channels", "チャンネル"),
+                                "arrows-split-2.svg",
+                                TERRACOTTA,
+                            ))
+                            .child(mix),
+                    ),
             )
             .child(signal)
-            .child(
-                card().gap_2().child(
-                    row()
-                        .justify_between()
-                        .child(heading(
-                            l.text("Channels", "チャンネル"),
-                            "arrows-split-2.svg",
-                            TERRACOTTA,
-                        ))
-                        .child(mix),
-                ),
-            )
+            .child(self.monitor(cx))
     }
 }

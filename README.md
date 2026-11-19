@@ -14,9 +14,11 @@ Development builds for the first release carry versions such as `0.1.0-snapshot.
 4. Select the cable's recording device in each game voice client or recorder that should receive the processed signal. Select the physical microphone explicitly in apps such as Discord that should receive the original signal. This setup works with the existing Windows defaults.
 5. In **Mixer**, select **RNNoise** for speech, **Spectral subtraction** for steady background sounds such as fans, or **Off** to bypass suppression. Drag **Output gain** from 0% to 200% or use the arrow keys on the slider. Apps that capture the physical microphone directly keep their original audio.
 
-**Signal history** shows two seconds of peak envelopes before and after suppression on the same dBFS scale. **Pre-gain attenuation** compares the signal energy over the latest half second. It includes any change to speech as well as noise. Pause speaking to measure the background alone. The output reading includes gain, so you can adjust recording volume independently.
+**Signal history** shows two seconds of peak envelopes before and after suppression on the same dBFS scale. Bypass shows only the input trace. Switching filters keeps the timeline running. **Pre-gain attenuation** compares the signal energy over the latest half second. It includes any change to speech as well as noise. Pause speaking to measure the background alone. The output reading includes gain, so you can adjust recording volume independently.
 
-To hear the same processing, select a playback device under **Devices → Headphone monitor**. Use the monitor switch to listen or stop listening. Orvia remembers the selected headphones and reconnects when they return. Mute silences both processed outputs.
+To hear the same processing, select a playback device under **Mixer → Headphone monitor**. Use the monitor switch to listen or stop listening. Orvia remembers the selected headphones and reconnects when they return. Mute in the notification area silences both processed outputs.
+
+Use **Preferences → Audio engine → Restart** to reload the installed engine after an update. This briefly interrupts processed audio.
 
 Use **Preferences → Language** to follow Windows or choose English or Japanese. Closing the window leaves Orvia in the notification area. Its menu opens the mixer, mutes or unmutes the processed outputs, and quits the engine.
 

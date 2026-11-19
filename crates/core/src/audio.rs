@@ -26,8 +26,9 @@ pub enum NoiseMethod {
     /// Speech-oriented recurrent neural network.
     #[default]
     Rnnoise,
-    /// Adaptive per-frequency subtraction for steady background sounds.
-    Spectral,
+    /// WebRTC speech-oriented suppression at the high suppression level.
+    #[serde(rename = "webrtc", alias = "spectral")]
+    WebRtc,
 }
 
 /// Signal envelopes and mean-square energies for one aligned 10 ms block.
@@ -90,7 +91,7 @@ fn levels(frames: &[[f32; 2]; BLOCK]) -> (f32, f32) {
 
 enum Filter {
     Rnnoise(Box<DenoiseState<'static>>),
-    Spectral(Box<crate::spectral::Spectral>),
+    WebRtc(Box<sonora::AudioProcessing>),
 }
 
 /// Stateful block processor for one uninterrupted segment of microphone input.
@@ -116,8 +117,19 @@ impl Processor {
             (0..channels)
                 .map(|_| match settings.noise_method {
                     NoiseMethod::Rnnoise => Filter::Rnnoise(DenoiseState::new()),
-                    NoiseMethod::Spectral => {
-                        Filter::Spectral(Box::new(crate::spectral::Spectral::new()))
+                    NoiseMethod::WebRtc => {
+                        let config = sonora::Config {
+                            noise_suppression: Some(sonora::config::NoiseSuppression {
+                                level: sonora::config::NoiseSuppressionLevel::High,
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        };
+                        let apm = sonora::AudioProcessing::builder()
+                            .config(config)
+                            .capture_config(sonora::StreamConfig::new(SAMPLE_RATE, 1))
+                            .build();
+                        Filter::WebRtc(Box::new(apm))
                     }
                 })
                 .collect()
@@ -145,8 +157,8 @@ impl Processor {
     }
 
     /// Process one block and return its output peak and pre-gain filter measurements.
-    /// Both filters use overlapping windows. The input envelope is delayed by one
-    /// block to compare the same interval on both sides of the filter.
+    /// Filtered input envelopes are offset by one 10 ms block to approximate
+    /// the analysis and synthesis delay at the display's block resolution.
     pub fn process_with_levels(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> (f32, BlockLevels) {
         for frame in frames.iter_mut() {
             for sample in frame.iter_mut() {
@@ -172,8 +184,13 @@ impl Processor {
                         *s /= 32768.;
                     }
                 }
-                Filter::Spectral(f) => {
-                    f.process(&std::array::from_fn(|i| frames[i][channel]), &mut output)
+                Filter::WebRtc(f) => {
+                    let input: [f32; BLOCK] = std::array::from_fn(|i| frames[i][channel]);
+                    if f.process_capture_f32(&[&input], &mut [&mut output])
+                        .is_err()
+                    {
+                        output = input;
+                    }
                 }
             }
             for (frame, sample) in frames.iter_mut().zip(output) {
@@ -230,7 +247,7 @@ mod tests {
 
     #[test]
     fn suppression_reduces_stationary_noise() {
-        for method in [NoiseMethod::Rnnoise, NoiseMethod::Spectral] {
+        for method in [NoiseMethod::Rnnoise, NoiseMethod::WebRtc] {
             let mut processor = Processor::new(&Settings {
                 suppress_noise: true,
                 noise_method: method,
@@ -262,10 +279,10 @@ mod tests {
     }
 
     #[test]
-    fn spectral_filter_preserves_the_onset_of_a_new_tone() {
+    fn webrtc_preserves_a_tone_across_mono_outputs() {
         let mut p = Processor::new(&Settings {
             suppress_noise: true,
-            noise_method: NoiseMethod::Spectral,
+            noise_method: NoiseMethod::WebRtc,
             mixing: Mixing::Average,
             ..Default::default()
         });
@@ -279,12 +296,8 @@ mod tests {
         let mut next = tone;
         let (_, levels) = p.process_with_levels(&mut next);
         assert!((levels.before_peak - 0.4).abs() < 1e-5);
-        assert!((levels.after_power - levels.before_power).abs() < 1e-4);
-        assert!(
-            next.iter()
-                .zip(tone)
-                .all(|(a, b)| (a[0] - b[0]).abs() < 1e-4 && a[0] == a[1])
-        );
+        assert!(levels.after_power > levels.before_power * 0.1);
+        assert!(next.iter().all(|[left, right]| left == right));
     }
 
     #[test]

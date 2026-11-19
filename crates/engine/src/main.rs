@@ -76,7 +76,12 @@ fn supervise(dir: &Path) -> Result<()> {
                 && previous.as_ref().map(Settings::active_noise_method)
                     != Some(new.active_noise_method())
             {
-                log.record(EngineEvent::Noise(new.active_noise_method()));
+                log.record(EngineEvent::Noise(new.active_noise_method().map(
+                    |method| match method {
+                        orvia_core::NoiseMethod::Rnnoise => "rnnoise".into(),
+                        orvia_core::NoiseMethod::WebRtc => "webrtc".into(),
+                    },
+                )));
             }
             previous = settings.as_ref().ok().cloned();
         }

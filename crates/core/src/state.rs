@@ -215,7 +215,7 @@ mod tests {
         };
         assert!(bypass.same_signal_path(&filtered));
         let first = filtered.clone();
-        filtered.noise_method = crate::NoiseMethod::Spectral;
+        filtered.noise_method = crate::NoiseMethod::WebRtc;
         assert!(first.same_signal_path(&filtered));
         assert_ne!(first.active_noise_method(), filtered.active_noise_method());
         assert!(filtered.same_signal_path(&bypass));
@@ -229,6 +229,16 @@ mod tests {
             assert!(settings.suppress_noise);
             assert_eq!(settings.noise_method, crate::NoiseMethod::Rnnoise);
         }
+    }
+
+    #[test]
+    fn a_saved_spectral_selection_uses_webrtc() {
+        let saved: Settings =
+            serde_json::from_str(r#"{"noise_method":"spectral","suppress_noise":true}"#).unwrap();
+        assert_eq!(
+            saved.active_noise_method(),
+            Some(crate::NoiseMethod::WebRtc)
+        );
     }
 
     #[test]

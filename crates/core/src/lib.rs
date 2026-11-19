@@ -12,7 +12,6 @@
 
 mod audio;
 mod events;
-mod spectral;
 mod state;
 
 pub use audio::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, SignalHistory};

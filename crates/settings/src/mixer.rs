@@ -182,11 +182,7 @@ impl Panel {
         for (id, label, method) in [
             ("bypass", l.text("Off", "オフ"), None),
             ("rnnoise", "RNNoise", Some(NoiseMethod::Rnnoise)),
-            (
-                "spectral",
-                l.text("Spectral subtraction", "スペクトル減算"),
-                Some(NoiseMethod::Spectral),
-            ),
+            ("webrtc", "WebRTC", Some(NoiseMethod::WebRtc)),
         ] {
             methods = methods.child(self.button(
                 id,

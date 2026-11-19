@@ -1,5 +1,5 @@
 //! Log-file observation and localized descriptions for the preferences viewer.
-use orvia_core::{ENGINE_LOG, EngineEvent, Language, LogEntry, NoiseMethod, read_json};
+use orvia_core::{ENGINE_LOG, EngineEvent, Language, LogEntry, read_json};
 use std::{fs, io, path::Path, time::SystemTime};
 
 #[derive(Default)]
@@ -58,10 +58,12 @@ pub(super) fn description(event: &EngineEvent, l: Language) -> String {
             l.text("Audio route unavailable", "音声経路を開けません")
         ),
         EngineEvent::Noise(method) => {
-            let name = match method {
+            let name = match method.as_deref() {
                 None => l.text("Off", "オフ"),
-                Some(NoiseMethod::Rnnoise) => "RNNoise",
-                Some(NoiseMethod::Spectral) => l.text("Spectral subtraction", "スペクトル減算"),
+                Some("rnnoise") => "RNNoise",
+                Some("webrtc") => "WebRTC",
+                Some("spectral") => l.text("Spectral subtraction", "スペクトル減算"),
+                Some(other) => other,
             };
             format!("{} · {name}", l.text("Noise suppression", "ノイズ抑制"))
         }

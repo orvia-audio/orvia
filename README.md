@@ -12,7 +12,7 @@ Development builds for the first release carry versions such as `0.1.0-snapshot.
 2. Install `Orvia-<version>-windows-x64.msi`, then open **Orvia** from Start.
 3. Open **Devices**. Under **Microphone input**, select your physical microphone. Under **Virtual microphone output**, select the cable's playback device. For a stereo interface with a microphone on only one channel, choose **Mono** in the **Mixer** to send the average of both channels to both sides.
 4. Select the cable's recording device in each game voice client or recorder that should receive the processed signal. Select the physical microphone explicitly in apps such as Discord that should receive the original signal. This setup works with the existing Windows defaults.
-5. In **Mixer**, select **RNNoise** for speech, **Spectral subtraction** for steady background sounds such as fans, or **Off** to bypass suppression. Drag **Output gain** from 0% to 200% or use the arrow keys on the slider. Apps that capture the physical microphone directly keep their original audio.
+5. In **Mixer**, choose **RNNoise**, **WebRTC**, or **Off**. WebRTC uses Sonora’s noise suppressor at its High setting. Both filters run locally. Drag **Output gain** from 0% to 200% or use the arrow keys on the slider. Apps that capture the physical microphone directly keep their original audio.
 
 **Signal history** shows two seconds of peak envelopes before and after suppression on the same dBFS scale. Bypass shows only the input trace. Switching filters keeps the timeline running. **Pre-gain attenuation** compares the signal energy over the latest half second. It includes any change to speech as well as noise. Pause speaking to measure the background alone. The output reading includes gain, so you can adjust recording volume independently.
 
@@ -48,6 +48,6 @@ The input diagnostic lists device names and formats without opening an audio str
 - [Driver source](driver/) exposes the capture and render pins under one stable device identity.
 - [Contributing](CONTRIBUTING.md) covers API documentation, review and UI conventions.
 
-The Rust application and installer use the [MIT License](LICENSE). The optional [lab driver](driver/README.md) uses the [Microsoft Public License](driver/LICENSE). Packaging generates notices for the Windows dependency graph, including GPUI and the embedded denoiser.
+The Rust application and installer use the [MIT License](LICENSE). The optional [lab driver](driver/README.md) uses the [Microsoft Public License](driver/LICENSE). Packaging generates notices for the Windows dependency graph, including GPUI, RNNoise and [Sonora](https://github.com/dignifiedquire/sonora).
 
 The interface uses outline SVGs from [Tabler Icons v3.52.0](https://github.com/tabler/tabler-icons/tree/v3.52.0/icons/outline) under the [MIT License](assets/tabler/LICENSE).

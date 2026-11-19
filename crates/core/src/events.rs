@@ -27,8 +27,9 @@ pub enum EngineEvent {
     Reconnecting,
     /// An error prevented routing. The message includes its underlying cause.
     RouteError(String),
-    /// The user selected a noise filter or bypass.
-    Noise(Option<crate::NoiseMethod>),
+    /// Filter identifier at the time of the event, or bypass. Historical entries
+    /// can name a filter that is no longer available.
+    Noise(Option<String>),
     /// The headphone stream opened or closed.
     Monitoring(bool),
     /// Headphone playback failed independently of the main output.

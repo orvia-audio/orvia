@@ -22,6 +22,7 @@ use std::{
 
 /// Maximum length of a microphone test clip.
 pub const LIMIT: Duration = Duration::from_secs(10);
+const RECORDING_FILE: &str = "recording.wav";
 type Frame = [f32; 2];
 
 fn is_test_source(device: &Device) -> bool {
@@ -169,6 +170,42 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Store the current take in the microphone test directory, creating it if necessary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the directory cannot be created or the WAV cannot be saved.
+    pub fn save_latest(&self, dir: &Path) -> Result<()> {
+        std::fs::create_dir_all(dir)?;
+        self.save(&dir.join(RECORDING_FILE))
+    }
+
+    /// Load the current take, or the newest before/after recording from an earlier version.
+    ///
+    /// Returns `None` when the user has never recorded a microphone test.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the saved recording cannot be located or decoded.
+    pub fn load_latest(dir: &Path) -> Result<Option<Self>> {
+        let current = dir.join(RECORDING_FILE);
+        if current.try_exists()? {
+            return Self::load(&current).map(Some);
+        }
+        let mut previous = Vec::new();
+        for name in ["before.wav", "after.wav"] {
+            let path = dir.join(name);
+            if path.try_exists()? {
+                previous.push((path.metadata()?.modified()?, path));
+            }
+        }
+        previous
+            .into_iter()
+            .max_by_key(|(time, _)| *time)
+            .map(|(_, path)| Self::load(&path))
+            .transpose()
+    }
+
     /// Atomically save a stereo float WAV. A failed retake preserves the previous file.
     ///
     /// # Errors
@@ -339,7 +376,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn saved_comparisons_survive_reopening_and_retaking_one_clip() {
+    fn retaking_preserves_older_recordings_and_reopens_the_current_take() {
         let dir = tempfile::tempdir().unwrap();
         let before = dir.path().join("before.wav");
         let after = dir.path().join("after.wav");
@@ -347,14 +384,39 @@ mod tests {
             frames: Arc::from([[0.4, 0.3], [0., 0.]]),
             rate: 44_100,
         };
+        assert!(Clip::load_latest(dir.path()).unwrap().is_none());
         clip.save(&before).unwrap();
-        clip.save(&after).unwrap();
+        assert_eq!(
+            Clip::load_latest(dir.path()).unwrap().unwrap().frames,
+            clip.frames
+        );
         clip.frames = Arc::from([[0.125, -0.125]]);
         clip.save(&after).unwrap();
+        assert_eq!(
+            Clip::load_latest(dir.path()).unwrap().unwrap().frames,
+            clip.frames
+        );
+        std::fs::File::options()
+            .write(true)
+            .open(&after)
+            .unwrap()
+            .set_modified(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap();
         let original = Clip::load(&before).unwrap();
         assert_eq!(original.rate, 44_100);
-        assert_eq!(&*original.frames, &[[0.4, 0.3], [0., 0.]]);
-        assert_eq!(Clip::load(&after).unwrap().frames, clip.frames);
+        assert_eq!(
+            Clip::load_latest(dir.path()).unwrap().unwrap().frames,
+            original.frames
+        );
+        let previous = clip.frames.clone();
+        clip.frames = Arc::from([[0.7, -0.7]]);
+        clip.save_latest(dir.path()).unwrap();
+        assert_eq!(
+            Clip::load_latest(dir.path()).unwrap().unwrap().frames,
+            clip.frames
+        );
+        assert_eq!(Clip::load(&before).unwrap().frames, original.frames);
+        assert_eq!(Clip::load(&after).unwrap().frames, previous);
     }
 
     #[test]

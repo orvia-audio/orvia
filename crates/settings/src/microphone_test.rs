@@ -24,25 +24,8 @@ impl TestAction {
     }
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-pub(super) enum Take {
-    #[default]
-    Before,
-    After,
-}
-
-impl Take {
-    fn path(self, dir: &Path) -> PathBuf {
-        dir.join("mic-test").join(match self {
-            Self::Before => "before.wav",
-            Self::After => "after.wav",
-        })
-    }
-}
-
 #[derive(Default)]
 pub(super) struct MicTest {
-    pub(super) take: Take,
     pub(super) sources: Vec<(String, String)>,
     pub(super) source: Option<String>,
     pub(super) speaker: Option<String>,
@@ -72,23 +55,6 @@ impl MicTest {
 }
 
 impl Panel {
-    pub(super) fn select_take(&mut self, take: Take) {
-        if self.test.busy() {
-            return;
-        }
-        self.test.take = take;
-        self.test.clip = None;
-        let path = take.path(&self.dir);
-        match path.try_exists() {
-            Ok(false) => {}
-            Ok(true) => match Clip::load(&path) {
-                Ok(clip) => self.test.clip = Some(clip),
-                Err(error) => self.test_error(error),
-            },
-            Err(error) => self.test_error(error),
-        }
-    }
-
     pub(super) fn open_mic_test(&mut self) {
         match mic_test::sources() {
             Ok(sources) => self.test.sources = sources,
@@ -117,11 +83,10 @@ impl Panel {
             })
             .map(|(id, _)| id.clone());
         self.test.speaker = self.prefs.monitor.clone();
-        self.select_take(if Take::Before.path(&self.dir).is_file() {
-            Take::After
-        } else {
-            Take::Before
-        });
+        match Clip::load_latest(&self.dir.join("mic-test")) {
+            Ok(clip) => self.test.clip = clip,
+            Err(error) => self.test_error(error),
+        }
     }
 
     pub(super) fn test_action_enabled(&self, action: TestAction) -> bool {
@@ -162,10 +127,8 @@ impl Panel {
             return;
         };
         self.test.recording_route = None;
-        let path = self.test.take.path(&self.dir);
         let result = recording.finish().and_then(|clip| {
-            fs::create_dir_all(self.dir.join("mic-test"))?;
-            clip.save(&path)?;
+            clip.save_latest(&self.dir.join("mic-test"))?;
             Ok(clip)
         });
         match result {

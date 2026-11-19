@@ -53,7 +53,6 @@ enum Control {
     Mix(Mixing),
     Noise(Option<NoiseMethod>),
     Test(TestAction),
-    TestTake(microphone_test::Take),
     RestartEngine,
     DismissError,
     Gain(u16),
@@ -293,7 +292,6 @@ impl Panel {
                 self.choosing = None;
             }
             Control::Test(action) => self.run_test_action(action),
-            Control::TestTake(take) => self.select_take(take),
             Control::RestartEngine if !self.restarting => {
                 self.restarting = true;
                 self.error.clear();

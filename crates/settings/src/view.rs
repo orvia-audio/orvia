@@ -56,7 +56,6 @@ impl Panel {
             || (matches!(control, Control::CheckUpdate) && self.updates.checking)
             || match control {
                 Control::Test(action) => !self.test_action_enabled(action),
-                Control::TestTake(_) => self.test.busy(),
                 Control::Choose(Endpoint::TestSpeaker | Endpoint::TestSource) => self.test.busy(),
                 _ => false,
             };
@@ -278,7 +277,6 @@ impl Panel {
     }
 
     fn mic_test_page(&self, cx: &mut Context<Self>) -> gpui::Div {
-        use microphone_test::Take;
         let l = self.prefs.language;
         let recording = self.test.recording.as_ref();
         let action = self.test.primary_action();
@@ -294,30 +292,13 @@ impl Panel {
             _ => self.state_label(),
         };
         stack()
-            .child(
-                row()
-                    .child(self.button(
-                        "test-before",
-                        l.text("Before update", "更新前"),
-                        self.test.take == Take::Before,
-                        Control::TestTake(Take::Before),
-                        cx,
-                    ))
-                    .child(self.button(
-                        "test-after",
-                        l.text("After update", "更新後"),
-                        self.test.take == Take::After,
-                        Control::TestTake(Take::After),
-                        cx,
-                    ))
-                    .when_some(self.status.as_ref(), |d, s| {
-                        d.child(note(format!(
-                            "{} v{}",
-                            l.text("Running engine", "稼働中のエンジン"),
-                            s.version
-                        )))
-                    }),
-            )
+            .child(div().h(px(20.)).when_some(self.status.as_ref(), |d, s| {
+                d.child(note(format!(
+                    "{} v{}",
+                    l.text("Running engine", "稼働中のエンジン"),
+                    s.version
+                )))
+            }))
             .child(
                 card()
                     .child(

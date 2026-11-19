@@ -119,7 +119,7 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     wait_for(recording, "The primary button did not start recording")
     time.sleep(1)
     run("xdotool", "key", "Return")
-    take = state / "mic-test" / "before.wav"
+    take = state / "mic-test" / "recording.wav"
     wait_for(take.is_file, "Stopping the recording did not save a take")
     first = take.read_bytes()
     run("xdotool", "key", "Return")

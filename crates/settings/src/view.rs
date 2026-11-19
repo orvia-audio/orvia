@@ -4,6 +4,8 @@ use crate::icons::glyph;
 
 #[path = "mixer.rs"]
 mod mixer;
+#[path = "picker.rs"]
+mod picker;
 
 const INK: u32 = 0x242a2b;
 const MUTED: u32 = 0x575f61;
@@ -60,10 +62,13 @@ impl Panel {
         let trailing = match &control {
             Control::Choose(_) if selected => Some("chevron-up.svg"),
             Control::Choose(_) => Some("chevron-down.svg"),
-            Control::Select(_, _) if selected => Some("check.svg"),
             _ => None,
         };
-        let wide = matches!(&control, Control::Choose(_) | Control::Select(_, _));
+        let trigger = match control {
+            Control::Choose(side) => Some(side),
+            _ => None,
+        };
+        let wide = trigger.is_some();
         div()
             .id(id.into())
             .flex()
@@ -71,6 +76,9 @@ impl Panel {
             .gap_2()
             .when(wide, |d| d.w_full())
             .tab_index(0)
+            .when_some(trigger, |d, side| {
+                d.track_focus(&self.picker_anchors[side as usize].focus)
+            })
             .px_3()
             .py_1p5()
             .rounded_md()
@@ -81,8 +89,17 @@ impl Panel {
             .border_color(rgb(if selected { 0xda9070 } else { LINE }))
             .bg(rgb(if selected { 0xffddca } else { 0xfaf9f6 }))
             .hover(|s| s.bg(rgb(0xffe4d7)))
-            .focus(|s| s.border_2().border_color(rgb(0x215d91)))
-            .on_click(cx.listener(move |p, _, _, cx| p.activate(control.clone(), cx)))
+            .focus(|s| s.border_color(rgb(0x215d91)))
+            .on_click(cx.listener(move |p, event, w, cx| {
+                if let Some(side) = trigger {
+                    w.focus(&p.picker_anchors[side as usize].focus);
+                    if p.choosing == Some(side) && matches!(event, gpui::ClickEvent::Keyboard(_)) {
+                        p.confirm_picker(side, w, cx);
+                        return;
+                    }
+                }
+                p.activate(control.clone(), cx);
+            }))
             .when_some(leading, |d, icon| d.child(glyph(icon, 16., INK)))
             .child(
                 div()
@@ -114,7 +131,12 @@ impl Panel {
             .border_color(rgb(0xffffff))
             .hover(|s| s.bg(rgb(PAPER)))
             .focus(|s| s.border_color(rgb(0x215d91)))
-            .on_click(cx.listener(move |p, _, _, cx| p.activate(control.clone(), cx)))
+            .on_click(cx.listener(move |p, _, w, cx| {
+                p.activate(control.clone(), cx);
+                if let Some(side) = p.choosing {
+                    w.focus(&p.picker_anchors[side as usize].focus);
+                }
+            }))
             .child(
                 div()
                     .w(px(36.))
@@ -198,56 +220,6 @@ impl Panel {
                 )
             },
         )
-    }
-
-    fn picker(&self, side: Endpoint, cx: &mut Context<Self>) -> impl IntoElement {
-        let l = self.prefs.language;
-        let (id, list, selected) = match side {
-            Endpoint::Input => ("input", &self.inputs, &self.prefs.input),
-            Endpoint::Output => ("output", &self.outputs, &self.prefs.output),
-            Endpoint::Monitor => ("headphones", &self.monitors, &self.prefs.monitor),
-        };
-        let open = self.choosing == Some(side);
-        let mut view = stack().gap_1().child(self.button(
-            id,
-            self.device_name(side),
-            open,
-            Control::Choose(side),
-            cx,
-        ));
-        if open {
-            if side == Endpoint::Input {
-                view = view.child(self.button(
-                    "default-input",
-                    l.text("Windows default microphone", "Windows の既定のマイク"),
-                    selected.is_none(),
-                    Control::Select(side, None),
-                    cx,
-                ));
-            }
-            if list.is_empty() {
-                view = view.child(note(match side {
-                    Endpoint::Output => l.text(
-                        "Install a supported virtual cable, then reopen the list.",
-                        "対応する仮想ケーブルを導入して一覧を開き直してください。",
-                    ),
-                    _ => l.text(
-                        "Connect a device and reopen the list.",
-                        "デバイスを接続して一覧を開き直してください。",
-                    ),
-                }));
-            }
-            for (id, name) in list {
-                view = view.child(self.button(
-                    id.clone(),
-                    name.clone(),
-                    selected.as_ref() == Some(id),
-                    Control::Select(side, Some(id.clone())),
-                    cx,
-                ));
-            }
-        }
-        view
     }
 
     fn state_label(&self) -> &'static str {
@@ -409,7 +381,7 @@ impl Panel {
 }
 
 impl Render for Panel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let l = self.prefs.language;
         let (title, content) = match self.page {
             Page::Mixer => (l.text("Mixer", "ミキサー"), self.mixer(cx)),
@@ -447,8 +419,18 @@ impl Render for Panel {
                     }
                 }),
             )
-            .on_action(|_: &NextControl, w, _| w.focus_next())
-            .on_action(|_: &PreviousControl, w, _| w.focus_prev())
+            .on_key_down(cx.listener(Self::picker_key))
+            .on_action(cx.listener(|p, _: &NextControl, w, cx| {
+                p.choosing = None;
+                w.focus_next();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|p, _: &PreviousControl, w, cx| {
+                p.choosing = None;
+                w.focus_prev();
+                cx.notify();
+            }))
+            .relative()
             .size_full()
             .font_family("Segoe UI")
             .text_color(rgb(INK))
@@ -499,6 +481,11 @@ impl Render for Panel {
                     .h_full()
                     .min_w_0()
                     .overflow_y_scroll()
+                    .on_scroll_wheel(cx.listener(|p, _, _, cx| {
+                        if p.choosing.take().is_some() {
+                            cx.notify();
+                        }
+                    }))
                     .child(
                         stack()
                             .p_5()
@@ -531,5 +518,8 @@ impl Render for Panel {
                             }),
                     ),
             )
+            .when_some(self.choosing, |workspace, side| {
+                workspace.child(self.picker_menu(side, window, cx))
+            })
     }
 }

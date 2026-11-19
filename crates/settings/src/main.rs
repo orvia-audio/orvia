@@ -54,7 +54,16 @@ enum Control {
     Releases,
 }
 
+/// Geometry and keyboard focus of a device selector in the scrolling page.
+struct PickerAnchor {
+    bounds: std::rc::Rc<std::cell::Cell<Bounds<gpui::Pixels>>>,
+    focus: FocusHandle,
+}
+
 struct Panel {
+    picker_anchors: [PickerAnchor; 3],
+    picker_cursor: usize,
+    picker_scroll: gpui::ScrollHandle,
     dir: PathBuf,
     root: FocusHandle,
     gain_focus: FocusHandle,
@@ -145,6 +154,12 @@ impl Panel {
             dir,
             root,
             gain_focus: cx.focus_handle().tab_stop(true),
+            picker_anchors: std::array::from_fn(|_| PickerAnchor {
+                bounds: Default::default(),
+                focus: cx.focus_handle().tab_stop(true),
+            }),
+            picker_cursor: 0,
+            picker_scroll: gpui::ScrollHandle::new(),
             gain_bounds: Default::default(),
             dragging_gain: false,
             prefs,
@@ -186,6 +201,7 @@ impl Panel {
                         Ok(devices) => *list = devices,
                         Err(e) => self.error = e.to_string(),
                     }
+                    self.reset_picker_cursor(side);
                 }
             }
             Control::CheckUpdate if !self.checking => {

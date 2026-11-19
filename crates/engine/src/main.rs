@@ -11,7 +11,9 @@ mod tray;
 
 use anyhow::Result;
 use fs2::FileExt;
-use orvia_core::{EngineEvent, EngineStatus, Settings, data_dir, write_json};
+use orvia_core::{
+    AUDITION_FILE, Audition, EngineEvent, EngineStatus, Settings, data_dir, read_json, write_json,
+};
 use std::{
     fs, io,
     path::Path,
@@ -88,6 +90,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
             }
             previous = settings.as_ref().ok().cloned();
         }
+        let mut audition = None;
         match settings {
             Err(e) => {
                 running = None;
@@ -97,7 +100,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     message = error;
                 }
             }
-            Ok(s) => {
+            Ok(mut s) => {
                 let default_changed = if s.input.is_none()
                     && last_default_check.elapsed() >= Duration::from_secs(2)
                 {
@@ -131,7 +134,16 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     }
                 }
                 if let Some(route) = &mut running {
+                    let request = read_json::<Audition>(&dir.join(AUDITION_FILE))
+                        .ok()
+                        .filter(|r| r.active(&s, SystemTime::now()));
+                    if let Some(r) = &request {
+                        s.deep_filter_limit_db = r.limit_db;
+                    }
                     route.update_controls(&s);
+                    audition = request
+                        .filter(|r| route.applied_limit() == r.limit_db)
+                        .map(|r| r.started);
                 }
             }
         }
@@ -165,6 +177,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     .unwrap_or_default(),
                 monitoring: last_monitor.0,
                 monitor_error: last_monitor.1.clone(),
+                audition,
                 observed: SystemTime::now(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 message: message.clone(),

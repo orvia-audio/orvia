@@ -49,6 +49,8 @@ pub struct Settings {
     /// Stable audio playback ID of the selected virtual cable. When absent,
     /// Windows can fall back to the Orvia lab adapter.
     pub output: Option<String>,
+    /// Capture endpoint paired with the virtual output. An absent ID enables automatic matching.
+    pub receiver: Option<String>,
     /// Stable ID of the physical playback device for monitoring processed audio.
     pub monitor: Option<String>,
     /// Enable headphone monitoring. An explicit device is always required.
@@ -75,6 +77,7 @@ impl Default for Settings {
         Self {
             input: None,
             output: None,
+            receiver: None,
             monitor: None,
             monitor_enabled: false,
             language: Language::System,
@@ -85,6 +88,31 @@ impl Default for Settings {
             deep_filter_limit_db: Self::UNLIMITED_ATTENUATION_DB,
             gain_percent: 100,
         }
+    }
+}
+
+/// File shared by the mixer and engine for a single bounded live audition.
+pub const AUDITION_FILE: &str = "suppression-audition.json";
+
+/// Temporary live suppression settings. The engine checks the expiry even if the mixer exits.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Audition {
+    /// Timestamp identifying this request in the engine acknowledgement.
+    pub started: std::time::SystemTime,
+    /// Persistent route and settings at the time of the original recording.
+    pub baseline: Settings,
+    /// Suggested limit to hear on the receiving endpoint.
+    pub limit_db: u16,
+}
+
+impl Audition {
+    /// Return whether this request still belongs to the current mix and recording window.
+    pub fn active(&self, settings: &Settings, now: std::time::SystemTime) -> bool {
+        self.baseline.same_audition(settings)
+            && self.limit_db <= Settings::UNLIMITED_ATTENUATION_DB
+            && now
+                .duration_since(self.started)
+                .is_ok_and(|age| age < std::time::Duration::from_secs(14))
     }
 }
 
@@ -101,6 +129,9 @@ pub struct EngineStatus {
     /// A device diagnostic for the monitor, independent of the primary route.
     #[serde(default)]
     pub monitor_error: Option<String>,
+    /// Start time of the temporary suppression audition acknowledged on this route.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audition: Option<SystemTime>,
     /// Observation time used by the UI to detect a stalled engine.
     pub observed: SystemTime,
     /// Engine package version, independent of the driver transport version.
@@ -171,6 +202,17 @@ impl Settings {
     /// DeepFilterNet3's sentinel for unrestricted attenuation, also the legacy default.
     pub const UNLIMITED_ATTENUATION_DB: u16 = 100;
 
+    /// Whether the same microphone recording and suppression audition remain applicable.
+    pub fn same_audition(&self, other: &Self) -> bool {
+        self.same_signal_path(other)
+            && self.receiver == other.receiver
+            && self.mixing == other.mixing
+            && self.gain_percent == other.gain_percent
+            && self.deep_filter_limit_db == other.deep_filter_limit_db
+            && self.active_noise_method() == Some(crate::NoiseMethod::DeepFilterNet3)
+            && other.active_noise_method() == self.active_noise_method()
+    }
+
     /// Whether the open audio streams can be reused. Processing controls are
     /// applied at a block boundary without clearing the signal history.
     pub fn same_signal_path(&self, other: &Self) -> bool {
@@ -216,6 +258,30 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn auditions_expire_and_only_apply_to_the_recorded_mix() {
+        let now = SystemTime::now();
+        let request = Audition {
+            started: now,
+            baseline: Settings::default(),
+            limit_db: 6,
+        };
+        let settings = &request.baseline;
+        assert!(request.active(settings, now));
+        assert!(!request.active(settings, now + std::time::Duration::from_secs(14)));
+        assert!(!request.active(settings, now - std::time::Duration::from_secs(1)));
+        let changed = Settings {
+            output: Some("other-cable".into()),
+            ..settings.clone()
+        };
+        assert!(!request.active(&changed, now));
+        let changed = Settings {
+            deep_filter_limit_db: 3,
+            ..settings.clone()
+        };
+        assert!(!request.active(&changed, now));
+    }
+
     #[test]
     fn monitoring_and_language_changes_preserve_the_live_route() {
         let original = Settings::default();

@@ -84,3 +84,39 @@ pub fn config(device: &Device, port: Port) -> Result<SupportedStreamConfig> {
             )
         })
 }
+
+/// Convert the capture clock to the model's fixed rate. Integer phase persists
+/// between callbacks, including across partial 10 ms blocks.
+pub struct InputRate {
+    rate: u32,
+    phase: u32,
+    previous: Option<[f32; 2]>,
+}
+
+impl InputRate {
+    /// Begin converting a stream at the incoming sample rate.
+    pub fn new(rate: u32) -> Self {
+        Self {
+            rate,
+            phase: 0,
+            previous: None,
+        }
+    }
+
+    /// Emit the 48 kHz samples covered by one incoming stereo frame.
+    pub fn push(&mut self, frame: [f32; 2], mut emit: impl FnMut([f32; 2])) {
+        if self.rate == SAMPLE_RATE {
+            emit(frame);
+            return;
+        }
+        let previous = self.previous.replace(frame).unwrap_or(frame);
+        while self.phase < SAMPLE_RATE {
+            let ratio = self.phase as f32 / SAMPLE_RATE as f32;
+            emit(std::array::from_fn(|c| {
+                previous[c] + (frame[c] - previous[c]) * ratio
+            }));
+            self.phase += self.rate;
+        }
+        self.phase -= SAMPLE_RATE;
+    }
+}

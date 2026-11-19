@@ -6,14 +6,14 @@ use cpal::{
 };
 use orvia_core::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings};
 use orvia_engine::{
-    formats::{Port, config, stream_config, stream_continues},
+    formats::{InputRate, Port, config, stream_config, stream_continues},
     host, is_virtual_cable, label,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     collections::VecDeque,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering::Relaxed},
     },
     time::{Duration, Instant},
@@ -21,26 +21,17 @@ use std::{
 
 type Frame = [f32; 2];
 type TimedFrame = (Frame, u64);
-type MonitorFeed = Arc<Mutex<Option<Producer<TimedFrame>>>>;
-
-fn forward_monitor(feed: &MonitorFeed, block: &[Frame; BLOCK], stamp: u64) {
-    // A disconnected or slow monitor must never hold up the virtual microphone.
-    if let Ok(mut guard) = feed.try_lock()
-        && let Some(dest) = guard.as_mut()
-    {
-        for &frame in block {
-            if dest.push((frame, stamp)).is_err() {
-                break;
-            }
-        }
-    }
+struct MonitorStreams {
+    _source: Stream,
+    _headphones: Stream,
+    counters: Arc<Counters>,
 }
 
 #[derive(Default)]
 struct Monitor {
-    feed: MonitorFeed,
-    stream: Option<(Stream, Arc<Counters>)>,
+    stream: Option<MonitorStreams>,
     id: Option<String>,
+    receiver: Option<String>,
     attempted: Option<Instant>,
     error: Option<String>,
 }
@@ -58,12 +49,14 @@ struct Counters {
 pub(super) struct Route {
     gain: Arc<AtomicU16>,
     deep_filter_limit: Arc<AtomicU16>,
+    applied_limit: Arc<AtomicU16>,
     processing: (Mixing, Option<NoiseMethod>),
     replacements: Producer<Processor>,
     retired: Consumer<Processor>,
     incoming_levels: Consumer<(u64, BlockLevels)>,
     levels: VecDeque<(u64, BlockLevels)>,
     monitor: Monitor,
+    output: Device,
     _streams: (Stream, Stream),
     pub(super) input_id: DeviceId,
     pub(super) name: String,
@@ -78,22 +71,7 @@ pub(super) fn default_input_id() -> Option<DeviceId> {
 impl Route {
     pub(super) fn open(settings: &Settings) -> Result<Self> {
         let host = host()?;
-        let output = match &settings.output {
-            Some(id) => host
-                .device_by_id(&id.parse()?)
-                .context("Selected virtual output is disconnected")?,
-            #[cfg(not(windows))]
-            None => anyhow::bail!("Choose a virtual output in microphone settings"),
-            #[cfg(windows)]
-            None => host
-                .output_devices()?
-                .find(orvia_engine::is_orvia)
-                .context("Choose a virtual output in microphone settings")?,
-        };
-        ensure!(
-            output.description()?.supports_output() && is_virtual_cable(&output),
-            "Select the playback side of a supported virtual cable"
-        );
+        let output = orvia_engine::mic_test::virtual_output(settings.output.as_deref())?;
         let input = match &settings.input {
             Some(id) => host
                 .device_by_id(&id.parse()?)
@@ -118,8 +96,9 @@ impl Route {
         let live_gain = gain.clone();
         let deep_filter_limit = Arc::new(AtomicU16::new(settings.deep_filter_limit_db));
         let live_limit = deep_filter_limit.clone();
+        let applied_limit = Arc::new(AtomicU16::new(u16::MAX));
+        let applied = applied_limit.clone();
         let monitor = Monitor::default();
-        let feed = monitor.feed.clone();
         let mut processor = Processor::new(settings);
         let (replacements, mut next_processor) = RingBuffer::new(1);
         let (mut return_processor, retired) = RingBuffer::new(1);
@@ -147,11 +126,12 @@ impl Route {
                                 let _ = return_processor.push(old);
                             }
                             processor.set_gain(live_gain.load(Relaxed));
-                            processor.set_deep_filter_limit(live_limit.load(Relaxed));
+                            let limit = live_limit.load(Relaxed);
+                            processor.set_deep_filter_limit(limit);
                             let (peak, levels) = processor.process_with_levels(&mut block);
+                            applied.store(limit, Relaxed);
                             let _ = envelope_tx.push((stamp, levels));
                             meter.peak.fetch_max(peak.to_bits(), Relaxed);
-                            forward_monitor(&feed, &block, stamp);
                             for frame in block {
                                 if tx.push((frame, stamp)).is_err() {
                                     meter.dropped.fetch_add(1, Relaxed);
@@ -178,18 +158,24 @@ impl Route {
         Ok(Self {
             gain,
             deep_filter_limit,
+            applied_limit,
             processing: (settings.mixing, settings.active_noise_method()),
             replacements,
             retired,
             incoming_levels,
             levels: VecDeque::with_capacity(200),
             monitor,
+            output,
             _streams: (input_stream, output_stream),
             counters,
             input_id,
             name,
             start,
         })
+    }
+
+    pub(super) fn applied_limit(&self) -> u16 {
+        self.applied_limit.load(Relaxed)
     }
 
     pub(super) fn healthy(&self) -> bool {
@@ -237,20 +223,24 @@ impl Route {
             .monitor
             .as_ref()
             .filter(|_| settings.monitor_enabled);
-        if self.monitor.id.as_ref() != wanted {
-            self.monitor.detach();
+        if self.monitor.id.as_ref() != wanted || self.monitor.receiver != settings.receiver {
+            self.monitor.stream = None;
             self.monitor.id = wanted.cloned();
+            self.monitor.receiver = settings.receiver.clone();
             self.monitor.attempted = None;
             self.monitor.error = None;
         }
         let Some(id) = wanted else { return };
-        if let Some((_, meter)) = &self.monitor.stream {
+        if let Some(streams) = &self.monitor.stream {
+            let meter = &streams.counters;
             let age = (self.start.elapsed().as_millis() as u64)
                 .saturating_sub(meter.played_ms.load(Relaxed));
-            if !meter.failed.load(Relaxed) && age < 2000 {
+            let input_age = (self.start.elapsed().as_millis() as u64)
+                .saturating_sub(meter.captured_ms.load(Relaxed));
+            if !meter.failed.load(Relaxed) && age < 2000 && input_age < 2000 {
                 return;
             }
-            self.monitor.detach();
+            self.monitor.stream = None;
         }
         if self
             .monitor
@@ -262,7 +252,7 @@ impl Route {
         self.monitor.attempted = Some(Instant::now());
         self.monitor.error = self
             .monitor
-            .connect(id, self.start)
+            .connect(id, &self.output, self.start)
             .err()
             .map(|e| format!("{e:#}"));
     }
@@ -281,14 +271,9 @@ impl Route {
 }
 
 impl Monitor {
-    fn detach(&mut self) {
-        if let Ok(mut feed) = self.feed.lock() {
-            *feed = None;
-        }
-        self.stream = None;
-    }
-
-    fn connect(&mut self, id: &str, start: Instant) -> Result<()> {
+    fn connect(&mut self, id: &str, output: &Device, start: Instant) -> Result<()> {
+        let receiver = orvia_engine::mic_test::receiver(output, self.receiver.as_deref())?;
+        let capture_format = config(&receiver, Port::Recording)?;
         let device = host()?
             .device_by_id(&id.parse()?)
             .context("Headphones disconnected")?;
@@ -302,19 +287,64 @@ impl Monitor {
         meter
             .played_ms
             .store(start.elapsed().as_millis() as u64, Relaxed);
+        meter
+            .captured_ms
+            .store(start.elapsed().as_millis() as u64, Relaxed);
+        let source = match capture_format.sample_format() {
+            SampleFormat::F32 => {
+                monitor_capture::<f32>(&receiver, &capture_format, tx, start, &meter)
+            }
+            SampleFormat::I16 => {
+                monitor_capture::<i16>(&receiver, &capture_format, tx, start, &meter)
+            }
+            sample => return Err(anyhow!("Unsupported recording format: {sample}")),
+        }?;
         let stream = match format.sample_format() {
             SampleFormat::F32 => playback_stream::<f32>(&device, format, rx, start, &meter),
             SampleFormat::I16 => playback_stream::<i16>(&device, format, rx, start, &meter),
             sample => return Err(anyhow!("Unsupported monitor format: {sample}")),
         }?;
+        source.play()?;
         stream.play()?;
-        *self
-            .feed
-            .lock()
-            .map_err(|_| anyhow!("Monitor queue unavailable"))? = Some(tx);
-        self.stream = Some((stream, meter));
+        self.stream = Some(MonitorStreams {
+            _source: source,
+            _headphones: stream,
+            counters: meter,
+        });
         Ok(())
     }
+}
+
+/// Forward samples delivered by the receiving side of the cable to the headphone queue.
+fn monitor_capture<T: SizedSample>(
+    device: &Device,
+    format: &SupportedStreamConfig,
+    mut tx: Producer<TimedFrame>,
+    start: Instant,
+    counters: &Arc<Counters>,
+) -> Result<Stream, cpal::Error>
+where
+    f32: FromSample<T>,
+{
+    let channels = usize::from(format.channels());
+    let mut rate = InputRate::new(format.sample_rate());
+    let meter = counters.clone();
+    device.build_input_stream(
+        stream_config(format),
+        move |data: &[T], _| {
+            let stamp = start.elapsed().as_millis() as u64;
+            meter.captured_ms.store(stamp, Relaxed);
+            for f in data.chunks_exact(channels) {
+                let left = f[0].to_sample();
+                let right = f.get(1).map_or(left, |s| s.to_sample());
+                rate.push([left, right], |frame| {
+                    let _ = tx.push((frame, stamp));
+                });
+            }
+        },
+        on_error(counters),
+        None,
+    )
 }
 
 fn on_error(counters: &Arc<Counters>) -> impl FnMut(cpal::Error) + Send + 'static {
@@ -345,40 +375,6 @@ fn playback_stream<T: SizedSample + FromSample<f32>>(
         on_error(counters),
         None,
     )?)
-}
-
-/// Convert the capture clock to the model's fixed rate. Integer phase persists
-/// between callbacks, including across partial 10 ms blocks.
-struct InputRate {
-    rate: u32,
-    phase: u32,
-    previous: Option<Frame>,
-}
-
-impl InputRate {
-    fn new(rate: u32) -> Self {
-        Self {
-            rate,
-            phase: 0,
-            previous: None,
-        }
-    }
-
-    fn push(&mut self, frame: Frame, mut emit: impl FnMut(Frame)) {
-        if self.rate == SAMPLE_RATE {
-            emit(frame);
-            return;
-        }
-        let previous = self.previous.replace(frame).unwrap_or(frame);
-        while self.phase < SAMPLE_RATE {
-            let ratio = self.phase as f32 / SAMPLE_RATE as f32;
-            emit(std::array::from_fn(|c| {
-                previous[c] + (frame[c] - previous[c]) * ratio
-            }));
-            self.phase += self.rate;
-        }
-        self.phase -= SAMPLE_RATE;
-    }
 }
 
 /// Interpolate between adjacent frames to follow small capture/playback clock
@@ -493,35 +489,6 @@ mod tests {
         }
         callback(cpal::ErrorKind::DeviceNotAvailable.into());
         assert!(counters.failed.load(Relaxed));
-    }
-    #[test]
-    fn headphones_receive_the_processed_block_without_backpressure_on_the_source() {
-        let (tx, mut rx) = RingBuffer::new(BLOCK);
-        let feed = Arc::new(Mutex::new(Some(tx)));
-        let mut frames = [[0.25, -0.25]; BLOCK];
-        Processor::new(&Settings {
-            gain_percent: 200,
-            suppress_noise: false,
-            ..Default::default()
-        })
-        .process(&mut frames);
-        forward_monitor(&feed, &frames, 10);
-        forward_monitor(&feed, &frames, 20);
-        for _ in 0..BLOCK {
-            assert_eq!(rx.pop().unwrap(), ([0.5, -0.5], 10));
-        }
-        let changing_device = feed.lock().unwrap();
-        forward_monitor(&feed, &frames, 30);
-        assert!(rx.pop().is_err());
-        drop(changing_device);
-        Processor::new(&Settings {
-            gain_percent: 0,
-            suppress_noise: false,
-            ..Default::default()
-        })
-        .process(&mut frames);
-        forward_monitor(&feed, &frames, 40);
-        assert_eq!(rx.pop().unwrap(), ([0.0; 2], 40));
     }
     #[test]
     fn renders_48_khz_stereo_processing_to_a_44_1_khz_mono_pcm_cable() {

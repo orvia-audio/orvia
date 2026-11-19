@@ -17,7 +17,9 @@ mod state;
 
 pub use audio::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, SignalHistory};
 pub use events::{ENGINE_LOG, EngineEvent, LogEntry};
-pub use state::{EngineStatus, Language, Settings, data_dir, read_json, write_json};
+pub use state::{
+    AUDITION_FILE, Audition, EngineStatus, Language, Settings, data_dir, read_json, write_json,
+};
 
 /// Adapter friendly name for the stereo, 48 kHz WASAPI transport.
 /// Incompatible wire formats must use a different transport identity.

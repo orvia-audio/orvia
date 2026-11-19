@@ -1,12 +1,16 @@
-//! Short recordings from the receiving side of a virtual microphone.
+//! Bounded microphone recordings with local preview playback.
 use crate::{
-    formats::{Port, config, stream_config, stream_continues},
+    formats::{InputRate, Port, config, stream_config, stream_continues},
     host, is_virtual_cable, label,
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use cpal::{
     Device, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
+};
+use orvia_core::{
+    Mixing, SAMPLE_RATE,
+    calibration::{self, Recommendation, SampleError},
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
@@ -52,6 +56,84 @@ pub fn sources() -> Result<Vec<(String, String)>, cpal::Error> {
         .collect())
 }
 
+/// Open the selected playback side of the cable used by the live mixer.
+///
+/// # Errors
+///
+/// Returns an error if no supported virtual output is available.
+pub fn virtual_output(id: Option<&str>) -> Result<Device> {
+    let host = host()?;
+    let output = match id {
+        Some(id) => host
+            .device_by_id(&id.parse()?)
+            .context("Selected virtual output is disconnected")?,
+        #[cfg(not(windows))]
+        None => anyhow::bail!("Choose a virtual output in microphone settings"),
+        #[cfg(windows)]
+        None => host
+            .output_devices()?
+            .find(crate::is_orvia)
+            .context("Choose a virtual output in microphone settings")?,
+    };
+    ensure!(
+        output.description()?.supports_output() && is_virtual_cable(&output),
+        "Select the playback side of a supported virtual cable"
+    );
+    Ok(output)
+}
+
+/// Resolve the recording side of a virtual output, honoring an explicit pairing.
+/// Automatic matching uses the shared device ID, full endpoint name or packaged Linux pair.
+///
+/// # Errors
+///
+/// Returns an error when the selected receiver is disconnected or the pairing is ambiguous.
+pub fn receiver(output: &Device, selected: Option<&str>) -> Result<Device> {
+    let host = host()?;
+    if let Some(id) = selected {
+        let device = host
+            .device_by_id(&id.parse()?)
+            .context("Virtual microphone disconnected")?;
+        ensure!(
+            device.description()?.supports_input() && is_test_source(&device),
+            "Choose a virtual microphone recording endpoint"
+        );
+        return Ok(device);
+    }
+    let output_id = output.id()?;
+    let name = label(output)?;
+    let mut matches = host
+        .input_devices()?
+        .filter(is_test_source)
+        .filter(|device| {
+            if cfg!(target_os = "linux") && output_id.id() == "orvia_output" {
+                return device.id().is_ok_and(|id| id.id() == "orvia_microphone");
+            }
+            device.id().is_ok_and(|id| id == output_id)
+                || label(device).is_ok_and(|label| label == name)
+        });
+    let found = matches
+        .next()
+        .context("Choose the virtual microphone recording endpoint in Devices")?;
+    ensure!(
+        matches.next().is_none(),
+        "Multiple matching virtual microphones. Select a recording endpoint in Devices"
+    );
+    Ok(found)
+}
+
+/// Return the capture endpoint used by applications receiving this mix.
+///
+/// # Errors
+///
+/// Returns a pairing or device error if either side of the route is unavailable.
+pub fn routed_source(settings: &orvia_core::Settings) -> Result<String> {
+    let output = virtual_output(settings.output.as_deref())?;
+    Ok(receiver(&output, settings.receiver.as_deref())?
+        .id()?
+        .to_string())
+}
+
 fn errors() -> (
     impl FnMut(cpal::Error) + Send + 'static,
     mpsc::Receiver<cpal::Error>,
@@ -67,7 +149,7 @@ fn errors() -> (
     )
 }
 
-/// An active, length-limited virtual microphone recording. Dropping it stops capture.
+/// An active, length-limited microphone recording. Dropping it stops capture.
 pub struct Recording {
     stream: Stream,
     rx: Consumer<Frame>,
@@ -86,13 +168,36 @@ impl Recording {
             .device_by_id(&id.parse()?)
             .context("Virtual microphone disconnected")?;
         ensure!(is_test_source(&device), "Choose a virtual microphone");
-        let format = config(&device, Port::Recording)?;
+        Self::open(&device, Port::Recording)
+    }
+
+    /// Capture the physical input selected in the mixer, using the default when omitted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the input is unavailable, virtual or cannot be opened.
+    pub fn start_microphone(id: Option<&str>) -> Result<Self> {
+        let host = host()?;
+        let device = match id {
+            Some(id) => host.device_by_id(&id.parse()?),
+            None => host.default_input_device(),
+        }
+        .context("Microphone unavailable")?;
+        ensure!(
+            device.description()?.supports_input() && !is_virtual_cable(&device),
+            "Choose a physical microphone"
+        );
+        Self::open(&device, Port::Microphone)
+    }
+
+    fn open(device: &Device, port: Port) -> Result<Self> {
+        let format = config(device, port)?;
         let rate = format.sample_rate();
         let (tx, rx) = RingBuffer::new(rate as usize * LIMIT.as_secs() as usize);
         let (error, errors) = errors();
         let stream = match format.sample_format() {
-            SampleFormat::F32 => capture::<f32>(&device, &format, tx, error),
-            SampleFormat::I16 => capture::<i16>(&device, &format, tx, error),
+            SampleFormat::F32 => capture::<f32>(device, &format, tx, error),
+            SampleFormat::I16 => capture::<i16>(device, &format, tx, error),
             other => return Err(anyhow!("Unsupported recording format: {other}")),
         }?;
         stream.play()?;
@@ -125,7 +230,7 @@ impl Recording {
             return Err(error.into());
         }
         let count = self.rx.slots();
-        ensure!(count > 0, "The virtual microphone returned no audio frames");
+        ensure!(count > 0, "The microphone returned no audio frames");
         let frames = self
             .rx
             .read_chunk(count)?
@@ -170,6 +275,29 @@ pub struct Clip {
 }
 
 impl Clip {
+    /// Estimate a suppression limit from a guided physical microphone take.
+    ///
+    /// Uses the live input rate converter for devices recording below 48 kHz.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sample error when the recording cannot support a recommendation.
+    pub fn recommend(&self, mixing: Mixing) -> Result<Recommendation, SampleError> {
+        let converted;
+        let input = if self.rate == SAMPLE_RATE {
+            &self.frames[..]
+        } else {
+            let mut rate = InputRate::new(self.rate);
+            let mut frames = Vec::with_capacity(SAMPLE_RATE as usize * LIMIT.as_secs() as usize);
+            for &frame in self.frames.iter() {
+                rate.push(frame, |f| frames.push(f));
+            }
+            converted = frames;
+            &converted
+        };
+        calibration::recommend(input, mixing)
+    }
+
     /// Store the current take in the microphone test directory, creating it if necessary.
     ///
     /// # Errors

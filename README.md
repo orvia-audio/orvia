@@ -1,4 +1,4 @@
-# <img src="assets/orvia-wordmark.svg" alt="Orvia" width="560">
+# <img src="assets/orvia-wordmark.svg" alt="Orvia" width="100%">
 
 Orvia is a desktop microphone mixer for Windows, macOS, and Linux. Reduce background noise and adjust gain locally, then choose which apps receive the original mic or the processed mix.
 

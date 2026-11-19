@@ -23,7 +23,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libasound2-dev libdbus-1-dev libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb-xkb-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev libvulkan-dev clang libclang-dev libssl-dev dpkg-dev pipewire-pulse wireplumber pulseaudio-utils
+          sudo apt-get install -y libasound2-dev libdbus-1-dev libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb-xkb-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev libvulkan-dev clang libclang-dev libssl-dev dpkg-dev pipewire-pulse wireplumber pulseaudio-utils xvfb xauth xdotool mesa-vulkan-drivers
       - name: Check native code
         run: |
           cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -33,7 +33,7 @@ jobs:
           case "$(uname -s)-$(uname -m)" in
             Darwin-arm64) target=aarch64-apple-darwin ;;
             Linux-x86_64) target=x86_64-unknown-linux-musl ;;
-            *) cargo install cargo-about --version 0.9.3 --locked; exit ;;
+            *) cargo install cargo-about --version 0.9.3 --features cli --locked; exit ;;
           esac
           name=cargo-about-0.9.3-$target
           url=https://github.com/EmbarkStudios/cargo-about/releases/download/0.9.3/$name.tar.gz
@@ -49,7 +49,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get install -y ./dist/*.deb
-          dbus-run-session -- python3 installer/linux/test-route.py
+          xvfb-run -a dbus-run-session -- python3 installer/linux/test-route.py
       - name: Open the packaged macOS mixer
         if: runner.os == 'macOS'
         run: |

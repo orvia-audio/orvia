@@ -45,6 +45,10 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     wait_for(lambda: Path(tmp, "pulse/native").is_socket(), "Pulse socket unavailable")
     wait_for(lambda: "orvia_microphone" in run("pactl", "list", "short", "sources"),
              "The packaged source was not loaded")
+    for kind, name, description in [("sinks", "orvia_output", "Orvia Output"),
+                                    ("sources", "orvia_microphone", "Orvia Microphone")]:
+        devices = json.loads(run("pactl", "--format=json", "list", kind))
+        assert next(d["description"] for d in devices if d["name"] == name) == description
     run("pactl", "load-module", "module-null-sink", "sink_name=test_input", "rate=48000")
     run("pactl", "load-module", "module-remap-source", "master=test_input.monitor",
         "source_name=test_microphone")
@@ -67,7 +71,7 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
                          "--channels=1", "--rate=48000", stdout=output)
         time.sleep(0.5)
         subprocess.run(["pacat", "-d", "test_input", "--raw", "--format=s16le",
-                        "--channels=1", "--rate=48000"], env=env, input=samples, check=True)
+                        "--channels=1", "--rate=48000"], env=env, input=samples.tobytes(), check=True)
         time.sleep(0.5)
         recorder.send_signal(signal.SIGINT)
         recorder.wait(timeout=5)
@@ -79,6 +83,14 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     amplitude = max((2 * abs(sum(x * w for x, w in zip(captured[n:n+size], wave))) / size
                      for n in range(0, len(captured) - size, size)), default=0)
     assert 3000 < amplitude < 11000, f"Expected a 440 Hz recording, measured {amplitude:.0f}"
+    mixer = start("orvia")
+    def window_visible():
+        return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Orvia$"],
+                              env=env, capture_output=True).returncode == 0
+    wait_for(window_visible, "The installed mixer window did not appear")
+    (state / "close-window").touch()
+    assert mixer.wait(timeout=10) == 0
+    assert engine.poll() is None
     (state / f"stop-engine-{engine.pid}").touch()
     assert engine.wait(timeout=10) == 0
     print(f"Recorded {len(captured)/48000:.2f} seconds, 440 Hz amplitude {amplitude:.0f}.")

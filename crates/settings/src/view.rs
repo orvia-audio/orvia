@@ -535,7 +535,6 @@ impl Render for Panel {
             }))
             .relative()
             .size_full()
-            .font_family("Segoe UI")
             .text_color(rgb(INK))
             .bg(rgb(PAPER))
             .flex()

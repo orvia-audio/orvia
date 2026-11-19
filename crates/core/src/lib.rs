@@ -11,6 +11,7 @@
 //! ~~~
 
 mod audio;
+pub mod calibration;
 mod events;
 mod state;
 

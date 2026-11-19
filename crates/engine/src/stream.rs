@@ -456,9 +456,12 @@ impl Playback {
         now: u64,
         counts: &Counters,
     ) {
-        const TARGET: usize = 2 * BLOCK;
         out.fill(T::EQUILIBRIUM);
         let frame_count = out.len() / self.channels;
+        // Keep three capture blocks in reserve after a complete output callback,
+        // plus the right-hand sample needed by the interpolator.
+        let requested = (frame_count as f64 * self.rate_ratio).ceil() as usize;
+        let target = (requested + 3 * BLOCK + 1).min(self.rx.buffer().capacity());
         if self
             .current
             .is_some_and(|(_, t)| now.saturating_sub(t) > 100)
@@ -477,7 +480,7 @@ impl Playback {
         }
         let buffered = self.rx.slots();
         if self.current.is_none() {
-            if buffered < TARGET {
+            if buffered < target {
                 if self.started {
                     counts.missing.fetch_add(frame_count as u64, Relaxed);
                 }
@@ -487,7 +490,7 @@ impl Playback {
             self.started = true;
         }
         let drift =
-            ((buffered as f64 - TARGET as f64) / (TARGET as f64 * 800.)).clamp(-0.003, 0.003);
+            ((buffered as f64 - target as f64) / (target as f64 * 800.)).clamp(-0.003, 0.003);
         let step = self.rate_ratio * (1. + drift);
         for (idx, frame) in out.chunks_exact_mut(self.channels).enumerate() {
             let (Some((left, _)), Ok((right, _))) = (self.current, self.rx.peek()) else {
@@ -559,14 +562,47 @@ mod tests {
     #[test]
     fn renders_48_khz_stereo_processing_to_a_44_1_khz_mono_pcm_cable() {
         let (mut tx, rx) = RingBuffer::new(3 * BLOCK);
-        for _ in 0..2 * BLOCK {
+        for _ in 0..3 * BLOCK {
             tx.push(([0.25, 0.75], 0)).unwrap();
         }
         let mut playback = Playback::new(rx, 44_100, 1);
         let mut out = [0_i16; 441];
         playback.fill(&mut out, 10, &Counters::default());
         assert_eq!(out, [16_384; 441]);
-        assert!(playback.rx.slots().abs_diff(BLOCK) <= 1);
+        assert!(playback.rx.slots().abs_diff(2 * BLOCK) <= 1);
+    }
+    #[test]
+    fn playback_preserves_speech_and_pauses_across_callback_sizes_and_late_input() {
+        for period in [10, 20, 30] {
+            let (mut tx, rx) = RingBuffer::new(10 * BLOCK);
+            let mut playback = Playback::new(rx, SAMPLE_RATE, 2);
+            let counts = Counters::default();
+            let mut out = vec![0.0_f32; period * 48 * 2];
+            let mut pending = Vec::new();
+            for time in (10..=6_000).step_by(10) {
+                let sample = if (1_000..1_200).contains(&time) {
+                    0.
+                } else {
+                    0.25
+                };
+                pending.extend(std::iter::repeat_n(([sample; 2], time as u64), BLOCK));
+                if !(3_000..3_030).contains(&time) {
+                    for frame in pending.drain(..) {
+                        tx.push(frame).unwrap();
+                    }
+                }
+                if time % period == 0 {
+                    playback.fill(&mut out, time as u64, &counts);
+                    if (1_100..1_200).contains(&time) {
+                        assert!(out.iter().all(|&s| s == 0.));
+                    } else if time > 1_350 {
+                        assert!(out.iter().all(|&s| s == 0.25));
+                    }
+                }
+            }
+            assert_eq!(counts.missing.load(Relaxed), 0);
+            assert_eq!(counts.dropped.load(Relaxed), 0);
+        }
     }
     #[test]
     fn capture_rates_produce_one_second_of_transport_frames() {
@@ -585,7 +621,7 @@ mod tests {
     #[test]
     fn stalled_output_discards_old_audio_and_primes_again() {
         let (mut tx, rx) = RingBuffer::new(3 * BLOCK);
-        for _ in 0..2 * BLOCK {
+        for _ in 0..3 * BLOCK {
             tx.push(([0.75; 2], 0)).unwrap();
         }
         let mut playback = Playback::new(rx, SAMPLE_RATE, 2);
@@ -596,7 +632,7 @@ mod tests {
         playback.fill(&mut out, 120, &counts);
         assert!(out.iter().all(|s| *s == 0.));
         assert!(counts.dropped.load(Relaxed) > 0);
-        for _ in 0..2 * BLOCK {
+        for _ in 0..3 * BLOCK {
             tx.push(([-0.5; 2], 130)).unwrap();
         }
         playback.fill(&mut out, 135, &counts);

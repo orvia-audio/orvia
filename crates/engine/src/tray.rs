@@ -5,15 +5,34 @@ use std::{
     path::Path,
     process::Command,
     sync::mpsc::{self, Receiver},
+    time::{Duration, Instant},
 };
 use tray_item::{IconSource, TrayItem};
 
-pub(super) enum Action {
+pub(super) fn run(dir: &Path) -> Result<()> {
+    let mut tray = Tray::new().ok();
+    let mut attempted = Instant::now();
+    super::supervise(dir, |language| {
+        if tray.is_none() && attempted.elapsed() >= Duration::from_secs(10) {
+            tray = Tray::new().ok();
+            attempted = Instant::now();
+        }
+        if let Some(tray) = &mut tray {
+            if let Some(language) = language {
+                tray.refresh(language);
+            }
+            return matches!(tray.handle(dir), Ok(true));
+        }
+        false
+    })
+}
+
+enum Action {
     Show,
     Quit,
 }
 
-pub(super) struct Tray {
+struct Tray {
     icon: TrayItem,
     ids: [u32; 2],
     language: Option<Language>,
@@ -21,9 +40,20 @@ pub(super) struct Tray {
 }
 
 impl Tray {
-    pub(super) fn new() -> Result<Self> {
+    fn new() -> Result<Self> {
         let (send, events) = mpsc::channel();
-        let mut icon = TrayItem::new("Orvia", IconSource::Resource("ORVIA_ICON"))?;
+        #[cfg(windows)]
+        let image = IconSource::Resource("ORVIA_ICON");
+        #[cfg(target_os = "linux")]
+        let image = IconSource::Data {
+            width: 64,
+            height: 64,
+            data: include_bytes!(concat!(env!("OUT_DIR"), "/orvia.rgba"))
+                .chunks_exact(4)
+                .flat_map(|p| [p[3], p[0], p[1], p[2]])
+                .collect(),
+        };
+        let mut icon = TrayItem::new("Orvia", image)?;
         let show = send.clone();
         let menu = icon.inner_mut();
         let ids = [
@@ -42,7 +72,7 @@ impl Tray {
         })
     }
 
-    pub(super) fn refresh(&mut self, l: Language) {
+    fn refresh(&mut self, l: Language) {
         if self.language == Some(l) {
             return;
         }
@@ -58,11 +88,15 @@ impl Tray {
         self.language = Some(l);
     }
 
-    pub(super) fn handle(&self, dir: &Path) -> Result<bool> {
+    fn handle(&self, dir: &Path) -> Result<bool> {
         for action in self.events.try_iter() {
             match action {
                 Action::Show => {
-                    Command::new(std::env::current_exe()?.with_file_name("orvia.exe")).spawn()?;
+                    Command::new(
+                        std::env::current_exe()?
+                            .with_file_name(format!("orvia{}", std::env::consts::EXE_SUFFIX)),
+                    )
+                    .spawn()?;
                 }
                 Action::Quit => {
                     std::fs::write(dir.join("close-window"), b"1")?;

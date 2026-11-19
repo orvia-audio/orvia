@@ -15,7 +15,7 @@ impl Panel {
             None,
             self.prefs
                 .language
-                .text("Windows default microphone", "Windows の既定のマイク"),
+                .text("System default microphone", "システムの既定のマイク"),
         ));
         default.into_iter().chain(
             self.devices_for(side)

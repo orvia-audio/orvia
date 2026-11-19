@@ -1,11 +1,11 @@
-//! WASAPI streams with a bounded single-producer, single-consumer queue.
+//! Desktop audio streams with a bounded single-producer, single-consumer queue.
 use anyhow::{Context, Result, anyhow, ensure};
 use cpal::{
     Device, DeviceId, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use orvia_core::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings};
-use orvia_engine::{is_orvia, is_virtual_cable, label};
+use orvia_engine::{host, is_virtual_cable, label};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     collections::VecDeque,
@@ -68,19 +68,22 @@ pub(super) struct Route {
 }
 
 pub(super) fn default_input_id() -> Option<DeviceId> {
-    cpal::default_host().default_input_device()?.id().ok()
+    host().ok()?.default_input_device()?.id().ok()
 }
 
 impl Route {
     pub(super) fn open(settings: &Settings) -> Result<Self> {
-        let host = cpal::default_host();
+        let host = host()?;
         let output = match &settings.output {
             Some(id) => host
                 .device_by_id(&id.parse()?)
                 .context("Selected virtual output is disconnected")?,
+            #[cfg(not(windows))]
+            None => anyhow::bail!("Choose a virtual output in microphone settings"),
+            #[cfg(windows)]
             None => host
                 .output_devices()?
-                .find(is_orvia)
+                .find(orvia_engine::is_orvia)
                 .context("Choose a virtual output in microphone settings")?,
         };
         ensure!(
@@ -120,7 +123,7 @@ impl Route {
         let channels = usize::from(input_config.channels);
         let mut resampler = InputRate::new(input_config.sample_rate);
         let input_stream = input.build_input_stream(
-            &input_config,
+            input_config,
             move |samples: &[f32], _| {
                 let stamp = start.elapsed().as_millis() as u64;
                 meter.captured_ms.store(stamp, Relaxed);
@@ -276,7 +279,7 @@ impl Monitor {
     }
 
     fn connect(&mut self, id: &str, start: Instant) -> Result<()> {
-        let device = cpal::default_host()
+        let device = host()?
             .device_by_id(&id.parse()?)
             .context("Headphones disconnected")?;
         ensure!(
@@ -304,7 +307,7 @@ impl Monitor {
     }
 }
 
-fn on_error(counters: &Arc<Counters>) -> impl FnMut(cpal::StreamError) + Send + 'static {
+fn on_error(counters: &Arc<Counters>) -> impl FnMut(cpal::Error) + Send + 'static {
     let counters = counters.clone();
     move |_| counters.failed.store(true, Relaxed)
 }
@@ -319,7 +322,7 @@ fn playback_stream<T: SizedSample + FromSample<f32>>(
     let meter = counters.clone();
     let mut playback = Playback::new(rx, config.sample_rate(), config.channels());
     Ok(output.build_output_stream(
-        &config.config(),
+        config.config(),
         move |out: &mut [T], _| {
             let now = start.elapsed().as_millis() as u64;
             meter.played_ms.store(now, Relaxed);
@@ -369,7 +372,7 @@ fn config(device: &Device, port: Port) -> Result<SupportedStreamConfig> {
         })
         .ok_or_else(|| {
             anyhow!(
-                "{} has no compatible shared format. Try 48 kHz in Windows Sound settings.",
+                "{} has no compatible shared format. Try 48 kHz in your sound settings.",
                 label(device).unwrap_or_default()
             )
         })

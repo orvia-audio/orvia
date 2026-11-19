@@ -8,6 +8,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("cargo:rerun-if-changed=../../assets/windows-icon.rs");
     let tree = usvg::Tree::from_data(&fs::read(source)?, &usvg::Options::default())?;
     let dir = PathBuf::from(env::var("OUT_DIR")?);
+    let target = env::var("CARGO_CFG_TARGET_OS")?;
+    if target == "macos" {
+        let mut icon =
+            tiny_skia::Pixmap::new(1024, 1024).ok_or(io::Error::other("Invalid icon size"))?;
+        let scale = 1024. / tree.size().width();
+        resvg::render(
+            &tree,
+            tiny_skia::Transform::from_scale(scale, scale),
+            &mut icon.as_mut(),
+        );
+        icon.save_png(dir.join("orvia-1024.png"))?;
+    }
     let sizes = [16_u32, 20, 24, 32, 40, 48, 64, 128, 256];
     let mut directory = vec![0, 0, 1, 0, sizes.len() as u8, 0];
     let mut images = Vec::new();
@@ -23,11 +35,23 @@ fn main() -> Result<(), Box<dyn Error>> {
         let png = pixmap.encode_png()?;
         if size == 64 {
             fs::write(dir.join("orvia.png"), &png)?;
+            fs::write(
+                dir.join("orvia.rgba"),
+                pixmap
+                    .pixels()
+                    .iter()
+                    .map(|pixel| pixel.demultiply())
+                    .flat_map(|pixel| [pixel.red(), pixel.green(), pixel.blue(), pixel.alpha()])
+                    .collect::<Vec<_>>(),
+            )?;
         }
         directory.extend([size as u8, size as u8, 0, 0, 1, 0, 32, 0]);
         directory.extend((png.len() as u32).to_le_bytes());
         directory.extend(((6 + sizes.len() * 16 + images.len()) as u32).to_le_bytes());
         images.extend(png);
+    }
+    if target != "windows" {
+        return Ok(());
     }
     directory.extend(images);
     let icon = dir.join("orvia.ico");

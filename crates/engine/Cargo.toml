@@ -9,12 +9,21 @@ rust-version.workspace = true
 
 [dependencies]
 orvia-core = { path = "../core" }
-cpal = "0.17"
+cpal = "0.18.2"
 anyhow = "1"
 fs2 = "0.4"
 rtrb = "0.3"
 time = { version = "0.3", features = ["local-offset"] }
+[target.'cfg(windows)'.dependencies]
 tray-item = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tao = { version = "0.34", default-features = false }
+tray-icon = { version = "0.21", default-features = false }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+cpal = { version = "0.18.2", features = ["pulseaudio"] }
+tray-item = { version = "0.10", features = ["ksni"] }
 
 [lints]
 workspace = true

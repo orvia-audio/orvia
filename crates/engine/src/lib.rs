@@ -1,19 +1,25 @@
-//! Windows endpoint discovery shared by the engine and settings window.
+//! Audio endpoint discovery shared by the engine and settings window.
 //!
 //! Persist the value returned by [`cpal::Device::id`](cpal::traits::DeviceTrait::id)
-//! rather than an index into this list. Windows may reorder endpoints after a reconnect.
+//! rather than an index into this list. A host may reorder endpoints after a reconnect.
 
+#[cfg(any(windows, test))]
+use cpal::DeviceDescription;
 use cpal::{
-    Device, DeviceDescription,
+    Device,
     traits::{DeviceTrait, HostTrait},
 };
+#[cfg(any(windows, test))]
 use orvia_core::ADAPTER;
 
+#[cfg(any(windows, test))]
 const VAC: &str = "Virtual Audio Cable";
+#[cfg(any(windows, test))]
 const VIRTUAL_ADAPTERS: [&str; 3] = [ADAPTER, VAC, "Elgato Virtual Audio"];
 
 // WASAPI normally exposes the adapter separately from the localized endpoint
 // name. Some endpoints expose it only in the full Windows friendly name.
+#[cfg(any(windows, test))]
 fn adapter(desc: &DeviceDescription) -> Option<&'static str> {
     if let Some(driver) = desc.driver() {
         return VIRTUAL_ADAPTERS.into_iter().find(|&name| name == driver);
@@ -26,7 +32,7 @@ fn adapter(desc: &DeviceDescription) -> Option<&'static str> {
                     .and_then(|s| s.rsplit_once(" ("))
                     .is_some_and(|(_, suffix)| suffix == name)
         };
-        matches(desc.name()) || desc.extended().iter().any(|s| matches(s))
+        matches(desc.name()) || desc.extended().any(matches)
     })
 }
 
@@ -35,29 +41,53 @@ fn adapter(desc: &DeviceDescription) -> Option<&'static str> {
 /// # Errors
 ///
 /// Propagates failure to read device properties, for example during removal.
-pub fn label(device: &Device) -> Result<String, cpal::DeviceNameError> {
+pub fn label(device: &Device) -> Result<String, cpal::Error> {
     let desc = device.description()?;
-    Ok(desc
-        .extended()
-        .first()
-        .map(String::as_str)
-        .unwrap_or(desc.name())
-        .to_owned())
+    Ok(desc.extended().next().unwrap_or(desc.name()).to_owned())
 }
 
-/// Identify the built-in lab adapter used when an older configuration has no output ID.
+/// Open the desktop sound server used for both enumeration and streaming.
+///
+/// # Errors
+///
+/// On Linux, returns an error when the PulseAudio-compatible server is unavailable.
+pub fn host() -> Result<cpal::Host, cpal::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        cpal::host_from_id(cpal::HostId::PulseAudio)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(cpal::default_host())
+    }
+}
+
+/// Identify the lab adapter used by Windows installations without an explicit output.
+#[cfg(windows)]
 pub fn is_orvia(device: &Device) -> bool {
     device
         .description()
         .is_ok_and(|desc| adapter(&desc) == Some(ADAPTER))
 }
 
-/// Recognize the recording and playback sides of supported virtual cables.
-/// Windows enforces driver signing when it loads the installed driver.
+/// Recognize supported virtual devices and exclude their inputs from microphone capture.
 pub fn is_virtual_cable(device: &Device) -> bool {
-    device
-        .description()
-        .is_ok_and(|desc| adapter(&desc).is_some())
+    #[cfg(windows)]
+    {
+        device
+            .description()
+            .is_ok_and(|desc| adapter(&desc).is_some())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        device.id().is_ok_and(|id| id.id() == "BlackHole2ch_UID")
+    }
+    #[cfg(target_os = "linux")]
+    {
+        device.id().is_ok_and(|id| {
+            matches!(id.id(), "orvia_output" | "orvia_microphone") || id.id().ends_with(".monitor")
+        })
+    }
 }
 
 /// List the stable ID and display name of each selectable physical input.
@@ -65,22 +95,22 @@ pub fn is_virtual_cable(device: &Device) -> bool {
 /// # Errors
 ///
 /// Returns a host enumeration error. Devices removed during enumeration are skipped.
-pub fn inputs() -> Result<Vec<(String, String)>, cpal::DevicesError> {
-    Ok(cpal::default_host()
+pub fn inputs() -> Result<Vec<(String, String)>, cpal::Error> {
+    Ok(host()?
         .input_devices()?
         .filter(|d| !is_virtual_cable(d))
         .filter_map(|d| Some((d.id().ok()?.to_string(), label(&d).ok()?)))
         .collect())
 }
 
-/// List stable playback IDs and names for VAC, Elgato Virtual Audio and Orvia Audio v1.
+/// List stable playback IDs and names for supported virtual microphones.
 /// A recording app opens the corresponding capture endpoint independently.
 ///
 /// # Errors
 ///
 /// Returns a host enumeration error. Devices removed during enumeration are skipped.
-pub fn outputs() -> Result<Vec<(String, String)>, cpal::DevicesError> {
-    Ok(cpal::default_host()
+pub fn outputs() -> Result<Vec<(String, String)>, cpal::Error> {
+    Ok(host()?
         .output_devices()?
         .filter(is_virtual_cable)
         .filter_map(|d| Some((d.id().ok()?.to_string(), label(&d).ok()?)))
@@ -93,8 +123,8 @@ pub fn outputs() -> Result<Vec<(String, String)>, cpal::DevicesError> {
 /// # Errors
 ///
 /// Returns a host enumeration error. Endpoints removed during discovery are skipped.
-pub fn monitors() -> Result<Vec<(String, String)>, cpal::DevicesError> {
-    Ok(cpal::default_host()
+pub fn monitors() -> Result<Vec<(String, String)>, cpal::Error> {
+    Ok(host()?
         .output_devices()?
         .filter(|d| !is_virtual_cable(d))
         .filter_map(|d| Some((d.id().ok()?.to_string(), label(&d).ok()?)))

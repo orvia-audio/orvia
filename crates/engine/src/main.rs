@@ -3,6 +3,10 @@
 
 mod log;
 mod stream;
+#[cfg(not(target_os = "macos"))]
+mod tray;
+#[cfg(target_os = "macos")]
+#[path = "menu_bar.rs"]
 mod tray;
 
 use anyhow::Result;
@@ -23,17 +27,23 @@ fn main() -> Result<()> {
         .truncate(false)
         .write(true)
         .open(dir.join("engine.lock"))?;
-    // Windows releases this per-user lock on both clean and abnormal exits.
+    // The OS releases this per-user lock on both clean and abnormal exits.
     if let Err(e) = lock.try_lock_exclusive() {
         if e.raw_os_error() == Some(33) || e.kind() == io::ErrorKind::WouldBlock {
             return Ok(());
         }
         return Err(e.into());
     }
-    supervise(&dir)
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        lock.set_len(0)?;
+        writeln!(&lock, "{}", std::process::id())?;
+    }
+    tray::run(&dir)
 }
 
-fn supervise(dir: &Path) -> Result<()> {
+fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> bool) -> Result<()> {
     let stop_request = dir.join(format!("stop-engine-{}", std::process::id()));
     let _ = fs::remove_file(&stop_request);
     let mut log = log::EngineLog::open(dir);
@@ -41,8 +51,6 @@ fn supervise(dir: &Path) -> Result<()> {
     let mut last_monitor = (false, None);
     let mut running: Option<stream::Route> = None;
     let mut previous: Option<Settings> = None;
-    let mut tray = tray::Tray::new().ok();
-    let mut tray_attempt = Instant::now();
     let mut last_attempt = Instant::now() - Duration::from_secs(2);
     let mut last_default_check = last_attempt;
     let mut message = String::new();
@@ -52,20 +60,9 @@ fn supervise(dir: &Path) -> Result<()> {
             break;
         }
         let now = Instant::now();
-        if tray.is_none() && tray_attempt.elapsed() >= Duration::from_secs(10) {
-            tray = tray::Tray::new().ok();
-            tray_attempt = now;
-        }
-        if let Some(tray) = &tray
-            && matches!(tray.handle(dir), Ok(true))
-        {
-            break;
-        }
         let settings = Settings::load(&dir.join("settings.json"));
-        if let Ok(s) = &settings
-            && let Some(tray) = &mut tray
-        {
-            tray.refresh(s.language);
+        if menu(settings.as_ref().ok().map(|s| s.language)) {
+            break;
         }
         if !matches!((&previous, &settings), (Some(old), Ok(new)) if old.same_signal_path(new)) {
             running = None;

@@ -201,7 +201,7 @@ impl Panel {
             Endpoint::Input => (
                 &self.prefs.input,
                 &self.inputs,
-                l.text("Windows default microphone", "Windows の既定のマイク"),
+                l.text("System default microphone", "システムの既定のマイク"),
             ),
             Endpoint::Output => (
                 &self.prefs.output,

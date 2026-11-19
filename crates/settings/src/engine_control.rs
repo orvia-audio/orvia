@@ -2,7 +2,6 @@
 use orvia_core::{EngineStatus, read_json};
 use std::{
     fs, io,
-    os::windows::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command},
     thread,
@@ -10,17 +9,17 @@ use std::{
 };
 
 fn executable() -> io::Result<PathBuf> {
-    Ok(std::env::current_exe()?.with_file_name("orvia-engine.exe"))
+    Ok(std::env::current_exe()?
+        .with_file_name(format!("orvia-engine{}", std::env::consts::EXE_SUFFIX)))
 }
 
 pub(super) fn start() -> io::Result<Child> {
     Command::new(executable()?).spawn()
 }
 
-/// Restart just this copy of the engine in the current Windows session.
-/// Complete once the relaunched process publishes a fresh diagnostic snapshot.
-pub(super) fn restart(dir: &Path) -> io::Result<()> {
-    let engine = executable()?;
+#[cfg(windows)]
+fn stop(dir: &Path, engine: &Path) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
     let powershell = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
         .ok_or_else(|| io::Error::other("Windows system directory is unavailable"))?
@@ -32,7 +31,7 @@ pub(super) fn restart(dir: &Path) -> io::Result<()> {
             "-Command",
             include_str!("stop-engine.ps1"),
         ])
-        .env("ORVIA_ENGINE_PATH", &engine)
+        .env("ORVIA_ENGINE_PATH", engine)
         .env("ORVIA_STATE_DIR", dir)
         .creation_flags(0x08000000) // CREATE_NO_WINDOW
         .output()?;
@@ -41,6 +40,42 @@ pub(super) fn restart(dir: &Path) -> io::Result<()> {
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         ));
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn stop(dir: &Path, _: &Path) -> io::Result<()> {
+    use fs2::FileExt;
+    let path = dir.join("engine.lock");
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match lock.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Audio engine did not stop",
+            ));
+        }
+        if let Ok(pid) = fs::read_to_string(&path)?.trim().parse::<u32>() {
+            fs::write(dir.join(format!("stop-engine-{pid}")), b"1")?;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Replace the current user's running engine and wait for its first fresh observation.
+pub(super) fn restart(dir: &Path) -> io::Result<()> {
+    let engine = executable()?;
+    stop(dir, &engine)?;
     fs::write(dir.join("observe"), b"1")?;
     let launched = SystemTime::now();
     let mut child = Command::new(engine).spawn()?;

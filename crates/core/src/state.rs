@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Language {
-    /// Follow the user's Windows language.
+    /// Follow the system language.
     #[default]
     System,
     /// English interface.
@@ -43,11 +43,11 @@ impl Language {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(default)]
 pub struct Settings {
-    /// Stable WASAPI endpoint ID, preserved while the device is unplugged.
-    /// An absent ID follows the Windows default microphone.
+    /// Stable audio endpoint ID, preserved while the device is unplugged.
+    /// An absent ID follows the system default microphone.
     pub input: Option<String>,
-    /// Stable WASAPI playback ID of the selected virtual cable. When absent,
-    /// the engine looks only for the Orvia lab adapter used by older settings.
+    /// Stable audio playback ID of the selected virtual cable. When absent,
+    /// Windows can fall back to the Orvia lab adapter.
     pub output: Option<String>,
     /// Stable ID of the physical playback device for monitoring processed audio.
     pub monitor: Option<String>,
@@ -112,12 +112,28 @@ pub struct EngineStatus {
 ///
 /// # Errors
 ///
-/// Returns an error if Windows did not provide a local application data directory.
+/// Returns an error when the platform's per-user data location is unavailable.
 pub fn data_dir() -> io::Result<PathBuf> {
-    env::var_os("LOCALAPPDATA")
-        .filter(|v| !v.is_empty())
-        .map(|p| PathBuf::from(p).join("Orvia"))
-        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA is unavailable"))
+    fn absolute(name: &str) -> Option<PathBuf> {
+        env::var_os(name)
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+    }
+
+    #[cfg(windows)]
+    let dir = absolute("LOCALAPPDATA").map(|p| p.join("Orvia"));
+    #[cfg(target_os = "macos")]
+    let dir = absolute("HOME").map(|p| p.join("Library/Application Support/Orvia"));
+    #[cfg(target_os = "linux")]
+    let dir = absolute("XDG_DATA_HOME")
+        .or_else(|| absolute("HOME").map(|p| p.join(".local/share")))
+        .map(|p| p.join("orvia"));
+    dir.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "User data directory is unavailable",
+        )
+    })
 }
 
 /// Decode a settings file or diagnostic snapshot.
@@ -145,7 +161,7 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
 }
 
 impl Settings {
-    /// Whether the open WASAPI streams can be reused. Processing controls are
+    /// Whether the open audio streams can be reused. Processing controls are
     /// applied at a block boundary without clearing the signal history.
     pub fn same_signal_path(&self, other: &Self) -> bool {
         self.input == other.input && self.output == other.output

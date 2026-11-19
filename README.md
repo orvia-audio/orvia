@@ -45,3 +45,5 @@ The input diagnostic lists device names and formats without opening an audio str
 - [Contributing](CONTRIBUTING.md) covers API documentation, review and UI conventions.
 
 The Rust application and installer use the [MIT License](LICENSE). The optional [lab driver](driver/README.md) uses the [Microsoft Public License](driver/LICENSE). Packaging generates notices for the Windows dependency graph, including GPUI and the embedded denoiser.
+
+The interface uses outline SVGs from [Tabler Icons v3.52.0](https://github.com/tabler/tabler-icons/tree/v3.52.0/icons/outline) under the [MIT License](assets/tabler/LICENSE).

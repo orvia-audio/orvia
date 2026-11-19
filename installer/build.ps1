@@ -40,6 +40,7 @@ try {
     $icon = Join-Path $appBuild.out_dir 'orvia.ico'
     Run cargo-about @('generate','--locked','-o',"$work/dependencies.txt","$PSScriptRoot/notices.hbs")
     $notices = @("Orvia $version", (Get-Content LICENSE -Raw),
+        'Tabler Icons', (Get-Content "$root/assets/tabler/LICENSE" -Raw -Encoding UTF8),
         'Microsoft Visual C++ Runtime, Copyright Microsoft Corporation. Distributed under the Visual Studio redistribution terms.',
         (Get-Content "$work/dependencies.txt" -Raw -Encoding UTF8))
     if ($WithTestDriver) { $notices += 'Orvia Audio driver', (Get-Content driver/LICENSE -Raw) }

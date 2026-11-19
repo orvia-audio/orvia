@@ -1,5 +1,6 @@
 //! Layout and localized controls for the mixer, device routing and preferences.
 use super::*;
+use crate::icons::glyph;
 
 #[path = "mixer.rs"]
 mod mixer;
@@ -8,6 +9,7 @@ const INK: u32 = 0x242a2b;
 const MUTED: u32 = 0x575f61;
 const PAPER: u32 = 0xf7f5f1;
 const LINE: u32 = 0xdedbd4;
+const TERRACOTTA: u32 = 0x954b37;
 const CORAL: u32 = 0xffb18c;
 
 fn row() -> gpui::Div {
@@ -25,11 +27,15 @@ fn card() -> gpui::Div {
         .border_color(rgb(LINE))
         .flex_shrink_0()
 }
-fn heading(s: &'static str) -> gpui::Div {
+fn heading(label: &'static str, icon: &'static str, color: u32) -> gpui::Div {
     div()
+        .flex()
+        .items_center()
+        .gap_2()
         .text_base()
         .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(s)
+        .child(glyph(icon, 20., color))
+        .child(label)
 }
 fn note(s: impl Into<SharedString>) -> gpui::Div {
     div().text_sm().text_color(rgb(MUTED)).child(s.into())
@@ -44,8 +50,26 @@ impl Panel {
         control: Control,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let leading = match &control {
+            Control::Mute if self.prefs.muted => Some("microphone.svg"),
+            Control::Mute => Some("microphone-off.svg"),
+            Control::CheckUpdate => Some("refresh.svg"),
+            Control::Releases => Some("external-link.svg"),
+            _ => None,
+        };
+        let trailing = match &control {
+            Control::Choose(_) if selected => Some("chevron-up.svg"),
+            Control::Choose(_) => Some("chevron-down.svg"),
+            Control::Select(_, _) if selected => Some("check.svg"),
+            _ => None,
+        };
+        let wide = matches!(&control, Control::Choose(_) | Control::Select(_, _));
         div()
             .id(id.into())
+            .flex()
+            .items_center()
+            .gap_2()
+            .when(wide, |d| d.justify_between())
             .tab_index(0)
             .px_3()
             .py_1p5()
@@ -59,7 +83,9 @@ impl Panel {
             .hover(|s| s.bg(rgb(0xffe4d7)))
             .focus(|s| s.border_2().border_color(rgb(0x215d91)))
             .on_click(cx.listener(move |p, _, _, cx| p.activate(control.clone(), cx)))
-            .child(label.into())
+            .when_some(leading, |d, icon| d.child(glyph(icon, 16., INK)))
+            .child(div().min_w_0().child(label.into()))
+            .when_some(trailing, |d, icon| d.child(glyph(icon, 16., INK)))
     }
 
     fn switch(
@@ -112,7 +138,16 @@ impl Panel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let active = self.page == page;
+        let icon = match page {
+            Page::Mixer => "adjustments-horizontal.svg",
+            Page::Devices => "plug-connected.svg",
+            Page::Preferences => "settings.svg",
+        };
+        let color = if active { 0xffc4a6 } else { 0xe1e4e0 };
         div()
+            .flex()
+            .items_center()
+            .gap_2()
             .id(id)
             .tab_index(0)
             .w_full()
@@ -123,10 +158,11 @@ impl Panel {
             .border_1()
             .border_color(rgb(if active { 0x495150 } else { INK }))
             .bg(rgb(if active { 0x394140 } else { INK }))
-            .text_color(rgb(if active { 0xffc4a6 } else { 0xe1e4e0 }))
+            .text_color(rgb(color))
             .hover(|s| s.bg(rgb(0x394140)))
             .focus(|s| s.border_color(rgb(CORAL)))
             .on_click(cx.listener(move |p, _, _, cx| p.activate(Control::Page(page), cx)))
+            .child(glyph(icon, 20., color))
             .child(label)
     }
 
@@ -170,7 +206,7 @@ impl Panel {
         let open = self.choosing == Some(side);
         let mut view = stack().gap_1().child(self.button(
             id,
-            format!("{}  ▾", self.device_name(side)),
+            self.device_name(side),
             open,
             Control::Choose(side),
             cx,
@@ -247,13 +283,19 @@ impl Panel {
         stack()
             .child(
                 card()
-                    .child(heading(l.text("Microphone input", "マイク入力")))
+                    .child(heading(
+                        l.text("Microphone input", "マイク入力"),
+                        "microphone.svg",
+                        TERRACOTTA,
+                    ))
                     .child(self.picker(Endpoint::Input, cx)),
             )
             .child(
                 card()
                     .child(heading(
                         l.text("Virtual microphone output", "仮想マイク出力"),
+                        "route.svg",
+                        TERRACOTTA,
                     ))
                     .child(self.picker(Endpoint::Output, cx))
                     .child(note(l.text(
@@ -268,7 +310,11 @@ impl Panel {
                             .flex()
                             .justify_between()
                             .items_center()
-                            .child(heading(l.text("Headphone monitor", "ヘッドホンモニター")))
+                            .child(heading(
+                                l.text("Headphone monitor", "ヘッドホンモニター"),
+                                "headphones.svg",
+                                TERRACOTTA,
+                            ))
                             .child(self.switch("monitor", monitor_on, Control::Monitor, cx)),
                     )
                     .child(self.picker(Endpoint::Monitor, cx))
@@ -296,12 +342,20 @@ impl Panel {
         stack()
             .child(
                 card()
-                    .child(heading(l.text("Language", "表示言語")))
+                    .child(heading(
+                        l.text("Language", "表示言語"),
+                        "language.svg",
+                        TERRACOTTA,
+                    ))
                     .child(langs),
             )
             .child(
                 card()
-                    .child(heading(l.text("Application", "アプリ")))
+                    .child(heading(
+                        l.text("Application", "アプリ"),
+                        "info-circle.svg",
+                        TERRACOTTA,
+                    ))
                     .child(note(format!("Orvia {}", env!("CARGO_PKG_VERSION"))))
                     .child(note(l.text(
                         "Closing the window keeps Orvia in the notification area.",
@@ -331,7 +385,11 @@ impl Panel {
             .when_some(self.status.as_ref(), |v, s| {
                 v.child(
                     card()
-                        .child(heading(l.text("Audio diagnostics", "音声診断")))
+                        .child(heading(
+                            l.text("Audio diagnostics", "音声診断"),
+                            "activity.svg",
+                            TERRACOTTA,
+                        ))
                         .child(note(s.message.clone()))
                         .when_some(s.monitor_error.clone(), |v, e| v.child(note(e)))
                         .child(note(format!(

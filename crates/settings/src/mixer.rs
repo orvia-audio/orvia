@@ -211,7 +211,11 @@ impl Panel {
             .child(
                 row()
                     .justify_between()
-                    .child(heading(l.text("Signal history", "信号の推移")))
+                    .child(heading(
+                        l.text("Signal history", "信号の推移"),
+                        "wave-sine.svg",
+                        CORAL,
+                    ))
                     .child(
                         div()
                             .text_sm()
@@ -253,7 +257,11 @@ impl Panel {
             .child(
                 row()
                     .justify_between()
-                    .child(heading(l.text("Output gain", "出力ゲイン")))
+                    .child(heading(
+                        l.text("Output gain", "出力ゲイン"),
+                        "volume.svg",
+                        TERRACOTTA,
+                    ))
                     .child(
                         div()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -278,7 +286,11 @@ impl Panel {
             .child(
                 card()
                     .gap_2()
-                    .child(heading(l.text("Noise suppression", "ノイズ抑制")))
+                    .child(heading(
+                        l.text("Noise suppression", "ノイズ抑制"),
+                        "filter.svg",
+                        TERRACOTTA,
+                    ))
                     .child(methods)
                     .child(note(match selected {
                         None => l.text(
@@ -300,7 +312,11 @@ impl Panel {
                 card().gap_2().child(
                     row()
                         .justify_between()
-                        .child(heading(l.text("Channels", "チャンネル")))
+                        .child(heading(
+                            l.text("Channels", "チャンネル"),
+                            "arrows-split-2.svg",
+                            TERRACOTTA,
+                        ))
                         .child(mix),
                 ),
             )

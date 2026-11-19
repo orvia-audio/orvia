@@ -259,6 +259,7 @@ impl Panel {
     }
 }
 
+mod icons;
 mod view;
 
 fn start_engine() -> io::Result<()> {
@@ -339,7 +340,7 @@ fn main() -> io::Result<()> {
 
 fn run(dir: &Path) {
     let dir = dir.to_owned();
-    Application::new().run(move |cx| {
+    Application::new().with_assets(icons::Icons).run(move |cx| {
         cx.bind_keys([
             KeyBinding::new("tab", NextControl, Some("Settings")),
             KeyBinding::new("shift-tab", PreviousControl, Some("Settings")),

@@ -69,7 +69,7 @@ impl Panel {
             .flex()
             .items_center()
             .gap_2()
-            .when(wide, |d| d.justify_between())
+            .when(wide, |d| d.w_full())
             .tab_index(0)
             .px_3()
             .py_1p5()
@@ -84,7 +84,11 @@ impl Panel {
             .focus(|s| s.border_2().border_color(rgb(0x215d91)))
             .on_click(cx.listener(move |p, _, _, cx| p.activate(control.clone(), cx)))
             .when_some(leading, |d, icon| d.child(glyph(icon, 16., INK)))
-            .child(div().min_w_0().child(label.into()))
+            .child(
+                div()
+                    .when(wide, |d| d.flex_1().min_w_0())
+                    .child(label.into()),
+            )
             .when_some(trailing, |d, icon| d.child(glyph(icon, 16., INK)))
     }
 

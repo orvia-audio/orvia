@@ -53,6 +53,7 @@ fn stop(dir: &Path, _: &Path) -> io::Result<()> {
         .write(true)
         .open(&path)?;
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut requested = None;
     loop {
         match lock.try_lock_exclusive() {
             Ok(()) => return Ok(()),
@@ -65,8 +66,11 @@ fn stop(dir: &Path, _: &Path) -> io::Result<()> {
                 "Audio engine did not stop",
             ));
         }
-        if let Ok(pid) = fs::read_to_string(&path)?.trim().parse::<u32>() {
+        if let Ok(pid) = fs::read_to_string(&path)?.trim().parse::<u32>()
+            && requested != Some(pid)
+        {
             fs::write(dir.join(format!("stop-engine-{pid}")), b"1")?;
+            requested = Some(pid);
         }
         thread::sleep(Duration::from_millis(100));
     }

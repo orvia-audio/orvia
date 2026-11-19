@@ -34,6 +34,7 @@ fn main() -> Result<()> {
         }
         return Err(e.into());
     }
+    let _ = fs::remove_file(stop_request(&dir));
     #[cfg(unix)]
     {
         use std::io::Write;
@@ -43,9 +44,12 @@ fn main() -> Result<()> {
     tray::run(&dir)
 }
 
+fn stop_request(dir: &Path) -> std::path::PathBuf {
+    dir.join(format!("stop-engine-{}", std::process::id()))
+}
+
 fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> bool) -> Result<()> {
-    let stop_request = dir.join(format!("stop-engine-{}", std::process::id()));
-    let _ = fs::remove_file(&stop_request);
+    let stop_request = stop_request(dir);
     let mut log = log::EngineLog::open(dir);
     log.record(EngineEvent::Started(env!("CARGO_PKG_VERSION").into()));
     let mut last_monitor = (false, None);
@@ -57,6 +61,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
     let mut was_observed = false;
     loop {
         if stop_request.exists() {
+            let _ = fs::remove_file(&stop_request);
             break;
         }
         let now = Instant::now();

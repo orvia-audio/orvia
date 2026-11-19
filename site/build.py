@@ -17,6 +17,7 @@ for name in ("style.css", "player.js"):
     html = html.replace(f'"{name}"', f'"{name}?v={version}"')
 (out / "index.html").write_text(html, encoding="utf-8")
 shutil.copyfile(site / "brand-github.svg", media / "brand-github.svg")
+shutil.copyfile(site / "social-card.png", media / "social-card.png")
 for name in ("orvia.svg", "mixer.png"):
     shutil.copyfile(root / "assets" / name, media / name)
 for name in ("microphone.svg", "chevron-down.svg", "activity.svg", "filter.svg", "volume.svg", "x.svg"):

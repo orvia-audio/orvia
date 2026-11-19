@@ -4,14 +4,14 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0"
+version = "0.1.1"
 license = "MIT"
 repository = "https://github.com/sya-ri/orvia"
 rust-version = "1.93"
 
 [workspace.metadata.windows-installer]
-# This numeric series follows the previously distributed 0.3.1 MSI.
-series = "0.4"
+# Each stable release and its preceding snapshots share a Windows Installer series.
+series = "0.5"
 
 [workspace.lints.rust]
 missing_docs = "deny"

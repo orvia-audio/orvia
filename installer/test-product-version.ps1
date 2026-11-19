@@ -1,5 +1,5 @@
 # Cover Windows upgrade ordering across the old development MSIs, snapshots,
-# a stable release, and the first snapshot in the next installer series.
+# and stable releases in successive installer series.
 $ErrorActionPreference = 'Stop'
 $previous = [version]'0.3.1'
 foreach ($case in @(
@@ -8,7 +8,8 @@ foreach ($case in @(
     @{ Series = '0.4'; Version = '0.1.0-snapshot.10' },
     @{ Series = '0.4'; Version = '0.1.0-snapshot.65534' },
     @{ Series = '0.4'; Version = '0.1.0' },
-    @{ Series = '0.5'; Version = '0.1.1-snapshot.1' }
+    @{ Series = '0.5'; Version = '0.1.1-snapshot.1' },
+    @{ Series = '0.5'; Version = '0.1.1' }
 )) {
     $current = [version](& "$PSScriptRoot/product-version.ps1" @case)
     if ($current -le $previous) { throw "Upgrade ordering failed for $($case.Version)" }

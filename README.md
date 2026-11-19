@@ -4,18 +4,23 @@ Give your game or recorder a cleaner microphone while your voice chat keeps the 
 
 ![Orvia's mixer showing DeepFilterNet3, the live signal history, the gain slider and headphone monitoring](assets/mixer.png)
 
-## Hear the difference
+[![Play the 16-second comparison. Original at 0:00, DeepFilterNet3 at 0:04, RNNoise at 0:08 and WebRTC at 0:12.](docs/samples/compare-16s.png)](docs/samples/compare-16s.mp4)
 
-The same voice competes with typing and with an air conditioner. Listen for key taps in the pauses and for consonants while the speaker talks. **[Download the listening comparison](docs/samples/listen.html?raw=true)** and open it in your browser to switch filters at the same point in either recording. The individual clips below use the same gain.
+**[Download the A/B player](docs/samples/listen.html?raw=true)** and open it in your browser. Switch between the original and DeepFilterNet3 mid-word, try another filter, or listen to keyboard noise instead.
+
+<details>
+<summary>Lossless clips and measurements</summary>
 
 | Filter | Keyboard typing | Air conditioner |
 | --- | --- | --- |
 | Off | [Original recording](docs/samples/keyboard-original.flac?raw=true) | [Original recording](docs/samples/air-conditioner-original.flac?raw=true) |
+| DeepFilterNet3 | [Listen · 28.2 dB](docs/samples/keyboard-deepfilternet3.flac?raw=true) | [Listen · 40.6 dB](docs/samples/air-conditioner-deepfilternet3.flac?raw=true) |
 | RNNoise | [Listen · 39.9 dB](docs/samples/keyboard-rnnoise.flac?raw=true) | [Listen · 54.8 dB](docs/samples/air-conditioner-rnnoise.flac?raw=true) |
 | WebRTC | [Listen · 23.1 dB](docs/samples/keyboard-webrtc.flac?raw=true) | [Listen · 17.7 dB](docs/samples/air-conditioner-webrtc.flac?raw=true) |
-| DeepFilterNet3 | [Listen · 28.2 dB](docs/samples/keyboard-deepfilternet3.flac?raw=true) | [Listen · 40.6 dB](docs/samples/air-conditioner-deepfilternet3.flac?raw=true) |
 
 The dB values measure background reduction in the second before speech. On these two recordings, RNNoise removed the most noise during the pause. DeepFilterNet3 scored highest for speech intelligibility. [Audio credits and measurements](docs/samples/CREDITS.md)
+
+</details>
 
 ## Get started
 
@@ -25,6 +30,6 @@ The dB values measure background reduction in the second before speech. On these
 | macOS 13+ | Open the [DMG for your Mac](https://github.com/sya-ri/orvia/actions/workflows/desktop.yml), drag Orvia to Applications and install [BlackHole 2ch](https://github.com/ExistentialAudio/BlackHole). Allow microphone access when prompted. | BlackHole 2ch |
 | Ubuntu 24.04 x64 with PipeWire | Install the [DEB](https://github.com/sya-ri/orvia/actions/workflows/desktop.yml) and sign out and back in to load its virtual microphone. | Orvia Microphone |
 
-In **Devices**, select your physical microphone and the matching virtual output. Choose a filter in **Mixer**. In apps that should hear the original, keep the physical microphone selected.
+In **Devices**, select your physical microphone and the matching virtual output. DeepFilterNet3 is on by default. You can switch filters in **Mixer**. In apps that should hear the original, keep the physical microphone selected.
 
 [Build and verify](docs/testing.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)

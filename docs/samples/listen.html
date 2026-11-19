@@ -2,14 +2,15 @@
 <html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Orvia · Compare noise suppression</title>
 <style>
-:root{color-scheme:light dark;font:100%/1.5 system-ui,sans-serif}body{margin:0;background:#242a2b;color:#faf7f3}main{max-width:43rem;margin:6vh auto;padding:2rem}h1{font-size:clamp(2rem,5vw,3rem);line-height:1.1}fieldset{margin:1.5rem 0;padding:0;border:0}legend{font-weight:650;margin-bottom:.5rem}label{display:inline-flex;padding:.5rem .8rem;margin:0 .25rem .4rem 0;border:1px solid #849398;border-radius:.45rem;cursor:pointer}label:has(input:checked){background:#ffd9c6;color:#242a2b;border-color:#ffb28b}input{accent-color:#a5482e}audio{width:100%;margin:.6rem 0}a{color:#ffc1a1}small{color:#d3dbdb}
+:root{color-scheme:light dark;font:100%/1.5 system-ui,sans-serif}body{margin:0;background:#242a2b;color:#faf7f3}main{max-width:43rem;margin:6vh auto;padding:2rem}h1{font-size:clamp(2rem,5vw,3rem);line-height:1.1}fieldset{margin:1.5rem 0;padding:0;border:0}legend{font-weight:650;margin-bottom:.5rem}label{display:inline-flex;padding:.5rem .8rem;margin:0 .25rem .4rem 0;border:1px solid #849398;border-radius:.45rem;cursor:pointer}label:has(input:checked){background:#ffd9c6;color:#242a2b;border-color:#ffb28b}input{accent-color:#a5482e}button,select{font:inherit;padding:.45rem .8rem;border:1px solid #829599;border-radius:.4rem;cursor:pointer}button{background:#ffd9c6;color:#242a2b}details{margin:1rem 0}summary{cursor:pointer}#transport{display:flex;gap:.75rem;align-items:center;flex-wrap:wrap}#seek{flex:1;min-width:8rem}output{font-variant-numeric:tabular-nums}a{color:#ffc1a1}small{color:#d3dbdb}
 </style>
 <main><svg width="34" height="34" viewBox="0 0 40 40" aria-label="Orvia"><g stroke="#ffab7e" stroke-width="3" fill="none"><circle cx="20" cy="20" r="17"/><circle cx="20" cy="20" r="9"/></g></svg>
 <h1>Compare noise suppression</h1>
-<p>Listen for the background during the first two seconds, then switch filters as the speaker talks.</p>
-<fieldset><legend>Background</legend><label><input type="radio" name="scene" value="keyboard" checked>Keyboard typing</label><label><input type="radio" name="scene" value="air-conditioner">Air conditioner</label></fieldset>
-<fieldset><legend>Filter</legend><label><input type="radio" name="filter" value="original" checked>Off</label><label><input type="radio" name="filter" value="rnnoise">RNNoise</label><label><input type="radio" name="filter" value="webrtc">WebRTC</label><label><input type="radio" name="filter" value="deepfilternet3">DeepFilterNet3</label></fieldset>
-<audio controls loop preload="auto" aria-label="Listening comparison"></audio>
+<p>Play the recording and switch between the original microphone and the filtered voice. Both stay on the same word.</p>
+<fieldset><legend>Background</legend><label><input type="radio" name="scene" value="keyboard">Keyboard typing</label><label><input type="radio" name="scene" value="air-conditioner" checked>Air conditioner</label></fieldset>
+<fieldset><legend>Listen to</legend><label><input type="radio" name="side" value="original">Original</label><label><input type="radio" name="side" value="filtered" checked><span id="filter-name">DeepFilterNet3</span></label></fieldset>
+<div id="transport"><button id="play">Play</button><button id="back" aria-label="Replay the last three seconds">↶ 3 s</button><input id="seek" type="range" min="0" max="14" step=".01" value="0" aria-label="Playback position"><output>0:00 / 0:14</output></div>
+<details><summary>Compare another filter</summary><label>Filter&nbsp;<select id="method"><option value="deepfilternet3">DeepFilterNet3</option><option value="rnnoise">RNNoise</option><option value="webrtc">WebRTC</option></select></label></details>
 <p role="status"></p>
 <small>Speech by the <a href="https://opus-codec.org/examples/">Opus Codec working group</a> (<a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>), <a href="https://commons.wikimedia.org/wiki/File:Keyboard_noise.ogg">typing by Yuyudevil</a> (public domain), and <a href="https://commons.wikimedia.org/wiki/File:Air_conditioner_hum_(Gravity_Sound).wav">air conditioner by Gravity Sound</a> (<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>). Orvia mixed, filtered and time-aligned the excerpts.</small>
 </main>
@@ -25,24 +26,77 @@
 }</script>
 <script>
 const tracks = JSON.parse(document.getElementById('recordings').textContent);
-const audio = document.querySelector('audio');
+const field = id => document.getElementById(id);
+const checked = name => document.querySelector('input[name="' + name + '"]:checked').value;
+const play = field('play'), seek = field('seek'), method = field('method');
 const status = document.querySelector('[role=status]');
-let pending = null;
-function selectTrack() {
-    const scene = document.querySelector('[name=scene]:checked').value;
-    const filter = document.querySelector('[name=filter]:checked').value;
-    const track = tracks[scene + '-' + filter];
-    const request = pending || {time: audio.currentTime, playing: !audio.paused};
-    pending = request;
-    audio.onloadedmetadata = () => {
-        audio.currentTime = Math.min(request.time, audio.duration);
-        pending = null;
-        if (request.playing) audio.play().catch(() => {status.textContent = 'Press Play to resume.';});
-    };
-    audio.onerror = () => { pending = null; status.textContent = 'Your browser could not play this recording.'; };
-    status.textContent = '';
-    audio.src = 'data:audio/flac;base64,' + track;
+let context, buffers, started = 0, offset = 0;
+const nodes = new Map();
+const active = () => checked('scene') + '-' + (checked('side') === 'original' ? 'original' : method.value);
+function position() {
+    return nodes.size ? (offset + Math.max(0, context.currentTime - started)) % 14 : offset;
 }
-document.querySelectorAll('input').forEach(control => control.addEventListener('change', selectTrack));
-selectTrack();
+function stop() {
+    offset = position();
+    for (const {source, gain} of nodes.values()) {
+        source.stop(); source.disconnect(); gain.disconnect();
+    }
+    nodes.clear();
+    play.textContent = 'Play';
+}
+function start(at) {
+    offset = at % 14;
+    started = context.currentTime + 0.025;
+    for (const [key, buffer] of Object.entries(buffers)) {
+        const source = context.createBufferSource(), gain = context.createGain();
+        source.buffer = buffer; source.loop = true;
+        gain.gain.value = key === active() ? 1 : 0;
+        source.connect(gain).connect(context.destination);
+        source.start(started, offset);
+        nodes.set(key, {source, gain});
+    }
+    play.textContent = 'Pause';
+}
+async function prepare() {
+    context ||= new AudioContext();
+    await context.resume();
+    if (!buffers) {
+        buffers = Object.fromEntries(await Promise.all(Object.entries(tracks).map(async ([key, encoded]) => {
+            const bytes = Uint8Array.from(atob(encoded), char => char.charCodeAt(0));
+            return [key, await context.decodeAudioData(bytes.buffer)];
+        })));
+    }
+}
+function choose() {
+    field('filter-name').textContent = method.selectedOptions[0].textContent;
+    for (const [key, {gain}] of nodes) {
+        const now = context.currentTime;
+        gain.gain.cancelScheduledValues(now);
+        gain.gain.setValueAtTime(gain.gain.value, now);
+        gain.gain.linearRampToValueAtTime(key === active() ? 1 : 0, now + 0.008);
+    }
+}
+function jump(at) {
+    if (nodes.size) { stop(); start(at); } else { offset = at; }
+    update();
+}
+function update() {
+    const t = position();
+    seek.value = String(t);
+    document.querySelector('output').textContent = '0:' + String(Math.floor(t)).padStart(2, '0') + ' / 0:14';
+}
+play.addEventListener('click', async () => {
+    if (nodes.size) { stop(); update(); return; }
+    play.disabled = true;
+    try { await prepare(); start(offset); status.textContent = ''; }
+    catch { status.textContent = 'Audio could not start. Open this file in a browser with FLAC playback.'; }
+    finally { play.disabled = false; }
+});
+document.querySelectorAll('input[type=radio]').forEach(radio => radio.addEventListener('change', choose));
+method.addEventListener('change', () => {
+    document.querySelector('input[value=filtered]').checked = true; choose();
+});
+field('back').addEventListener('click', () => jump(Math.max(0, position() - 3)));
+seek.addEventListener('input', () => jump(Number(seek.value)));
+setInterval(update, 120);
 </script></html>

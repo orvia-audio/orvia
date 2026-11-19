@@ -53,7 +53,14 @@ impl Panel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let disabled = (matches!(control, Control::RestartEngine) && self.restarting)
-            || (matches!(control, Control::CheckUpdate) && self.updates.checking);
+            || (matches!(control, Control::CheckUpdate) && self.updates.checking)
+            || match control {
+                Control::TestRecord => !self.can_record_test(),
+                Control::TestPlay => self.test.clip.is_none() || self.test.recording.is_some(),
+                Control::TestTake(_) => self.test.busy(),
+                Control::Choose(Endpoint::TestSpeaker | Endpoint::TestSource) => self.test.busy(),
+                _ => false,
+            };
         let leading = match &control {
             Control::RestartEngine => Some("refresh.svg"),
             Control::Page(Page::Log) => Some("activity.svg"),
@@ -93,6 +100,9 @@ impl Panel {
             .hover(|s| s.bg(rgb(0xffe4d7)))
             .focus(|s| s.border_color(rgb(0x215d91)))
             .on_click(cx.listener(move |p, event, w, cx| {
+                if disabled {
+                    return;
+                }
                 if let Some(side) = trigger {
                     w.focus(&p.picker_anchors[side as usize].focus);
                     if p.choosing == Some(side) && matches!(event, gpui::ClickEvent::Keyboard(_)) {
@@ -169,6 +179,7 @@ impl Panel {
         let active = self.page == page || (self.page == Page::Log && page == Page::Preferences);
         let icon = match page {
             Page::Mixer => "adjustments-horizontal.svg",
+            Page::MicTest => "microphone.svg",
             Page::Devices => "plug-connected.svg",
             Page::Preferences | Page::Log => "settings.svg",
         };
@@ -213,6 +224,16 @@ impl Panel {
                 &self.monitors,
                 l.text("Select headphones", "ヘッドホンを選択"),
             ),
+            Endpoint::TestSource => (
+                &self.test.source,
+                &self.test.sources,
+                l.text("Select virtual microphone", "仮想マイクを選択"),
+            ),
+            Endpoint::TestSpeaker => (
+                &self.test.speaker,
+                &self.monitors,
+                l.text("System default output", "システムの既定の出力"),
+            ),
         };
         saved.as_ref().map_or_else(
             || empty.to_owned(),
@@ -238,6 +259,102 @@ impl Panel {
             Some(_) => l.text("Check audio devices", "デバイスを確認"),
             None => l.text("Connecting", "接続中"),
         }
+    }
+
+    fn mic_test_page(&self, cx: &mut Context<Self>) -> gpui::Div {
+        use microphone_test::Take;
+        let l = self.prefs.language;
+        let recording = self.test.recording.as_ref();
+        let playing = self.test.playback.is_some();
+        let length = recording
+            .map(|r| r.duration())
+            .or_else(|| self.test.clip.as_ref().map(|c| c.duration()))
+            .unwrap_or_default();
+        let limit = orvia_engine::mic_test::LIMIT.as_secs();
+        let status = if recording.is_some() {
+            l.text("Recording", "録音中")
+        } else if playing {
+            l.text("Playing", "再生中")
+        } else {
+            self.state_label()
+        };
+        stack()
+            .child(
+                row()
+                    .child(self.button(
+                        "test-before",
+                        l.text("Before update", "更新前"),
+                        self.test.take == Take::Before,
+                        Control::TestTake(Take::Before),
+                        cx,
+                    ))
+                    .child(self.button(
+                        "test-after",
+                        l.text("After update", "更新後"),
+                        self.test.take == Take::After,
+                        Control::TestTake(Take::After),
+                        cx,
+                    ))
+                    .when_some(self.status.as_ref(), |d, s| {
+                        d.child(note(format!(
+                            "{} v{}",
+                            l.text("Running engine", "稼働中のエンジン"),
+                            s.version
+                        )))
+                    }),
+            )
+            .child(
+                card()
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(heading(
+                                l.text("Virtual microphone", "仮想マイク"),
+                                "microphone.svg",
+                                TERRACOTTA,
+                            ))
+                            .child(note(status)),
+                    )
+                    .child(self.picker(Endpoint::TestSource, cx))
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(self.button(
+                                "test-record",
+                                if recording.is_some() {
+                                    l.text("Stop recording", "録音を停止")
+                                } else if self.test.clip.is_some() {
+                                    l.text("Retake", "録り直す")
+                                } else {
+                                    l.text("Record", "録音")
+                                },
+                                recording.is_some(),
+                                Control::TestRecord,
+                                cx,
+                            ))
+                            .child(note(format!("{:.1} / {limit} s", length.as_secs_f32()))),
+                    ),
+            )
+            .child(
+                card()
+                    .child(heading(
+                        l.text("Playback device", "再生先"),
+                        "headphones.svg",
+                        TERRACOTTA,
+                    ))
+                    .child(self.picker(Endpoint::TestSpeaker, cx))
+                    .child(row().child(self.button(
+                        "test-play",
+                        if playing {
+                            l.text("Stop playback", "再生を停止")
+                        } else {
+                            l.text("Play recording", "録音を再生")
+                        },
+                        playing,
+                        Control::TestPlay,
+                        cx,
+                    ))),
+            )
     }
 
     fn devices(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -498,6 +615,7 @@ impl Render for Panel {
         let l = self.prefs.language;
         let (title, content) = match self.page {
             Page::Mixer => (l.text("Mixer", "ミキサー"), self.mixer(cx)),
+            Page::MicTest => (l.text("Mic test", "マイクテスト"), self.mic_test_page(cx)),
             Page::Log => (l.text("Engine log", "エンジンログ"), self.log_page(cx)),
             Page::Devices => (l.text("Devices", "デバイス"), self.devices(cx)),
             Page::Preferences => (l.text("Preferences", "設定"), self.preferences(cx)),
@@ -549,44 +667,52 @@ impl Render for Panel {
             .text_color(rgb(INK))
             .bg(rgb(PAPER))
             .flex()
-            .child(
-                div()
-                    .w(px(160.))
-                    .flex_shrink_0()
-                    .h_full()
-                    .bg(rgb(INK))
-                    .p_3()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        row()
-                            .px_2()
-                            .py_4()
-                            .child(gpui::img(self.logo.clone()).size(px(30.)))
-                            .child(
-                                div()
-                                    .text_xl()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .text_color(rgb(0xffffff))
-                                    .child("Orvia"),
-                            ),
-                    )
-                    .child(self.nav("nav-mixer", l.text("Mixer", "ミキサー"), Page::Mixer, cx))
-                    .child(self.nav(
-                        "nav-devices",
-                        l.text("Devices", "デバイス"),
-                        Page::Devices,
-                        cx,
-                    ))
-                    .child(div().flex_1())
-                    .child(self.nav(
-                        "nav-prefs",
-                        l.text("Preferences", "設定"),
-                        Page::Preferences,
-                        cx,
-                    )),
-            )
+            .when(!self.test_only, |d| {
+                d.child(
+                    div()
+                        .w(px(160.))
+                        .flex_shrink_0()
+                        .h_full()
+                        .bg(rgb(INK))
+                        .p_3()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .child(
+                            row()
+                                .px_2()
+                                .py_4()
+                                .child(gpui::img(self.logo.clone()).size(px(30.)))
+                                .child(
+                                    div()
+                                        .text_xl()
+                                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                                        .text_color(rgb(0xffffff))
+                                        .child("Orvia"),
+                                ),
+                        )
+                        .child(self.nav("nav-mixer", l.text("Mixer", "ミキサー"), Page::Mixer, cx))
+                        .child(self.nav(
+                            "nav-devices",
+                            l.text("Devices", "デバイス"),
+                            Page::Devices,
+                            cx,
+                        ))
+                        .child(self.nav(
+                            "nav-mic-test",
+                            l.text("Mic test", "マイクテスト"),
+                            Page::MicTest,
+                            cx,
+                        ))
+                        .child(div().flex_1())
+                        .child(self.nav(
+                            "nav-prefs",
+                            l.text("Preferences", "設定"),
+                            Page::Preferences,
+                            cx,
+                        )),
+                )
+            })
             .child(
                 div()
                     .id(match self.page {
@@ -618,9 +744,10 @@ impl Render for Panel {
                                             .child(title),
                                     )
                                     .when_some(
-                                        self.updates
-                                            .available(&self.installed)
-                                            .filter(|_| self.prefs.check_updates_automatically),
+                                        self.updates.available(&self.installed).filter(|_| {
+                                            !self.test_only
+                                                && self.prefs.check_updates_automatically
+                                        }),
                                         |header, version| {
                                             header.child(self.button(
                                                 "available-release",
@@ -644,7 +771,7 @@ impl Render for Panel {
                         .id("panel-error")
                         .absolute()
                         .bottom_2()
-                        .left(px(172.))
+                        .left(if self.test_only { px(8.) } else { px(172.) })
                         .right_2()
                         .occlude()
                         .rounded_md()

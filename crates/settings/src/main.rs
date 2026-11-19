@@ -29,11 +29,14 @@ enum Endpoint {
     Input,
     Output,
     Monitor,
+    TestSource,
+    TestSpeaker,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Page {
     Mixer,
+    MicTest,
     Devices,
     Preferences,
     Log,
@@ -48,6 +51,9 @@ enum Control {
     Select(Endpoint, Option<String>),
     Mix(Mixing),
     Noise(Option<NoiseMethod>),
+    TestRecord,
+    TestPlay,
+    TestTake(microphone_test::Take),
     RestartEngine,
     DismissError,
     Gain(u16),
@@ -63,7 +69,7 @@ struct PickerAnchor {
 }
 
 struct Panel {
-    picker_anchors: [PickerAnchor; 3],
+    picker_anchors: [PickerAnchor; 5],
     picker_cursor: usize,
     picker_scroll: gpui::ScrollHandle,
     dir: PathBuf,
@@ -75,6 +81,7 @@ struct Panel {
     inputs: Vec<(String, String)>,
     outputs: Vec<(String, String)>,
     monitors: Vec<(String, String)>,
+    test: microphone_test::MicTest,
     page: Page,
     logo: std::sync::Arc<gpui::Image>,
     choosing: Option<Endpoint>,
@@ -84,10 +91,17 @@ struct Panel {
     updates: updates::Updates,
     installed: Version,
     restarting: bool,
+    test_only: bool,
 }
 
 impl Panel {
-    fn new(dir: PathBuf, installed: Version, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        dir: PathBuf,
+        installed: Version,
+        test_only: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let root = cx.focus_handle();
         window.focus(&root);
         let mut error = String::new();
@@ -98,7 +112,7 @@ impl Panel {
             );
             Settings::default()
         });
-        if let Err(e) = engine_control::start() {
+        if !test_only && let Err(e) = engine_control::start() {
             error = format!(
                 "{} · {e}",
                 prefs
@@ -111,11 +125,11 @@ impl Panel {
         cx.spawn(async move |this, cx| {
             let mut heartbeat = Instant::now() - Duration::from_secs(3);
             loop {
-                if fs::remove_file(poll_dir.join("close-window")).is_ok() {
+                if !test_only && fs::remove_file(poll_dir.join("close-window")).is_ok() {
                     let _ = handle.update(cx, |_, w, _| w.remove_window());
                     break;
                 }
-                if fs::remove_file(poll_dir.join("show-window")).is_ok() {
+                if !test_only && fs::remove_file(poll_dir.join("show-window")).is_ok() {
                     let _ = handle.update(cx, |_, w, app| {
                         app.activate(true);
                         w.activate_window();
@@ -147,7 +161,10 @@ impl Panel {
                         if let Some(prefs) = prefs {
                             p.prefs = prefs;
                         }
-                        if p.prefs.check_updates_automatically && p.updates.due() {
+                        if p.page == Page::MicTest {
+                            p.poll_mic_test();
+                        }
+                        if !p.test_only && p.prefs.check_updates_automatically && p.updates.due() {
                             p.check_for_updates(cx);
                         }
                         if p.page != Page::Log
@@ -166,7 +183,7 @@ impl Panel {
         })
         .detach();
         let inputs = orvia_engine::inputs().unwrap_or_default();
-        Self {
+        let mut panel = Self {
             updates: updates::Updates::load(&dir),
             dir,
             root,
@@ -183,6 +200,7 @@ impl Panel {
             inputs,
             outputs: orvia_engine::outputs().unwrap_or_default(),
             monitors: orvia_engine::monitors().unwrap_or_default(),
+            test: Default::default(),
             page: Page::Mixer,
             logo: std::sync::Arc::new(gpui::Image::from_bytes(
                 gpui::ImageFormat::Png,
@@ -194,7 +212,13 @@ impl Panel {
             error,
             installed,
             restarting: false,
+            test_only,
+        };
+        if test_only {
+            panel.page = Page::MicTest;
+            panel.open_mic_test();
         }
+        panel
     }
 
     fn check_for_updates(&mut self, cx: &mut Context<Self>) {
@@ -216,6 +240,17 @@ impl Panel {
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
         match control {
             Control::Page(page) => {
+                if self.page != page {
+                    if self.page == Page::MicTest {
+                        if self.test.recording.is_some() {
+                            self.record_test();
+                        }
+                        self.test = Default::default();
+                    }
+                    if page == Page::MicTest {
+                        self.open_mic_test();
+                    }
+                }
                 self.page = page;
                 if page == Page::Log {
                     self.log.refresh(&self.dir);
@@ -226,12 +261,21 @@ impl Panel {
                 self.activate(Control::Choose(Endpoint::Monitor), cx);
             }
             Control::Choose(side) => {
+                if matches!(side, Endpoint::TestSource | Endpoint::TestSpeaker) && self.test.busy()
+                {
+                    return;
+                }
                 self.choosing = (self.choosing != Some(side)).then_some(side);
                 if self.choosing.is_some() {
                     let (list, devices) = match side {
                         Endpoint::Input => (&mut self.inputs, orvia_engine::inputs()),
                         Endpoint::Output => (&mut self.outputs, orvia_engine::outputs()),
-                        Endpoint::Monitor => (&mut self.monitors, orvia_engine::monitors()),
+                        Endpoint::Monitor | Endpoint::TestSpeaker => {
+                            (&mut self.monitors, orvia_engine::monitors())
+                        }
+                        Endpoint::TestSource => {
+                            (&mut self.test.sources, orvia_engine::mic_test::sources())
+                        }
                     };
                     match devices {
                         Ok(devices) => *list = devices,
@@ -240,6 +284,17 @@ impl Panel {
                     self.reset_picker_cursor(side);
                 }
             }
+            Control::Select(Endpoint::TestSource, id) => {
+                self.test.source = id;
+                self.choosing = None;
+            }
+            Control::Select(Endpoint::TestSpeaker, id) => {
+                self.test.speaker = id;
+                self.choosing = None;
+            }
+            Control::TestRecord => self.record_test(),
+            Control::TestTake(take) => self.select_take(take),
+            Control::TestPlay => self.play_test(),
             Control::RestartEngine if !self.restarting => {
                 self.restarting = true;
                 self.error.clear();
@@ -278,6 +333,7 @@ impl Panel {
                                 settings.monitor_enabled = id.is_some();
                                 settings.monitor = id;
                             }
+                            Endpoint::TestSource | Endpoint::TestSpeaker => unreachable!(),
                         }
                         self.choosing = None;
                     }
@@ -319,31 +375,42 @@ impl Panel {
 mod engine_control;
 mod engine_log;
 mod icons;
+mod microphone_test;
 mod view;
 
 mod updates;
 
 fn main() -> io::Result<()> {
+    let test_only = std::env::args_os().skip(1).any(|arg| arg == "--mic-test");
     let dir = data_dir()?;
     fs::create_dir_all(&dir)?;
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(dir.join("window.lock"))?;
+        .open(dir.join(if test_only {
+            "mic-test-window.lock"
+        } else {
+            "window.lock"
+        }))?;
     if let Err(e) = fs2::FileExt::try_lock_exclusive(&lock) {
         if e.raw_os_error() == Some(33) || e.kind() == io::ErrorKind::WouldBlock {
+            if test_only {
+                return Ok(());
+            }
             return fs::write(dir.join("show-window"), b"1");
         }
         return Err(e);
     }
-    let _ = fs::remove_file(dir.join("close-window"));
+    if !test_only {
+        let _ = fs::remove_file(dir.join("close-window"));
+    }
     let installed = Version::parse(env!("CARGO_PKG_VERSION")).map_err(io::Error::other)?;
-    run(&dir, installed);
+    run(&dir, installed, test_only);
     Ok(())
 }
 
-fn run(dir: &Path, installed: Version) {
+fn run(dir: &Path, installed: Version, test_only: bool) {
     let dir = dir.to_owned();
     Application::new().with_assets(icons::Icons).run(move |cx| {
         cx.bind_keys([
@@ -360,14 +427,21 @@ fn run(dir: &Path, installed: Version) {
         let opened = cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Orvia".into()),
+                    title: Some(
+                        if test_only {
+                            "Orvia · Mic test"
+                        } else {
+                            "Orvia"
+                        }
+                        .into(),
+                    ),
                     ..Default::default()
                 }),
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 window_min_size: Some(size(px(590.), px(440.))),
                 ..Default::default()
             },
-            |w, cx| cx.new(|cx| Panel::new(dir, installed, w, cx)),
+            |w, cx| cx.new(|cx| Panel::new(dir, installed, test_only, w, cx)),
         );
         if opened.is_err() {
             cx.quit();

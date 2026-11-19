@@ -7,16 +7,24 @@ impl Panel {
             Endpoint::Input => (&self.inputs, self.prefs.input.as_deref()),
             Endpoint::Output => (&self.outputs, self.prefs.output.as_deref()),
             Endpoint::Monitor => (&self.monitors, self.prefs.monitor.as_deref()),
+            Endpoint::TestSource => (&self.test.sources, self.test.source.as_deref()),
+            Endpoint::TestSpeaker => (&self.monitors, self.test.speaker.as_deref()),
         }
     }
 
     fn choices(&self, side: Endpoint) -> impl Iterator<Item = (Option<&str>, &str)> {
-        let default = (side == Endpoint::Input).then_some((
-            None,
-            self.prefs
-                .language
-                .text("System default microphone", "システムの既定のマイク"),
-        ));
+        let l = self.prefs.language;
+        let default = match side {
+            Endpoint::Input => Some((
+                None,
+                l.text("System default microphone", "システムの既定のマイク"),
+            )),
+            Endpoint::TestSpeaker => Some((
+                None,
+                l.text("System default output", "システムの既定の出力"),
+            )),
+            _ => None,
+        };
         default.into_iter().chain(
             self.devices_for(side)
                 .0
@@ -61,9 +69,15 @@ impl Panel {
         let key = event.keystroke.key.as_str();
         let Some(side) = self.choosing else {
             if matches!(key, "down" | "up")
-                && let Some(side) = [Endpoint::Input, Endpoint::Output, Endpoint::Monitor]
-                    .into_iter()
-                    .find(|s| self.picker_anchors[*s as usize].focus.is_focused(window))
+                && let Some(side) = [
+                    Endpoint::Input,
+                    Endpoint::Output,
+                    Endpoint::Monitor,
+                    Endpoint::TestSource,
+                    Endpoint::TestSpeaker,
+                ]
+                .into_iter()
+                .find(|s| self.picker_anchors[*s as usize].focus.is_focused(window))
             {
                 self.activate(Control::Choose(side), cx);
                 cx.stop_propagation();
@@ -92,6 +106,8 @@ impl Panel {
             Endpoint::Input => "input",
             Endpoint::Output => "output",
             Endpoint::Monitor => "headphones",
+            Endpoint::TestSource => "test-source",
+            Endpoint::TestSpeaker => "test-speaker",
         };
         let open = self.choosing == Some(side);
         let measured = self.picker_anchors[side as usize].bounds.clone();

@@ -12,6 +12,10 @@ Find native packages in `dist/`. The macOS app is ad-hoc signed. If Gatekeeper b
 
 ## Audio routing checks
 
+Open **Mic test** and choose the same virtual microphone as your receiving app. Select **Before update**, click **Record**, speak, pause briefly, then speak again. Stop or wait ten seconds. Choose your headphones and click **Play recording** to listen to the transition. After upgrading, repeat under **After update**. Switch between the two recordings to compare them.
+
+To test an older installation, run the newer mixer with `--mic-test`. This opens only the recorder and shows the running engine version. Both recordings are stored locally as `mic-test/before.wav` and `mic-test/after.wav` in Orvia's user data directory. Retaking replaces only the selected recording.
+
 1. Select a physical input and a virtual output. Record from both devices while moving gain from 100% to 0% and back. Only the virtual recording should change.
 2. Switch between Off and the three filters. Check that the mixer keeps its history and that the headphones follow the processed output.
 3. Unplug and reconnect the input, output and headphones in turn. The engine should recover the selected route without sending audio to a fallback speaker.

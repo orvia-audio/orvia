@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f8f8f4">
-  <meta name="description" content="Orvia microphone mixer for Windows, macOS, and Linux. Compare noise filters and preview the mixer.">
+  <meta name="theme-color" content="#fafbf9">
+  <meta name="description" content="Orvia is a real-time microphone mixer for Windows, macOS, and Linux. Reduce noise, adjust gain, and send your mix to the apps you choose.">
   <title>Orvia · Microphone mixer</title>
   <link rel="icon" href="media/orvia.svg" type="image/svg+xml">
   <link rel="stylesheet" href="style.css">
@@ -13,56 +13,77 @@
 <body>
   <a class="skip" href="#listen">Skip to audio player</a>
   <header class="bar"><div class="wrap">
-    <h1 class="brand"><img src="media/orvia.svg" width="31" height="31" alt="">Orvia</h1>
+    <span class="brand"><img src="media/orvia.svg" width="31" height="31" alt="">Orvia</span>
     <a class="github-link" href="https://github.com/sya-ri/orvia" aria-label="Orvia on GitHub" title="Orvia on GitHub"><img src="media/brand-github.svg" width="24" height="24" alt=""></a>
   </div></header>
   <main class="wrap" id="top">
-    <section class="player" id="listen" aria-labelledby="listen-title">
-      <div class="player-head"><h2 id="listen-title">Compare filters</h2>
-        <label class="background">Background
-          <select id="scene"><option value="air-conditioner">Air conditioner</option><option value="keyboard">Keyboard typing</option></select>
-        </label>
+    <div class="overview">
+      <div class="intro">
+        <h1>Real-time microphone mixer</h1>
+        <p>Reduce background noise and adjust mic gain on Windows, macOS, and Linux. Choose which apps hear your original microphone and which hear your mix.</p>
+        <a class="install-link" href="https://github.com/sya-ri/orvia/releases/latest">Download Orvia</a>
       </div>
-      <div class="modes" role="group" aria-label="Noise filter">
-        <button type="button" data-method="original" aria-pressed="false">Original</button>
-        <button type="button" data-method="deepfilternet3" aria-pressed="true">DeepFilterNet3</button>
-        <button type="button" data-method="rnnoise" aria-pressed="false">RNNoise</button>
-        <button type="button" data-method="webrtc" aria-pressed="false">WebRTC</button>
+      <section class="player" id="listen" aria-labelledby="listen-title">
+        <div class="player-head"><h2 id="listen-title">Compare noise filters</h2>
+          <label class="background">Background
+            <select id="scene"><option value="air-conditioner">Air conditioner</option><option value="keyboard">Keyboard typing</option></select>
+          </label>
+        </div>
+        <div class="modes" role="group" aria-label="Noise filter">
+          <button type="button" data-method="original" aria-pressed="false">Original</button>
+          <button type="button" data-method="deepfilternet3" aria-pressed="true">DeepFilterNet3</button>
+          <button type="button" data-method="rnnoise" aria-pressed="false">RNNoise</button>
+          <button type="button" data-method="webrtc" aria-pressed="false">WebRTC</button>
+        </div>
+        <div class="wave"><canvas id="waveform" aria-hidden="true"></canvas><input id="seek" type="range" aria-label="Playback position" min="0" max="14" step="0.01" value="0"></div>
+        <div class="transport">
+          <button class="play" type="button" id="play"><svg viewBox="0 0 20 20" aria-hidden="true"><path id="play-icon" d="m6 3 11 7-11 7Z"/></svg><span id="play-label">Play</span></button>
+          <button class="replay" type="button" id="replay" aria-label="Replay the last three seconds">↶ 3 s</button>
+          <output id="clock" for="seek">0:00 / 0:14</output>
+          <a class="sample-credits" href="sample-credits.html">Audio credits</a>
+        </div>
+        <p id="notice" role="status"></p>
+        <noscript><video controls preload="metadata" src="media/compare-16s.mp4"></video></noscript>
+      </section>
+    </div>
+
+    <section class="mixer" aria-labelledby="mixer-title">
+      <div class="mixer-controls">
+        <h2 id="mixer-title">Inside the mixer</h2>
+        <dl>
+          <dt>Local noise suppression</dt>
+          <dd>Process your voice on your computer with DeepFilterNet3, RNNoise, or WebRTC.</dd>
+          <dt>Signal history</dt>
+          <dd>Watch your mic level before and after noise suppression as you speak.</dd>
+          <dt>Channels and gain</dt>
+          <dd>Keep stereo or mix down to mono. Set output gain from 0% to 200%.</dd>
+        </dl>
       </div>
-      <div class="wave"><canvas id="waveform" aria-hidden="true"></canvas><input id="seek" type="range" aria-label="Playback position" min="0" max="14" step="0.01" value="0"></div>
-      <div class="transport">
-        <button class="play" type="button" id="play"><svg viewBox="0 0 20 20" aria-hidden="true"><path id="play-icon" d="m6 3 11 7-11 7Z"/></svg><span id="play-label">Play</span></button>
-        <button class="replay" type="button" id="replay" aria-label="Replay the last three seconds">↶ 3 s</button>
-        <output id="clock" for="seek">0:00 / 0:14</output>
-      </div>
-      <p id="notice" role="status"></p>
-      <noscript><video controls preload="metadata" src="media/compare-16s.mp4"></video></noscript>
+      <a class="screen" href="media/mixer.png" aria-label="Open the full-size Orvia mixer screenshot"><img src="media/mixer.png" width="830" height="640" alt="Orvia’s Mixer tab with the live signal graph, DeepFilterNet3 selected, mono output and the headphone monitor on."></a>
     </section>
 
-    <section class="routing" id="routing" aria-labelledby="routing-title">
-      <div>
-        <h2 id="routing-title">Audio routing</h2>
-        <figure class="routes" aria-label="Each app can select the physical microphone for the original audio or the virtual microphone for the Orvia mix. Headphones can monitor the mix.">
+    <div class="setup">
+      <section class="routing" id="routing" aria-labelledby="routing-title">
+        <h2 id="routing-title">Route audio to your apps</h2>
+        <p>Select an input in each app’s microphone settings.</p>
+        <figure class="routes" aria-label="Microphone inputs and the audio they carry">
           <div class="route"><img src="media/microphone.svg" alt=""><span>Physical mic</span><span aria-hidden="true">→</span><strong>Original audio</strong></div>
           <div class="route"><img src="media/orvia.svg" alt=""><span>Virtual mic</span><span aria-hidden="true">→</span><strong>Orvia mix</strong></div>
-          <div class="monitor"><img src="media/headphones.svg" alt="">Headphone monitor</div>
         </figure>
-      </div>
-      <a class="screen" href="media/mixer.png" aria-label="Open the full-size Orvia mixer screenshot"><img src="media/mixer.png" width="830" height="640" alt="Orvia mixer showing before-and-after levels, stereo and mono modes, gain and headphone monitoring."></a>
-    </section>
+      </section>
 
-    <section class="install" id="install" aria-labelledby="install-title">
-      <h2 id="install-title">Install Orvia</h2>
-      <ul>
-        <li><b>Windows 11 x64</b><a href="https://github.com/sya-ri/orvia/actions/workflows/windows.yml" aria-label="Download Windows MSI snapshot">MSI</a></li>
-        <li><b>macOS 13+</b><a href="https://github.com/sya-ri/orvia/actions/workflows/desktop.yml" aria-label="Download macOS disk image snapshot">DMG</a></li>
-        <li><b>Ubuntu 24.04 x64</b><a href="https://github.com/sya-ri/orvia/actions/workflows/desktop.yml" aria-label="Download Ubuntu package snapshot">DEB</a></li>
-      </ul>
-    </section>
+      <section class="install" id="install" aria-labelledby="install-title">
+        <h2 id="install-title">Platform support</h2>
+        <table>
+          <thead><tr><th scope="col">System</th><th scope="col">Installer</th><th scope="col">Virtual microphone</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">Windows 11 x64</th><td>MSI</td><td>Virtual Audio Cable or Wave Link</td></tr>
+            <tr><th scope="row">macOS 13+</th><td>DMG · Apple Silicon or Intel</td><td>BlackHole 2ch</td></tr>
+            <tr><th scope="row">Ubuntu 24.04 x64</th><td>DEB</td><td>Included for PipeWire</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </div>
   </main>
-  <footer class="wrap">
-    <details class="credits"><summary>Audio credits</summary><p>Speech by the <a href="https://commons.wikimedia.org/wiki/File:Speech_12dB_s16.flac">Opus Codec working group</a> (<a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a>), <a href="https://commons.wikimedia.org/wiki/File:Air_conditioner_hum_(Gravity_Sound).wav">air conditioner by Gravity Sound</a> (<a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>), and <a href="https://commons.wikimedia.org/wiki/File:Keyboard_noise.ogg">keyboard by Yuyudevil</a> (public domain). Orvia mixed, filtered and time-aligned the excerpts.</p></details>
-    <a href="licenses.txt">Licenses</a>
-  </footer>
 </body>
 </html>

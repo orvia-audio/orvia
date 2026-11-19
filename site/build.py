@@ -10,6 +10,7 @@ media = out / "media"
 media.mkdir(parents=True, exist_ok=True)
 for name in ("index.html", "style.css", "player.js"):
     shutil.copyfile(site / name, out / name)
+shutil.copyfile(site / "brand-github.svg", media / "brand-github.svg")
 for name in ("orvia.svg", "mixer.png"):
     shutil.copyfile(root / "assets" / name, media / name)
 for name in ("microphone.svg", "headphones.svg"):

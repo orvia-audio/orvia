@@ -23,7 +23,8 @@ button, select { color: inherit; }
 .bar .wrap, footer { display: flex; align-items: center; gap: 1.1rem; }
 .bar .wrap { min-height: 3.8rem; justify-content: space-between; }
 .brand { display: inline-flex; align-items: center; gap: .5rem; font-size: 1.38rem; font-weight: 680; letter-spacing: -.045em; text-decoration: none; }
-.bar a:last-child { font-size: .95rem; }
+.github-link { display: grid; place-items: center; width: 44px; height: 44px; border-radius: .35rem; }
+.github-link:hover { background: #e9ede8; }
 main.wrap { padding-top: clamp(1.2rem, 3vw, 2.2rem); }
 h2 { font-size: clamp(1.25rem, 2.5vw, 1.5rem); line-height: 1.24; letter-spacing: -.033em; font-weight: 650; }
 section[id] { scroll-margin-top: 1rem; }

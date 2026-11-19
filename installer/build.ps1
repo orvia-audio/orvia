@@ -33,6 +33,7 @@ try {
     $metadata = cargo metadata --format-version 1 --no-deps | ConvertFrom-Json
     $app = $metadata.packages | Where-Object name -eq 'orvia'
     $version = $app.version
+    $productVersion = & "$PSScriptRoot/product-version.ps1" -Version $version -Series $metadata.metadata.'windows-installer'.series
     $appBuild = cargo build --workspace --locked --release --message-format=json-render-diagnostics |
         ForEach-Object { $_ | ConvertFrom-Json } |
         Where-Object { $_.reason -eq 'build-script-executed' -and $_.package_id -eq $app.id }
@@ -48,7 +49,7 @@ try {
     $suffix = if ($WithTestDriver) { '-test' } else { '' }
     $name = "Orvia-$version-windows-x64$suffix.msi"
     $runtime = Get-Item "$env:VCToolsRedistDir/x64/Microsoft.VC*.CRT/vcruntime140.dll" | Select-Object -First 1
-    Run wix (@('build','-arch','x64','-d',"Runtime=$($runtime.FullName)",'-d',"Version=$version",'-d',"Work=$work",'-d',"Dist=$dist",
+    Run wix (@('build','-arch','x64','-d',"Runtime=$($runtime.FullName)",'-d',"AppVersion=$version",'-d',"ProductVersion=$productVersion",'-d',"Work=$work",'-d',"Dist=$dist",
         '-d',"Bin=$root/target/release",'-d',"Icon=$icon",'-intermediateFolder',"$work/wix$suffix",
         '-pdbtype','none','-out',"$dist/$name","$PSScriptRoot/Orvia.wxs") + $driverFlags)
     $files = @($name,'THIRD-PARTY-NOTICES.txt')

@@ -4,6 +4,8 @@ Orvia sends one microphone through channel mixing, optional noise suppression, g
 
 **Windows 11 x64 with Secure Boot enabled.** The standard MSI installs the application. Install a supported, production-signed virtual audio device separately. The private development builds are available as artifacts of the Windows workflow.
 
+Development builds for the first release carry versions such as `0.1.0-snapshot.1`. The first stable release will be `v0.1.0`. Preferences and the installer name show the application version. Windows lists a separate numeric version for installer upgrades.
+
 ## Route a microphone
 
 1. Install a virtual cable. Eugene Muzychenko provides **Virtual Audio Cable Lite** for private home use unrelated to income generation. Its single cable exposes a playback device and a recording device, both usually called **Line 1 (Virtual Audio Cable)**. [VAC downloads and license](https://vac.muzychenko.net/en/download.htm)

@@ -8,7 +8,7 @@
     <?define Family = "3E169810-1163-4F20-B547-F00347D32761" ?>
     <?define OtherFamily = "FF4E4F65-2891-4DB8-BDBC-C42D9B179C3B" ?>
   <?endif?>
-  <Package Name="$(var.ProductName)" Manufacturer="Orvia" Version="$(var.Version)"
+  <Package Name="$(var.ProductName) $(var.AppVersion)" Manufacturer="Orvia" Version="$(var.ProductVersion)"
            UpgradeCode="$(var.Family)" Scope="perMachine">
     <MajorUpgrade DowngradeErrorMessage="A newer version of Orvia is already installed." Schedule="afterInstallInitialize" />
     <Upgrade Id="$(var.OtherFamily)">

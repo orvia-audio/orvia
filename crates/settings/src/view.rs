@@ -43,6 +43,21 @@ fn note(s: impl Into<SharedString>) -> gpui::Div {
     div().text_sm().text_color(rgb(MUTED)).child(s.into())
 }
 
+fn reading_passage(l: Language) -> gpui::Div {
+    let text = reading::passage(l);
+    stack()
+        .gap_1()
+        .child(note(
+            l.text("Read this passage aloud", "声に出して読む例文"),
+        ))
+        .child(
+            div()
+                .text_xl()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(format!("{}{text}{}", l.text("“", "「"), l.text("”", "」"))),
+        )
+}
+
 impl Panel {
     fn button(
         &self,
@@ -61,7 +76,7 @@ impl Panel {
             };
         let leading = match &control {
             Control::AutoAdjust => Some("adjustments-horizontal.svg"),
-            Control::Test(TestAction::Record) => Some("microphone.svg"),
+            Control::BeginReading | Control::Test(TestAction::Record) => Some("microphone.svg"),
             Control::Test(TestAction::Play) => Some("player-play.svg"),
             Control::Test(TestAction::FinishRecording | TestAction::StopPlayback) => {
                 Some("player-stop.svg")
@@ -83,7 +98,8 @@ impl Panel {
             _ => None,
         };
         let wide = trigger.is_some();
-        let primary = matches!(control, Control::Test(action) if action != TestAction::Retake);
+        let primary = matches!(control, Control::BeginReading)
+            || matches!(control, Control::Test(action) if action != TestAction::Retake);
         div()
             .id(id.into())
             .flex()
@@ -293,7 +309,6 @@ impl Panel {
             .map(|r| r.duration())
             .or_else(|| self.test.clip.as_ref().map(|c| c.duration()))
             .unwrap_or_default();
-        let limit = orvia_engine::mic_test::LIMIT.as_secs();
         let status = match action {
             TestAction::FinishRecording => l.text("Recording", "録音中"),
             TestAction::StopPlayback => l.text("Playing", "再生中"),
@@ -327,6 +342,23 @@ impl Panel {
                         TERRACOTTA,
                     ))
                     .child(self.picker(Endpoint::TestSpeaker, cx))
+                    .child(reading_passage(l))
+                    .child(note(match action {
+                        TestAction::FinishRecording if self.test.reader.heard_first_half() => l
+                            .text(
+                                "Opening words recognized. Continue to the end.",
+                                "前半を確認しました。最後まで読んでください。",
+                            ),
+                        TestAction::FinishRecording => l.text(
+                            "Read aloud to finish automatically.",
+                            "例文を読み終えると録音が止まります。",
+                        ),
+                        TestAction::Record => l.text(
+                            "Press Record, then read the passage aloud.",
+                            "録音を押してから例文を読んでください。",
+                        ),
+                        _ => "",
+                    }))
                     .child(
                         row()
                             .border_t_1()
@@ -339,7 +371,7 @@ impl Panel {
                                 Control::Test(action),
                                 cx,
                             ))
-                            .child(note(format!("{:.1} / {limit} s", length.as_secs_f32())))
+                            .child(note(format!("{:.1} s", length.as_secs_f32())))
                             .child(div().flex_1())
                             .when(self.test.clip.is_some(), |d| {
                                 d.child(self.button(
@@ -354,13 +386,50 @@ impl Panel {
             )
     }
 
+    fn reading_prompt(
+        &self,
+        active: bool,
+        reader: &reading::Reader,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let l = self.prefs.language;
+        let mut body = stack().child(reading_passage(l));
+        if active {
+            body = body
+                .child(heading(
+                    l.text("Recording", "録音中"),
+                    "microphone.svg",
+                    TERRACOTTA,
+                ))
+                .child(note(if reader.heard_first_half() {
+                    l.text(
+                        "Opening words recognized. Continue to the end.",
+                        "前半を確認しました。最後まで読んでください。",
+                    )
+                } else {
+                    l.text(
+                        "Read the passage aloud when ready.",
+                        "準備ができたら例文を読んでください。",
+                    )
+                }));
+        } else {
+            body = body.child(row().child(self.button(
+                "begin-reading",
+                l.text("Start reading", "録音を始める"),
+                true,
+                Control::BeginReading,
+                cx,
+            )));
+        }
+        body
+    }
+
     fn adjustment_page(
         &self,
         adjust: &auto_adjust::AutoAdjust,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         use auto_adjust::Stage;
-        use orvia_core::calibration::{DURATION, speech_cue};
 
         let l = self.prefs.language;
         let mut panel = card().child(heading(
@@ -369,44 +438,32 @@ impl Panel {
             TERRACOTTA,
         ));
         match &adjust.stage {
-            Stage::Measuring(recording, _) => {
-                let elapsed = recording.duration();
-                let cue = speech_cue(elapsed);
-                let prompt = match cue {
-                    Some(n) => format!(
-                        "{}  {n}/2",
-                        l.text("Speak at your usual distance", "普段の距離で話してください")
-                    ),
-                    None => l
-                        .text("Stay quiet for a moment", "少し静かにしてください")
-                        .to_owned(),
-                };
-                panel =
-                    panel
-                        .child(note(self.device_name(Endpoint::Input)))
-                        .child(
-                            row()
-                                .justify_between()
-                                .child(div().text_lg().child(prompt))
-                                .child(note(format!(
-                                    "{:.1} / {} s",
-                                    elapsed.as_secs_f32(),
-                                    DURATION.as_secs()
-                                ))),
-                        )
-                        .child(
-                            div().h(px(5.)).w_full().rounded_full().bg(rgb(LINE)).child(
-                                div().h_full().rounded_full().bg(rgb(TERRACOTTA)).w(
-                                    gpui::relative(
-                                        (elapsed.as_secs_f32() / DURATION.as_secs_f32()).min(1.),
-                                    ),
-                                ),
-                            ),
-                        )
-                        .child(note(l.text(
-                            "Count from one to five at each prompt. Then speak once more to record the suggested mix on the virtual microphone.",
-                            "合図に合わせて1から5まで数えてください。最後にもう一度話すと、おすすめの設定で仮想マイクから録音します。",
-                        )));
+            Stage::Room(_, _) => {
+                panel = panel
+                    .child(note(self.device_name(Endpoint::Input)))
+                    .child(div().text_lg().child(l.text(
+                        "Stay quiet while Orvia samples the room",
+                        "環境音を測っています。少し静かにしてください",
+                    )))
+                    .child(note(l.text(
+                        "Next, read this passage twice at your own pace.",
+                        "次の文を普段の速さで2回読みます。",
+                    )))
+                    .child(reading_passage(l));
+            }
+            Stage::Phrase {
+                first,
+                recording,
+                reader,
+                ..
+            } => {
+                panel = panel
+                    .child(note(format!(
+                        "{} {} / 2",
+                        l.text("Microphone reading", "マイクで読み上げ"),
+                        if first.is_some() { 2 } else { 1 }
+                    )))
+                    .child(self.reading_prompt(recording.is_some(), reader, cx));
             }
             Stage::Analyzing(_) => {
                 panel = panel.child(note(l.text(
@@ -414,26 +471,24 @@ impl Panel {
                     "声の出だしと環境音を解析中…",
                 )))
             }
-            Stage::Auditioning { recording, .. } => {
-                panel = panel.child(heading(
-                    l.text("Record the virtual microphone", "仮想マイクから録音"),
-                    "microphone.svg",
-                    TERRACOTTA,
+            Stage::PreviewReady(_) => {
+                panel = panel
+                    .child(note(
+                        l.text("Virtual microphone preview", "仮想マイクのプレビュー"),
+                    ))
+                    .child(self.reading_prompt(false, &Default::default(), cx));
+            }
+            Stage::Auditioning {
+                recording, reader, ..
+            } => {
+                panel = panel.child(note(
+                    l.text("Virtual microphone preview", "仮想マイクのプレビュー"),
                 ));
-                if let Some((r, _)) = recording {
-                    panel = panel
-                        .child(div().text_lg().child(l.text(
-                            "Speak again at your usual distance",
-                            "普段の距離でもう一度話してください",
-                        )))
-                        .child(note(format!(
-                            "{:.1} / {} s",
-                            r.duration().as_secs_f32(),
-                            auto_adjust::PREVIEW_DURATION.as_secs()
-                        )));
+                if recording.is_some() {
+                    panel = panel.child(self.reading_prompt(true, reader, cx));
                 } else {
-                    panel = panel.child(note(l.text(
-                        "Preparing the recording endpoint…",
+                    panel = panel.child(reading_passage(l)).child(note(l.text(
+                        "Opening the recording endpoint…",
                         "仮想マイクの録音側を準備中…",
                     )));
                 }

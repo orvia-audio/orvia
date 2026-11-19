@@ -30,6 +30,7 @@ pub(super) struct MicTest {
     pub(super) source: Option<String>,
     pub(super) speaker: Option<String>,
     pub(super) recording: Option<Recording>,
+    pub(super) reader: reading::Reader,
     pub(super) clip: Option<Clip>,
     pub(super) playback: Option<Playback>,
     pub(super) adjust: Option<super::auto_adjust::AutoAdjust>,
@@ -131,6 +132,7 @@ impl Panel {
                 Ok(recording) => {
                     self.error.clear();
                     self.test.recording = Some(recording);
+                    self.test.reader = Default::default();
                     self.test.started = Some(Instant::now());
                     self.test.recording_route = self
                         .status
@@ -168,11 +170,13 @@ impl Panel {
         if self.test.adjust.is_some() {
             self.poll_adjustment(cx);
         }
-        let timeout = self
-            .test
-            .started
-            .is_some_and(|t| t.elapsed() > mic_test::LIMIT + Duration::from_secs(3));
-        if let Some(recording) = &self.test.recording {
+        let timeout = self.test.started.is_some_and(|t| {
+            self.test
+                .clip
+                .as_ref()
+                .is_some_and(|c| t.elapsed() > c.duration() + Duration::from_secs(4))
+        });
+        if let Some(recording) = &mut self.test.recording {
             if !self
                 .status
                 .as_ref()
@@ -188,21 +192,15 @@ impl Panel {
                         "音声経路が変わりました。録り直してください。",
                     )
                     .into();
-            } else if let Some(error) = recording.error() {
-                self.test.recording = None;
-                self.test_error(error);
-            } else if recording.duration() >= mic_test::LIMIT {
-                self.finish_test_recording();
-            } else if timeout {
-                self.test.recording = None;
-                self.error = self
-                    .prefs
-                    .language
-                    .text(
-                        "Recording stalled. Check the virtual microphone.",
-                        "録音が途切れました。仮想マイクを確認してください。",
-                    )
-                    .into();
+            } else {
+                match self.test.reader.listen(recording, self.prefs.language, cx) {
+                    Ok(true) => self.finish_test_recording(),
+                    Ok(false) => {}
+                    Err(e) => {
+                        self.test.recording = None;
+                        self.test_error(e);
+                    }
+                }
             }
         } else if let Some(playback) = &self.test.playback {
             match playback.finished() {

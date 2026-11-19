@@ -36,7 +36,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y libasound2-dev libdbus-1-dev libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb-xkb-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev libvulkan-dev clang libclang-dev libssl-dev dpkg-dev pipewire-pulse wireplumber pulseaudio-utils xvfb xauth xdotool mesa-vulkan-drivers
+          sudo apt-get install -y libasound2-dev libdbus-1-dev libfontconfig1-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev libxcb-xkb-dev libxcb-shape0-dev libxcb-xfixes0-dev libxcb-render0-dev libvulkan-dev clang libclang-dev libssl-dev dpkg-dev pipewire-pulse wireplumber pulseaudio-utils espeak-ng xvfb xauth xdotool mesa-vulkan-drivers
       - name: Check native code
         run: |
           cargo clippy --workspace --all-targets --locked -- -D warnings

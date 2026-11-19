@@ -21,12 +21,18 @@ pub(super) fn transcribe(mut audio: Vec<f32>, ja: bool) -> Result<String, String
     if peak < 0.0001 {
         return Ok(String::new());
     }
-    // Preserve a short lead-in while removing waiting time from the encoder context.
-    let onset = audio
-        .iter()
-        .position(|s| s.abs() > (peak * 0.015).max(0.0001))
-        .unwrap_or(0);
-    audio.drain(..onset.saturating_sub(4_000));
+    // Long gaps between clauses should not consume the recognizer's context.
+    // Work on the recognition copy so the preview retains the speaker's timing.
+    let quiet = (peak * 0.015).max(0.0001);
+    let mut quiet_samples = 0;
+    audio.retain(|s| {
+        quiet_samples = if s.abs() <= quiet {
+            quiet_samples + 1
+        } else {
+            0
+        };
+        quiet_samples < 4_000
+    });
     for sample in &mut audio {
         *sample *= 0.8 / peak;
     }

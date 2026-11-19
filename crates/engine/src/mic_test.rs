@@ -1,4 +1,4 @@
-//! Bounded microphone recordings with local preview playback.
+//! Microphone recordings with local preview playback.
 use crate::{
     formats::{InputRate, Port, config, stream_config, stream_continues},
     host, is_virtual_cable, label,
@@ -24,8 +24,8 @@ use std::{
     time::Duration,
 };
 
-/// Maximum length of a microphone test clip.
-pub const LIMIT: Duration = Duration::from_secs(10);
+/// Capacity of the queue between the device callback and the recorder.
+const QUEUE_DURATION: Duration = Duration::from_secs(10);
 const RECORDING_FILE: &str = "recording.wav";
 type Frame = [f32; 2];
 
@@ -149,9 +149,10 @@ fn errors() -> (
     )
 }
 
-/// An active, length-limited microphone recording. Dropping it stops capture.
+/// An active microphone recording. Drain it regularly while waiting for the reader. Dropping it stops capture.
 pub struct Recording {
     stream: Stream,
+    frames: Vec<Frame>,
     rx: Consumer<Frame>,
     errors: mpsc::Receiver<cpal::Error>,
     rate: u32,
@@ -193,7 +194,7 @@ impl Recording {
     fn open(device: &Device, port: Port) -> Result<Self> {
         let format = config(device, port)?;
         let rate = format.sample_rate();
-        let (tx, rx) = RingBuffer::new(rate as usize * LIMIT.as_secs() as usize);
+        let (tx, rx) = RingBuffer::new(rate as usize * QUEUE_DURATION.as_secs() as usize);
         let (error, errors) = errors();
         let stream = match format.sample_format() {
             SampleFormat::F32 => capture::<f32>(device, &format, tx, error),
@@ -202,6 +203,7 @@ impl Recording {
         }?;
         stream.play()?;
         Ok(Self {
+            frames: Vec::new(),
             stream,
             rx,
             errors,
@@ -211,7 +213,33 @@ impl Recording {
 
     /// Duration of the frames received so far, excluding device startup time.
     pub fn duration(&self) -> Duration {
-        Duration::from_secs_f64(self.rx.slots() as f64 / f64::from(self.rate))
+        Duration::from_secs_f64((self.frames.len() + self.rx.slots()) as f64 / f64::from(self.rate))
+    }
+
+    /// Drain the device queue without stopping capture. Returns the complete take so far.
+    ///
+    /// # Errors
+    ///
+    /// Reports device loss, queue overflow or insufficient memory for the take.
+    pub fn collect(&mut self) -> Result<&[[f32; 2]]> {
+        if let Some(e) = self.error() {
+            return Err(e.into());
+        }
+        let count = self.rx.slots();
+        ensure!(
+            count < self.rx.buffer().capacity(),
+            "The recording device queue overflowed"
+        );
+        if count > 0 {
+            self.frames.try_reserve(count)?;
+            self.frames.extend(self.rx.read_chunk(count)?);
+        }
+        Ok(&self.frames)
+    }
+
+    /// Sample rate of the incoming PCM frames.
+    pub fn rate(&self) -> u32 {
+        self.rate
     }
 
     /// Take a device error reported during capture, if any.
@@ -225,20 +253,18 @@ impl Recording {
     ///
     /// Returns an error if capture failed or the device delivered no frames.
     pub fn finish(mut self) -> Result<Clip> {
+        self.collect()?;
         drop(self.stream);
-        if let Ok(error) = self.errors.try_recv() {
-            return Err(error.into());
-        }
         let count = self.rx.slots();
-        ensure!(count > 0, "The microphone returned no audio frames");
-        let frames = self
-            .rx
-            .read_chunk(count)?
-            .into_iter()
-            .collect::<Vec<_>>()
-            .into();
+        if count > 0 {
+            self.frames.extend(self.rx.read_chunk(count)?);
+        }
+        ensure!(
+            !self.frames.is_empty(),
+            "The microphone returned no audio frames"
+        );
         Ok(Clip {
-            frames,
+            frames: self.frames.into(),
             rate: self.rate,
         })
     }
@@ -282,20 +308,26 @@ impl Clip {
     /// # Errors
     ///
     /// Returns a sample error when the recording cannot support a recommendation.
-    pub fn recommend(&self, mixing: Mixing) -> Result<Recommendation, SampleError> {
-        let converted;
-        let input = if self.rate == SAMPLE_RATE {
-            &self.frames[..]
-        } else {
-            let mut rate = InputRate::new(self.rate);
-            let mut frames = Vec::with_capacity(SAMPLE_RATE as usize * LIMIT.as_secs() as usize);
-            for &frame in self.frames.iter() {
-                rate.push(frame, |f| frames.push(f));
-            }
-            converted = frames;
-            &converted
-        };
-        calibration::recommend(input, mixing)
+    pub fn recommend(
+        &self,
+        phrases: [&Self; 2],
+        mixing: Mixing,
+    ) -> Result<Recommendation, SampleError> {
+        let room = self.model_frames();
+        let [first, second] = phrases.map(Self::model_frames);
+        calibration::recommend(&room, [&first, &second], mixing)
+    }
+
+    fn model_frames(&self) -> std::borrow::Cow<'_, [Frame]> {
+        if self.rate == SAMPLE_RATE {
+            return (&self.frames[..]).into();
+        }
+        let mut rate = InputRate::new(self.rate);
+        let mut frames = Vec::new();
+        for &frame in self.frames.iter() {
+            rate.push(frame, |f| frames.push(f));
+        }
+        frames.into()
     }
 
     /// Store the current take in the microphone test directory, creating it if necessary.
@@ -361,7 +393,7 @@ impl Clip {
     ///
     /// # Errors
     ///
-    /// Returns an error for unreadable, malformed, or oversized recordings.
+    /// Returns an error for unreadable, malformed, truncated or unsupported recordings.
     pub fn load(path: &Path) -> Result<Self> {
         let mut reader = hound::WavReader::open(path)?;
         let spec = reader.spec();
@@ -371,10 +403,11 @@ impl Clip {
                 && spec.bits_per_sample == 32
                 && (8_000..=48_000).contains(&spec.sample_rate)
                 && reader.duration() > 0
-                && u64::from(reader.duration()) <= u64::from(spec.sample_rate) * LIMIT.as_secs(),
+                && u64::from(reader.duration()) * 8 <= path.metadata()?.len(),
             "Unsupported microphone test WAV"
         );
-        let mut frames = Vec::with_capacity(reader.duration() as usize);
+        let mut frames = Vec::new();
+        frames.try_reserve_exact(reader.duration() as usize)?;
         let mut samples = reader.samples::<f32>();
         while let Some(left) = samples.next() {
             frames.push([left?, samples.next().context("Missing right channel")??]);
@@ -545,6 +578,20 @@ mod tests {
         );
         assert_eq!(Clip::load(&before).unwrap().frames, original.frames);
         assert_eq!(Clip::load(&after).unwrap().frames, previous);
+    }
+
+    #[test]
+    fn a_slow_reading_survives_reopening_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let frames = vec![[0.01, 0.02]; 96_000];
+        let clip = Clip {
+            frames: frames.into(),
+            rate: 8_000,
+        };
+        clip.save_latest(dir.path()).unwrap();
+        let loaded = Clip::load_latest(dir.path()).unwrap().unwrap();
+        assert_eq!(loaded.duration(), Duration::from_secs(12));
+        assert_eq!(loaded.frames, clip.frames);
     }
 
     #[test]

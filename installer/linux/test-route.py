@@ -10,6 +10,7 @@ import signal
 import subprocess
 import tempfile
 import time
+import wave
 
 
 def wait_for(check, message, timeout=10):
@@ -80,9 +81,9 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     captured = array.array("h", raw.read_bytes())
     # A 100 ms window contains exactly 44 periods. Require a coherent tone.
     size = 4800
-    wave = [complex(math.cos(i * 2 * math.pi * 440 / 48000),
+    reference = [complex(math.cos(i * 2 * math.pi * 440 / 48000),
                     math.sin(i * 2 * math.pi * 440 / 48000)) for i in range(size)]
-    amplitude = max((2 * abs(sum(x * w for x, w in zip(captured[n:n+size], wave))) / size
+    amplitude = max((2 * abs(sum(x * w for x, w in zip(captured[n:n+size], reference))) / size
                      for n in range(0, len(captured) - size, size)), default=0)
     if not 3000 < amplitude < 11000:
         snapshot = json.loads(status.read_text()) if status.exists() else {}
@@ -113,6 +114,17 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     def playing():
         return any(s["sink"] == headphones for s in pulse_devices("sink-inputs"))
 
+    speech_path = Path(tmp, "passage.wav")
+    run("espeak-ng", "-v", "en-us", "-s", "148", "-w", str(speech_path), "I opened the window and felt a cool breeze.")
+    with wave.open(str(speech_path)) as speech_file:
+        assert speech_file.getsampwidth() == 2 and speech_file.getnchannels() == 1
+        speech_rate = speech_file.getframerate()
+        speech = array.array("h", speech_file.readframes(speech_file.getnframes()))
+    def read_passage(sink, samples=speech):
+        # Lower the voice to exercise normalization and keep the cable-only marker distinct.
+        pcm = array.array("h", (s // 32 for s in samples))
+        subprocess.run(["pacat", "-d", sink, "--latency-msec=20", "--raw", "--format=s16le",
+                        "--channels=1", f"--rate={speech_rate}"], env=env, input=pcm.tobytes(), check=True)
     test_panel = start("orvia", "--mic-test")
     window = run("xdotool", "search", "--sync", "--onlyvisible", "--name", "Orvia .*Mic test").splitlines()[0]
     run("xdotool", "windowfocus", "--sync", window)
@@ -132,7 +144,11 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     # Retake is a separate control. It returns focus to the primary button.
     run("xdotool", "key", "--delay", "250", "Tab", "Return")
     wait_for(recording, "Retake did not start a new recording")
-    wait_for(lambda: take.stat().st_size > len(first), "The automatic stop did not save the retake", timeout=16)
+    read_passage("orvia_output", speech[:speech_rate])
+    time.sleep(11)
+    assert recording() and take.read_bytes() == first, "A pause mid-passage must not end the take"
+    read_passage("orvia_output")
+    wait_for(lambda: take.stat().st_size > len(first), "Reading the passage did not finish the retake", timeout=45)
     second = take.read_bytes()
     run("xdotool", "key", "Return")
     wait_for(playing, "The primary button did not play the automatically stopped retake")
@@ -191,22 +207,31 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
 
     # Four sidebar controls, four suppression choices, then Auto adjust.
     time.sleep(1)
-    guide = array.array("h")
-    block = array.array("h", (int(3800 * math.sin(2 * math.pi * 300 * i / 48000)) for i in range(480)))
-    quiet = array.array("h", [0]*480)
-    for n in range(960):
-        guide.extend(block if 225 <= n < 410 or 725 <= n < 910 else quiet)
     run("xdotool", "key", "--delay", "100", *["Tab"]*9, "Return")
-    wait_for(lambda: mic_count() >= 2, "Auto adjust did not start the physical mic test")
-    play_pcm("test_input", guide)
-    wait_for(recording, "The suggested mix was not recorded on the virtual microphone", timeout=35)
+    wait_for(lambda: mic_count() >= 2, "Auto adjust did not start room capture")
+    wait_for(lambda: mic_count() == 1, "Room capture did not finish")
+    for phrase_number in range(2):
+        time.sleep(0.6)
+        run("xdotool", "key", "Return")
+        wait_for(lambda: mic_count() >= 2, "The reading button did not open the microphone")
+        read_passage("test_input")
+        wait_for(lambda: mic_count() == 1, "The passage was not recognized", timeout=45)
+    # Wait for analysis. The reading button only becomes active when the suggestion is ready.
+    def start_preview():
+        if recording():
+            return True
+        run("xdotool", "key", "Return")
+        time.sleep(0.4)
+        return recording()
+    wait_for(start_preview, "The suggested mix was not recorded on the virtual microphone", timeout=45)
     trial = state / "suppression-audition.json"
     assert trial.is_file()
     assert json.loads((state / "settings.json").read_text())["deep_filter_limit_db"] == 12
     play_pcm("orvia_output", marker)
     def hear_preview():
-        wait_for(playing, "The virtual microphone take did not play automatically", timeout=12)
-        wait_for(lambda: not playing(), "The preview did not finish", timeout=12)
+        read_passage("test_input")
+        wait_for(playing, "The virtual microphone take did not play automatically", timeout=45)
+        wait_for(lambda: not playing(), "The preview did not finish", timeout=45)
     preview = record_headphones(hear_preview)
     assert 0.8 < preview/unity < 1.25, (preview, unity)
     assert not trial.exists() and take.read_bytes() == second

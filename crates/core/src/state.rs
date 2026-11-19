@@ -99,6 +99,8 @@ pub const AUDITION_FILE: &str = "suppression-audition.json";
 pub struct Audition {
     /// Timestamp identifying this request in the engine acknowledgement.
     pub started: std::time::SystemTime,
+    /// Last heartbeat from the active reading session.
+    pub refreshed: SystemTime,
     /// Persistent route and settings at the time of the original recording.
     pub baseline: Settings,
     /// Suggested limit to hear on the receiving endpoint.
@@ -110,8 +112,9 @@ impl Audition {
     pub fn active(&self, settings: &Settings, now: std::time::SystemTime) -> bool {
         self.baseline.same_audition(settings)
             && self.limit_db <= Settings::UNLIMITED_ATTENUATION_DB
+            && self.refreshed >= self.started
             && now
-                .duration_since(self.started)
+                .duration_since(self.refreshed)
                 .is_ok_and(|age| age < std::time::Duration::from_secs(14))
     }
 }
@@ -263,6 +266,7 @@ mod tests {
         let now = SystemTime::now();
         let request = Audition {
             started: now,
+            refreshed: now,
             baseline: Settings::default(),
             limit_db: 6,
         };
@@ -280,6 +284,20 @@ mod tests {
             ..settings.clone()
         };
         assert!(!request.active(&changed, now));
+    }
+
+    #[test]
+    fn active_readers_extend_the_audition_while_abandoned_requests_expire() {
+        let start = SystemTime::now();
+        let now = start + std::time::Duration::from_secs(90);
+        let request = Audition {
+            started: start,
+            refreshed: now,
+            baseline: Settings::default(),
+            limit_db: 9,
+        };
+        assert!(request.active(&request.baseline, now));
+        assert!(!request.active(&request.baseline, now + std::time::Duration::from_secs(14)));
     }
 
     #[test]

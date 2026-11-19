@@ -1,23 +1,6 @@
 //! Estimate a DeepFilterNet3 limit from two spoken phrases and the room sound between them.
 use crate::{BLOCK, Mixing, SAMPLE_RATE, Settings};
-use std::{ops::Range, time::Duration};
-
-// Positions are 10 ms blocks on the capture clock.
-const SPEECH: [Range<usize>; 2] = [200..500, 700..1000];
-const ROOM: [Range<usize>; 2] = [30..170, 550..670];
-const GUIDE_BLOCKS: usize = SPEECH[1].end;
-
-/// Capture duration for the guided microphone test.
-pub const DURATION: Duration = Duration::from_millis(GUIDE_BLOCKS as u64 * 10);
-
-/// Which phrase to speak now (1 or 2), or `None` during the room-sound intervals.
-pub fn speech_cue(elapsed: Duration) -> Option<usize> {
-    let block = (elapsed.as_millis() / 10) as usize;
-    SPEECH
-        .iter()
-        .position(|range| range.contains(&block))
-        .map(|i| i + 1)
-}
+use std::ops::Range;
 
 /// Estimated energy changes in the user's recorded test, before output gain.
 #[derive(Clone, Copy, Debug)]
@@ -74,19 +57,26 @@ fn dry_mix(limit: u16) -> f64 {
     }
 }
 
-fn choose(blocks: &[Energy]) -> Result<Recommendation, SampleError> {
-    let room_blocks: Vec<_> = ROOM
-        .iter()
-        .flat_map(|p| blocks[p.clone()].iter().copied())
-        .collect();
-    let room = Energy::sum(&room_blocks);
+fn choose(
+    blocks: &[Energy],
+    room_range: Range<usize>,
+    phrases: [Range<usize>; 2],
+) -> Result<Recommendation, SampleError> {
+    let room_blocks = &blocks[room_range];
+    if room_blocks.is_empty() {
+        return Err(SampleError::Incomplete);
+    }
+    let room = Energy::sum(room_blocks);
     let mut noise: Vec<_> = room_blocks.iter().map(|b| b.dry).collect();
     noise.sort_unstable_by(f64::total_cmp);
     // Demand a sustained rise above typical room fluctuations in both prompted phrases.
     let floor = (noise[noise.len() * 9 / 10] * 4.).max(1e-8);
     let mut onsets = Vec::with_capacity(6);
-    for phrase in SPEECH {
+    for phrase in phrases {
         let speech = &blocks[phrase];
+        if speech.len() < 20 {
+            return Err(SampleError::UnclearSpeech);
+        }
         let mut levels: Vec<_> = speech.iter().map(|b| b.dry).collect();
         levels.sort_unstable_by(f64::total_cmp);
         let threshold = floor.max(levels[levels.len() * 9 / 10] * 0.025);
@@ -148,10 +138,23 @@ fn choose(blocks: &[Energy]) -> Result<Recommendation, SampleError> {
 /// # Errors
 ///
 /// Returns a [`SampleError`] if the input is incomplete, clipped or lacks two clear phrases.
-pub fn recommend(input: &[[f32; 2]], mixing: Mixing) -> Result<Recommendation, SampleError> {
-    let input = input
-        .get(..BLOCK * GUIDE_BLOCKS)
-        .ok_or(SampleError::Incomplete)?;
+pub fn recommend(
+    room: &[[f32; 2]],
+    phrases: [&[[f32; 2]]; 2],
+    mixing: Mixing,
+) -> Result<Recommendation, SampleError> {
+    // Round each boundary to complete model blocks and preserve a room interval before each onset.
+    let mut input = Vec::new();
+    let mut append = |samples: &[[f32; 2]]| {
+        let start = input.len() / BLOCK;
+        input.extend_from_slice(&samples[..samples.len() / BLOCK * BLOCK]);
+        start..input.len() / BLOCK
+    };
+    let room_range = append(room);
+    let first = append(phrases[0]);
+    append(room);
+    let second = append(phrases[1]);
+    let block_count = input.len() / BLOCK;
     if input.iter().flatten().any(|x| !x.is_finite()) {
         return Err(SampleError::Incomplete);
     }
@@ -175,7 +178,7 @@ pub fn recommend(input: &[[f32; 2]], mixing: Mixing) -> Result<Recommendation, S
     let delay = dfn3_rs::ALGORITHM_DELAY / BLOCK;
     for ch in 0..channels {
         let mut filter = dfn3_rs::Denoiser::new();
-        for i in 0..GUIDE_BLOCKS + delay {
+        for i in 0..block_count + delay {
             let mut enhanced = [0.; BLOCK];
             let frame = std::array::from_fn(|j| dry.get(i * BLOCK + j).map_or(0., |f| f[ch]));
             filter.process(&frame, &mut enhanced);
@@ -208,7 +211,7 @@ pub fn recommend(input: &[[f32; 2]], mixing: Mixing) -> Result<Recommendation, S
             }
         })
         .collect();
-    choose(&blocks)
+    choose(&blocks, room_range, [first, second])
 }
 
 #[cfg(test)]
@@ -217,16 +220,18 @@ mod tests {
 
     #[test]
     fn strong_attenuation_is_suitable_only_when_both_onsets_survive() {
+        let speech = [200..500, 700..1000];
+        let choose = |blocks: &[Energy]| super::choose(blocks, 30..170, speech.clone());
         let mut blocks = vec![
             Energy {
                 dry: 0.00001,
                 wet: 0.,
                 cross: 0.
             };
-            GUIDE_BLOCKS
+            1000
         ];
         assert_eq!(choose(&blocks).unwrap_err(), SampleError::UnclearSpeech);
-        for p in SPEECH {
+        for p in speech.clone() {
             blocks[p.start + 20..p.start + 85].fill(Energy {
                 dry: 0.01,
                 wet: 0.01,

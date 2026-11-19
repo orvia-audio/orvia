@@ -90,9 +90,11 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         raise AssertionError(f"440 Hz amplitude {amplitude:.0f} in {len(captured)} samples; engine {snapshot}")
     mixer = start("orvia")
     def window_visible():
+        if (code := mixer.poll()) is not None:
+            raise RuntimeError(f"The installed mixer exited before showing a window (status {code})")
         return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Orvia$"],
                               env=env, capture_output=True).returncode == 0
-    wait_for(window_visible, "The installed mixer window did not appear")
+    wait_for(window_visible, "The installed mixer window did not appear", timeout=45)
     (state / "close-window").touch()
     assert mixer.wait(timeout=10) == 0
 

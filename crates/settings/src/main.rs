@@ -451,7 +451,8 @@ fn run(dir: &Path, installed: Version, test_only: bool) {
             },
             |w, cx| cx.new(|cx| Panel::new(dir, installed, test_only, w, cx)),
         );
-        if opened.is_err() {
+        if let Err(error) = opened {
+            eprintln!("Could not open the Orvia window: {error:#}");
             cx.quit();
         } else {
             cx.activate(true);

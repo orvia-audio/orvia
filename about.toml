@@ -1,3 +1,12 @@
 targets = ["x86_64-pc-windows-msvc"]
 ignore-dev-dependencies = true
 accepted = ["MIT", "Apache-2.0", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Zlib", "Unicode-3.0", "CDLA-Permissive-2.0", "Apache-2.0 WITH LLVM-exception", "CC0-1.0"]
+
+[ksni]
+accepted = ["Unlicense"]
+
+[option-ext]
+accepted = ["MPL-2.0"]
+
+[cbindgen]
+accepted = ["MPL-2.0"]

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Orvia
+Comment=Mix and monitor your microphone
+Exec=orvia
+Icon=orvia
+Terminal=false
+Categories=AudioVideo;Audio;Mixer;
+StartupWMClass=orvia

@@ -104,7 +104,7 @@ impl Route {
         );
         let input_id = input.id()?;
         let name = format!("{} → {}", label(&input)?, label(&output)?);
-        let input_config = config(&input, Port::Microphone)?.config();
+        let input_config = stream_config(&config(&input, Port::Microphone)?);
         let output_config = config(&output, Port::Cable)?;
         let counters = Arc::new(Counters::default());
         let start = Instant::now();
@@ -328,7 +328,7 @@ fn playback_stream<T: SizedSample + FromSample<f32>>(
     let meter = counters.clone();
     let mut playback = Playback::new(rx, config.sample_rate(), config.channels());
     Ok(output.build_output_stream(
-        config.config(),
+        stream_config(&config),
         move |out: &mut [T], _| {
             let now = start.elapsed().as_millis() as u64;
             meter.played_ms.store(now, Relaxed);
@@ -337,6 +337,15 @@ fn playback_stream<T: SizedSample + FromSample<f32>>(
         on_error(counters),
         None,
     )?)
+}
+
+fn stream_config(config: &SupportedStreamConfig) -> cpal::StreamConfig {
+    let mut stream = config.config();
+    if cfg!(target_os = "linux") {
+        // PulseAudio's server defaults can exceed the entire 100 ms transport queue.
+        stream.buffer_size = cpal::BufferSize::Fixed(stream.sample_rate / 100);
+    }
+    stream
 }
 
 #[derive(Clone, Copy, PartialEq)]

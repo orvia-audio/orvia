@@ -67,10 +67,10 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
                                 for i in range(48000 * 2)))
     raw = Path(tmp, "recording.raw")
     with raw.open("wb") as output:
-        recorder = start("parec", "-d", "orvia_microphone", "--raw", "--format=s16le",
+        recorder = start("parec", "-d", "orvia_microphone", "--latency-msec=20", "--raw", "--format=s16le",
                          "--channels=1", "--rate=48000", stdout=output)
         time.sleep(0.5)
-        subprocess.run(["pacat", "-d", "test_input", "--raw", "--format=s16le",
+        subprocess.run(["pacat", "-d", "test_input", "--latency-msec=20", "--raw", "--format=s16le",
                         "--channels=1", "--rate=48000"], env=env, input=samples.tobytes(), check=True)
         time.sleep(0.5)
         recorder.send_signal(signal.SIGINT)
@@ -82,7 +82,10 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
                     math.sin(i * 2 * math.pi * 440 / 48000)) for i in range(size)]
     amplitude = max((2 * abs(sum(x * w for x, w in zip(captured[n:n+size], wave))) / size
                      for n in range(0, len(captured) - size, size)), default=0)
-    assert 3000 < amplitude < 11000, f"Expected a 440 Hz recording, measured {amplitude:.0f}"
+    if not 3000 < amplitude < 11000:
+        snapshot = json.loads(status.read_text()) if status.exists() else {}
+        snapshot.pop("signal", None)
+        raise AssertionError(f"440 Hz amplitude {amplitude:.0f} in {len(captured)} samples; engine {snapshot}")
     mixer = start("orvia")
     def window_visible():
         return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Orvia$"],

@@ -1,12 +1,13 @@
 //! Resident audio process. Closing the settings window leaves its streams running.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod log;
 mod stream;
 mod tray;
 
 use anyhow::Result;
 use fs2::FileExt;
-use orvia_core::{EngineStatus, Settings, data_dir, write_json};
+use orvia_core::{EngineEvent, EngineStatus, Settings, data_dir, write_json};
 use std::{
     fs, io,
     path::Path,
@@ -35,6 +36,9 @@ fn main() -> Result<()> {
 fn supervise(dir: &Path) -> Result<()> {
     let stop_request = dir.join(format!("stop-engine-{}", std::process::id()));
     let _ = fs::remove_file(&stop_request);
+    let mut log = log::EngineLog::open(dir);
+    log.record(EngineEvent::Started(env!("CARGO_PKG_VERSION").into()));
+    let mut last_monitor = (false, None);
     let mut running: Option<stream::Route> = None;
     let mut previous: Option<Settings> = None;
     let mut tray = tray::Tray::new().ok();
@@ -45,7 +49,7 @@ fn supervise(dir: &Path) -> Result<()> {
     let mut was_observed = false;
     loop {
         if stop_request.exists() {
-            return Ok(());
+            break;
         }
         let now = Instant::now();
         if tray.is_none() && tray_attempt.elapsed() >= Duration::from_secs(10) {
@@ -55,7 +59,7 @@ fn supervise(dir: &Path) -> Result<()> {
         if let Some(tray) = &tray
             && matches!(tray.handle(dir), Ok(true))
         {
-            return Ok(());
+            break;
         }
         let settings = Settings::load(&dir.join("settings.json"));
         if let Ok(s) = &settings
@@ -66,16 +70,31 @@ fn supervise(dir: &Path) -> Result<()> {
         if !matches!((&previous, &settings), (Some(old), Ok(new)) if old.same_signal_path(new)) {
             running = None;
             last_attempt = now - Duration::from_secs(2);
+        }
+        if previous.as_ref() != settings.as_ref().ok() {
+            if let Ok(new) = &settings
+                && previous.as_ref().map(Settings::active_noise_method)
+                    != Some(new.active_noise_method())
+            {
+                log.record(EngineEvent::Noise(new.active_noise_method()));
+            }
             previous = settings.as_ref().ok().cloned();
         }
         match settings {
             Err(e) => {
                 running = None;
-                message = format!("Cannot read settings: {e}");
+                let error = format!("Cannot read settings: {e}");
+                if message != error {
+                    log.record(EngineEvent::RouteError(error.clone()));
+                    message = error;
+                }
             }
             Ok(s) if s.muted => {
                 running = None;
-                message = "Muted".into();
+                if message != "Muted" {
+                    log.record(EngineEvent::Muted);
+                    message = "Muted".into();
+                }
             }
             Ok(s) => {
                 let default_changed = if s.input.is_none()
@@ -90,22 +109,42 @@ fn supervise(dir: &Path) -> Result<()> {
                 };
                 if running.as_ref().is_some_and(|r| !r.healthy()) || default_changed {
                     running = None;
+                    log.record(EngineEvent::Reconnecting);
                     message = "Reconnecting microphone".into();
                 }
                 if running.is_none() && last_attempt.elapsed() >= Duration::from_secs(1) {
                     last_attempt = now;
                     match stream::Route::open(&s) {
                         Ok(route) => {
+                            log.record(EngineEvent::Streaming(route.name.clone()));
                             message = format!("Streaming · {}", route.name);
                             running = Some(route);
                         }
-                        Err(e) => message = format!("{e:#}"),
+                        Err(e) => {
+                            let error = format!("{e:#}");
+                            if error != message {
+                                log.record(EngineEvent::RouteError(error.clone()));
+                                message = error;
+                            }
+                        }
                     }
                 }
                 if let Some(route) = &mut running {
                     route.update_controls(&s);
                 }
             }
+        }
+        let monitor = running
+            .as_ref()
+            .map(stream::Route::monitor_status)
+            .unwrap_or_default();
+        if monitor != last_monitor {
+            if let Some(error) = &monitor.1 {
+                log.record(EngineEvent::MonitorError(error.clone()));
+            } else if monitor.0 || last_monitor.0 {
+                log.record(EngineEvent::Monitoring(monitor.0));
+            }
+            last_monitor = monitor;
         }
         // Persist diagnostics only while a settings window is observing the engine.
         let observed = fs::metadata(dir.join("observe"))
@@ -118,17 +157,13 @@ fn supervise(dir: &Path) -> Result<()> {
                 .as_ref()
                 .map(stream::Route::metrics)
                 .unwrap_or_default();
-            let (monitoring, monitor_error) = running
-                .as_ref()
-                .map(stream::Route::monitor_status)
-                .unwrap_or_default();
             let status = EngineStatus {
                 signal: running
                     .as_ref()
                     .map(stream::Route::envelopes)
                     .unwrap_or_default(),
-                monitoring,
-                monitor_error,
+                monitoring: last_monitor.0,
+                monitor_error: last_monitor.1.clone(),
                 observed: SystemTime::now(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 message: message.clone(),
@@ -144,4 +179,6 @@ fn supervise(dir: &Path) -> Result<()> {
         was_observed = observed;
         thread::sleep(Duration::from_millis(200));
     }
+    log.record(EngineEvent::Stopped);
+    Ok(())
 }

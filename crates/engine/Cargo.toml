@@ -13,6 +13,7 @@ cpal = "0.17"
 anyhow = "1"
 fs2 = "0.4"
 rtrb = "0.3"
+time = { version = "0.3", features = ["local-offset"] }
 tray-item = "0.10"
 
 [lints]

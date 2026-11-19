@@ -36,6 +36,7 @@ enum Page {
     Mixer,
     Devices,
     Preferences,
+    Log,
 }
 
 #[derive(Clone)]
@@ -76,6 +77,7 @@ struct Panel {
     logo: std::sync::Arc<gpui::Image>,
     choosing: Option<Endpoint>,
     status: Option<EngineStatus>,
+    log: engine_log::LogView,
     error: String,
     update: String,
     checking: bool,
@@ -142,10 +144,16 @@ impl Panel {
                                     .is_ok_and(|age| age < Duration::from_secs(2))
                             })
                         });
+                        let language = p.prefs.language;
                         if let Some(prefs) = prefs {
                             p.prefs = prefs;
                         }
-                        cx.notify();
+                        if p.page != Page::Log
+                            || p.log.refresh(&poll_dir)
+                            || p.prefs.language != language
+                        {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -179,6 +187,7 @@ impl Panel {
             )),
             choosing: None,
             status: None,
+            log: Default::default(),
             error,
             update: String::new(),
             checking: false,
@@ -190,6 +199,9 @@ impl Panel {
         match control {
             Control::Page(page) => {
                 self.page = page;
+                if page == Page::Log {
+                    self.log.refresh(&self.dir);
+                }
                 self.choosing = None;
             }
             Control::Monitor if self.prefs.monitor.is_none() => {
@@ -304,6 +316,7 @@ impl Panel {
 }
 
 mod engine_control;
+mod engine_log;
 mod icons;
 mod view;
 

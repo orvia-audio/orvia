@@ -55,6 +55,7 @@ impl Panel {
         let disabled = matches!(control, Control::RestartEngine) && self.restarting;
         let leading = match &control {
             Control::RestartEngine => Some("refresh.svg"),
+            Control::Page(Page::Log) => Some("activity.svg"),
             Control::CheckUpdate => Some("refresh.svg"),
             Control::Releases => Some("external-link.svg"),
             _ => None,
@@ -164,11 +165,11 @@ impl Panel {
         page: Page,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active = self.page == page;
+        let active = self.page == page || (self.page == Page::Log && page == Page::Preferences);
         let icon = match page {
             Page::Mixer => "adjustments-horizontal.svg",
             Page::Devices => "plug-connected.svg",
-            Page::Preferences => "settings.svg",
+            Page::Preferences | Page::Log => "settings.svg",
         };
         let color = if active { 0xffc4a6 } else { 0xe1e4e0 };
         div()
@@ -357,17 +358,27 @@ impl Panel {
                                 "activity.svg",
                                 TERRACOTTA,
                             ))
-                            .child(self.button(
-                                "restart-engine",
-                                if self.restarting {
-                                    l.text("Restarting…", "再起動中…")
-                                } else {
-                                    l.text("Restart", "再起動")
-                                },
-                                false,
-                                Control::RestartEngine,
-                                cx,
-                            )),
+                            .child(
+                                row()
+                                    .child(self.button(
+                                        "view-log",
+                                        l.text("View log", "ログを表示"),
+                                        false,
+                                        Control::Page(Page::Log),
+                                        cx,
+                                    ))
+                                    .child(self.button(
+                                        "restart-engine",
+                                        if self.restarting {
+                                            l.text("Restarting…", "再起動中…")
+                                        } else {
+                                            l.text("Restart", "再起動")
+                                        },
+                                        false,
+                                        Control::RestartEngine,
+                                        cx,
+                                    )),
+                            ),
                     )
                     .when_some(
                         self.status
@@ -382,25 +393,59 @@ impl Panel {
                         },
                     ),
             )
-            .when_some(self.status.as_ref(), |v, s| {
-                v.child(
-                    card()
-                        .child(heading(
-                            l.text("Audio diagnostics", "音声診断"),
-                            "activity.svg",
-                            TERRACOTTA,
-                        ))
-                        .child(note(s.message.clone()))
-                        .when_some(s.monitor_error.clone(), |v, e| v.child(note(e)))
-                        .child(note(format!(
-                            "{} {}  ·  {} {}",
-                            l.text("Missing frames", "不足フレーム"),
-                            s.missing_frames,
-                            l.text("Dropped frames", "破棄フレーム"),
-                            s.dropped_frames
-                        ))),
-                )
+    }
+
+    fn log_page(&self, cx: &mut Context<Self>) -> gpui::Div {
+        use orvia_core::EngineEvent;
+        let l = self.prefs.language;
+        let mut list = card().gap_0().py_1();
+        for entry in self.log.entries.iter().rev() {
+            let (level, color) = match entry.event {
+                EngineEvent::RouteError(_) | EngineEvent::MonitorError(_) => {
+                    (l.text("Error", "エラー"), 0xa03023)
+                }
+                EngineEvent::Reconnecting => (l.text("Warning", "警告"), 0x835313),
+                _ => (l.text("Info", "情報"), MUTED),
+            };
+            list = list.child(
+                stack()
+                    .gap_0()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(rgb(LINE))
+                    .child(
+                        row()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(entry.timestamp.clone())
+                            .child(div().text_color(rgb(color)).child(level)),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .child(engine_log::description(&entry.event, l)),
+                    ),
+            );
+        }
+        stack()
+            .child(row().child(self.button(
+                "back-to-prefs",
+                l.text("Back to preferences", "設定に戻る"),
+                false,
+                Control::Page(Page::Preferences),
+                cx,
+            )))
+            .when_some(self.log.error.as_ref(), |d, e| {
+                d.child(note(format!(
+                    "{} · {e}",
+                    l.text("Cannot read log", "ログを読み込めません")
+                )))
             })
+            .when(
+                self.log.entries.is_empty() && self.log.error.is_none(),
+                |d| d.child(note(l.text("No events yet", "ログはまだありません"))),
+            )
+            .when(!self.log.entries.is_empty(), |d| d.child(list))
     }
 }
 
@@ -409,6 +454,7 @@ impl Render for Panel {
         let l = self.prefs.language;
         let (title, content) = match self.page {
             Page::Mixer => (l.text("Mixer", "ミキサー"), self.mixer(cx)),
+            Page::Log => (l.text("Engine log", "エンジンログ"), self.log_page(cx)),
             Page::Devices => (l.text("Devices", "デバイス"), self.devices(cx)),
             Page::Preferences => (l.text("Preferences", "設定"), self.preferences(cx)),
         };
@@ -500,7 +546,10 @@ impl Render for Panel {
             )
             .child(
                 div()
-                    .id("page-scroll")
+                    .id(match self.page {
+                        Page::Log => "log-scroll",
+                        _ => "page-scroll",
+                    })
                     .flex_1()
                     .h_full()
                     .min_w_0()

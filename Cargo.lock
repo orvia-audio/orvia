@@ -4694,7 +4694,7 @@ dependencies = [
 
 [[package]]
 name = "orvia"
-version = "0.1.2-snapshot.2"
+version = "0.1.2-snapshot.3"
 dependencies = [
  "embed-resource",
  "fs2",
@@ -4710,7 +4710,7 @@ dependencies = [
 
 [[package]]
 name = "orvia-core"
-version = "0.1.2-snapshot.2"
+version = "0.1.2-snapshot.3"
 dependencies = [
  "dfn3_rs",
  "fs2",
@@ -4724,7 +4724,7 @@ dependencies = [
 
 [[package]]
 name = "orvia-engine"
-version = "0.1.2-snapshot.2"
+version = "0.1.2-snapshot.3"
 dependencies = [
  "anyhow",
  "cpal",

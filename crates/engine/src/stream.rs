@@ -4,7 +4,7 @@ use cpal::{
     Device, DeviceId, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use orvia_core::{BLOCK, BlockLevels, Processor, SAMPLE_RATE, Settings};
+use orvia_core::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings};
 use orvia_engine::{is_orvia, is_virtual_cable, label};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
@@ -54,6 +54,9 @@ struct Counters {
 
 pub(super) struct Route {
     gain: Arc<AtomicU16>,
+    processing: (Mixing, Option<NoiseMethod>),
+    replacements: Producer<Processor>,
+    retired: Consumer<Processor>,
     incoming_levels: Consumer<(u64, BlockLevels)>,
     levels: VecDeque<(u64, BlockLevels)>,
     monitor: Monitor,
@@ -109,6 +112,8 @@ impl Route {
         let monitor = Monitor::default();
         let feed = monitor.feed.clone();
         let mut processor = Processor::new(settings);
+        let (replacements, mut next_processor) = RingBuffer::new(1);
+        let (mut return_processor, retired) = RingBuffer::new(1);
         let mut block = [[0.; 2]; BLOCK];
         let mut used = 0;
         let meter = counters.clone();
@@ -125,6 +130,13 @@ impl Route {
                         used += 1;
                         if used == BLOCK {
                             used = 0;
+                            // Allocate and retire filter state on the control thread.
+                            if !return_processor.is_full()
+                                && let Ok(next) = next_processor.pop()
+                            {
+                                let old = std::mem::replace(&mut processor, next);
+                                let _ = return_processor.push(old);
+                            }
                             processor.set_gain(live_gain.load(Relaxed));
                             let (peak, levels) = processor.process_with_levels(&mut block);
                             let _ = envelope_tx.push((stamp, levels));
@@ -155,6 +167,9 @@ impl Route {
         output_stream.play()?;
         Ok(Self {
             gain,
+            processing: (settings.mixing, settings.active_noise_method()),
+            replacements,
+            retired,
             incoming_levels,
             levels: VecDeque::with_capacity(200),
             monitor,
@@ -175,6 +190,14 @@ impl Route {
 
     pub(super) fn update_controls(&mut self, settings: &Settings) {
         self.gain.store(settings.gain_percent, Relaxed);
+        let _ = self.retired.pop();
+        let requested = (settings.mixing, settings.active_noise_method());
+        if self.processing != requested
+            && !self.replacements.is_full()
+            && self.replacements.push(Processor::new(settings)).is_ok()
+        {
+            self.processing = requested;
+        }
         let now = self.start.elapsed().as_millis() as u64;
         while let Ok(entry) = self.incoming_levels.pop() {
             if self.levels.len() == 200 {

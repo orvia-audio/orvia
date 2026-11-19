@@ -148,15 +148,15 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> io::Result<()> {
 }
 
 impl Settings {
-    /// Whether both settings use the same microphone, virtual output and DSP.
-    /// Changes to gain, monitoring and language leave these streams running.
+    /// Whether the open WASAPI streams can be reused. Processing controls are
+    /// applied at a block boundary without clearing the signal history.
     pub fn same_signal_path(&self, other: &Self) -> bool {
-        self.input == other.input
-            && self.output == other.output
-            && self.mixing == other.mixing
-            && self.suppress_noise == other.suppress_noise
-            && (!self.suppress_noise || self.noise_method == other.noise_method)
-            && self.muted == other.muted
+        self.input == other.input && self.output == other.output && self.muted == other.muted
+    }
+
+    /// The filter currently applied to the signal, or bypass when disabled.
+    pub fn active_noise_method(&self) -> Option<crate::NoiseMethod> {
+        self.suppress_noise.then_some(self.noise_method)
     }
 
     /// Apply a settings edit while holding the per-user writer lock, shared by
@@ -207,6 +207,21 @@ mod tests {
         changed.muted = true;
         assert!(!original.same_signal_path(&changed));
         assert_eq!(changed.language.text("Mute", "ミュート"), "ミュート");
+    }
+
+    #[test]
+    fn switching_between_filters_and_bypass_keeps_the_capture_stream() {
+        let bypass = Settings::default();
+        let mut filtered = Settings {
+            suppress_noise: true,
+            ..bypass.clone()
+        };
+        assert!(bypass.same_signal_path(&filtered));
+        let first = filtered.clone();
+        filtered.noise_method = crate::NoiseMethod::Spectral;
+        assert!(first.same_signal_path(&filtered));
+        assert_ne!(first.active_noise_method(), filtered.active_noise_method());
+        assert!(filtered.same_signal_path(&bypass));
     }
     #[test]
     fn old_channel_and_filter_preferences_migrate() {

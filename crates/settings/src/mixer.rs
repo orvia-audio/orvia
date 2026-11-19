@@ -181,13 +181,13 @@ impl Panel {
         let mut methods = row();
         for (id, label, method) in [
             ("bypass", l.text("Off", "オフ"), None),
-            ("rnnoise", "RNNoise", Some(NoiseMethod::Rnnoise)),
-            ("webrtc", "WebRTC", Some(NoiseMethod::WebRtc)),
             (
                 "deepfilternet3",
                 "DeepFilterNet3",
                 Some(NoiseMethod::DeepFilterNet3),
             ),
+            ("rnnoise", "RNNoise", Some(NoiseMethod::Rnnoise)),
+            ("webrtc", "WebRTC", Some(NoiseMethod::WebRtc)),
         ] {
             methods = methods.child(self.button(
                 id,

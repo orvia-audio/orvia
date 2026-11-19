@@ -4,7 +4,7 @@
 //!
 //! ~~~
 //! use orvia_core::{BLOCK, Mixing, Processor, Settings};
-//! let settings = Settings { mixing: Mixing::Average, ..Settings::default() };
+//! let settings = Settings { mixing: Mixing::Average, suppress_noise: false, ..Settings::default() };
 //! let mut audio = [[0.25, -0.5]; BLOCK];
 //! assert_eq!(Processor::new(&settings).process(&mut audio), 0.125);
 //! assert_eq!(audio[0], [-0.125; 2]);

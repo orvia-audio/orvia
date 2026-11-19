@@ -59,7 +59,7 @@ pub struct Settings {
     pub mixing: crate::Mixing,
     /// Enable the selected noise filter.
     pub suppress_noise: bool,
-    /// Selected noise filter. Older settings select RNNoise.
+    /// Selected noise filter. New configurations use DeepFilterNet3.
     pub noise_method: crate::NoiseMethod,
     /// Linear gain as a percentage, limited to 200 at processing time.
     pub gain_percent: u16,
@@ -74,7 +74,7 @@ impl Default for Settings {
             monitor_enabled: false,
             language: Language::System,
             mixing: Default::default(),
-            suppress_noise: false,
+            suppress_noise: true,
             noise_method: Default::default(),
             gain_percent: 100,
         }
@@ -224,10 +224,10 @@ mod tests {
 
     #[test]
     fn switching_between_filters_and_bypass_keeps_the_capture_stream() {
-        let bypass = Settings::default();
-        let mut filtered = Settings {
-            suppress_noise: true,
-            ..bypass.clone()
+        let mut filtered = Settings::default();
+        let bypass = Settings {
+            suppress_noise: false,
+            ..filtered.clone()
         };
         assert!(bypass.same_signal_path(&filtered));
         let first = filtered.clone();
@@ -237,13 +237,37 @@ mod tests {
         assert!(filtered.same_signal_path(&bypass));
     }
     #[test]
-    fn old_channel_and_filter_preferences_migrate() {
+    fn old_channel_preferences_migrate() {
         for channel in ["left", "right"] {
             let json = format!(r#"{{"mixing":"{channel}","suppress_noise":true}}"#);
             let settings: Settings = serde_json::from_str(&json).unwrap();
             assert_eq!(settings.mixing, crate::Mixing::Average);
             assert!(settings.suppress_noise);
-            assert_eq!(settings.noise_method, crate::NoiseMethod::Rnnoise);
+        }
+    }
+
+    #[test]
+    fn new_preferences_enable_deepfilternet_and_saved_choices_survive_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let fresh = Settings::load(&path).unwrap();
+        assert_eq!(
+            fresh.active_noise_method(),
+            Some(crate::NoiseMethod::DeepFilterNet3)
+        );
+        for method in [
+            None,
+            Some(crate::NoiseMethod::Rnnoise),
+            Some(crate::NoiseMethod::WebRtc),
+        ] {
+            Settings::update(&path, |s| {
+                s.suppress_noise = method.is_some();
+                if let Some(method) = method {
+                    s.noise_method = method;
+                }
+            })
+            .unwrap();
+            assert_eq!(Settings::load(&path).unwrap().active_noise_method(), method);
         }
     }
 

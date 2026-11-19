@@ -23,15 +23,15 @@ pub enum Mixing {
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NoiseMethod {
-    /// Speech-oriented recurrent neural network.
+    /// DeepFilterNet3 speech enhancement with an embedded CPU model.
     #[default]
+    #[serde(rename = "deepfilternet3")]
+    DeepFilterNet3,
+    /// Speech-oriented recurrent neural network.
     Rnnoise,
     /// WebRTC speech-oriented suppression at the high suppression level.
     #[serde(rename = "webrtc", alias = "spectral")]
     WebRtc,
-    /// DeepFilterNet3 speech enhancement with an embedded CPU model.
-    #[serde(rename = "deepfilternet3")]
-    DeepFilterNet3,
 }
 
 /// Signal envelopes and mean-square energies for one aligned 10 ms block.
@@ -249,6 +249,7 @@ mod tests {
             let mut processor = Processor::new(&Settings {
                 mixing,
                 gain_percent: 200,
+                suppress_noise: false,
                 ..Default::default()
             });
             processor.process(&mut frames);
@@ -317,7 +318,10 @@ mod tests {
 
     #[test]
     fn output_gain_does_not_change_the_filter_measurement() {
-        let mut p = Processor::new(&Settings::default());
+        let mut p = Processor::new(&Settings {
+            suppress_noise: false,
+            ..Default::default()
+        });
         for gain in [0, 25, 100, 200] {
             p.set_gain(gain);
             let (peak, b) = p.process_with_levels(&mut [[0.25, -0.25]; BLOCK]);

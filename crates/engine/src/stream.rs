@@ -525,6 +525,7 @@ mod tests {
         let mut frames = [[0.25, -0.25]; BLOCK];
         Processor::new(&Settings {
             gain_percent: 200,
+            suppress_noise: false,
             ..Default::default()
         })
         .process(&mut frames);
@@ -539,6 +540,7 @@ mod tests {
         drop(changing_device);
         Processor::new(&Settings {
             gain_percent: 0,
+            suppress_noise: false,
             ..Default::default()
         })
         .process(&mut frames);

@@ -5,7 +5,10 @@ use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use orvia_core::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings};
-use orvia_engine::{host, is_virtual_cable, label};
+use orvia_engine::{
+    formats::{Port, config, stream_config},
+    host, is_virtual_cable, label,
+};
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     collections::VecDeque,
@@ -337,60 +340,6 @@ fn playback_stream<T: SizedSample + FromSample<f32>>(
         on_error(counters),
         None,
     )?)
-}
-
-fn stream_config(config: &SupportedStreamConfig) -> cpal::StreamConfig {
-    let mut stream = config.config();
-    if cfg!(target_os = "linux") {
-        // PulseAudio's server defaults can exceed the entire 100 ms transport queue.
-        stream.buffer_size = cpal::BufferSize::Fixed(stream.sample_rate / 100);
-    }
-    stream
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Port {
-    Microphone,
-    Cable,
-    Headphones,
-}
-
-fn config(device: &Device, port: Port) -> Result<SupportedStreamConfig> {
-    let input = port == Port::Microphone;
-    let ranges: Vec<_> = if input {
-        device.supported_input_configs()?.collect()
-    } else {
-        device.supported_output_configs()?.collect()
-    };
-    ranges
-        .into_iter()
-        .filter(|r| {
-            r.sample_format() == SampleFormat::F32
-                || (!input && r.sample_format() == SampleFormat::I16)
-        })
-        .filter_map(|r| {
-            let rate = if input {
-                r.max_sample_rate().min(SAMPLE_RATE)
-            } else {
-                SAMPLE_RATE.clamp(r.min_sample_rate(), r.max_sample_rate())
-            };
-            let suitable =
-                rate >= 8_000 && r.channels() > 0 && (port != Port::Cable || r.channels() <= 2);
-            (suitable && rate >= r.min_sample_rate()).then(|| r.with_sample_rate(rate))
-        })
-        .max_by_key(|c| {
-            (
-                std::cmp::Reverse(c.sample_rate().abs_diff(SAMPLE_RATE)),
-                c.channels() == 2,
-                c.sample_format() == SampleFormat::F32,
-            )
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "{} has no compatible shared format. Try 48 kHz in your sound settings.",
-                label(device).unwrap_or_default()
-            )
-        })
 }
 
 /// Convert the capture clock to the model's fixed rate. Integer phase persists

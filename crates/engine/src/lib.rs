@@ -3,6 +3,9 @@
 //! Persist the value returned by [`cpal::Device::id`](cpal::traits::DeviceTrait::id)
 //! rather than an index into this list. A host may reorder endpoints after a reconnect.
 
+pub mod formats;
+pub mod mic_test;
+
 #[cfg(any(windows, test))]
 use cpal::DeviceDescription;
 use cpal::{

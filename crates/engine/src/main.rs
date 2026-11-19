@@ -65,7 +65,7 @@ fn supervise(dir: &Path) -> Result<()> {
         if let Ok(s) = &settings
             && let Some(tray) = &mut tray
         {
-            tray.refresh(s);
+            tray.refresh(s.language);
         }
         if !matches!((&previous, &settings), (Some(old), Ok(new)) if old.same_signal_path(new)) {
             running = None;
@@ -87,13 +87,6 @@ fn supervise(dir: &Path) -> Result<()> {
                 if message != error {
                     log.record(EngineEvent::RouteError(error.clone()));
                     message = error;
-                }
-            }
-            Ok(s) if s.muted => {
-                running = None;
-                if message != "Muted" {
-                    log.record(EngineEvent::Muted);
-                    message = "Muted".into();
                 }
             }
             Ok(s) => {

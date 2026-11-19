@@ -1,6 +1,6 @@
 # <img src="assets/orvia.svg" alt="" width="40" height="40" align="center"> Orvia
 
-Orvia sends one microphone through channel mixing, optional noise suppression, gain and mute to a virtual audio device. A game or recorder can use the processed signal while a call uses the original microphone. Closing the settings window leaves the audio engine running.
+Orvia sends one microphone through channel mixing, optional noise suppression, gain to a virtual audio device. A game or recorder can use the processed signal while a call uses the original microphone. Closing the settings window leaves the audio engine running.
 
 **Windows 11 x64 with Secure Boot enabled.** The standard MSI installs the application. Install a supported, production-signed virtual audio device separately. The private development builds are available as artifacts of the Windows workflow.
 
@@ -16,11 +16,11 @@ Development builds for the first release carry versions such as `0.1.0-snapshot.
 
 **Signal history** shows two seconds of peak envelopes before and after suppression on the same dBFS scale. Bypass shows only the input trace. Switching filters keeps the timeline running. **Pre-gain attenuation** compares the signal energy over the latest half second. It includes any change to speech as well as noise. Pause speaking to measure the background alone. The output reading includes gain, so you can adjust recording volume independently.
 
-To hear the same processing, select a playback device under **Mixer → Headphone monitor**. Use the monitor switch to listen or stop listening. Orvia remembers the selected headphones and reconnects when they return. Mute in the notification area silences both processed outputs.
+To hear the same processing, select a playback device under **Mixer → Headphone monitor**. Use the monitor switch to listen or stop listening. Orvia remembers the selected headphones and reconnects when they return.
 
 Use **Preferences → Audio engine → Restart** to reload the installed engine after an update. This briefly interrupts processed audio. **View log** shows engine starts, stops, device errors and changes to processing as they happen. The 160 most recent events survive a restart and carry local timestamps. The log contains no audio samples.
 
-Use **Preferences → Language** to follow Windows or choose English or Japanese. Closing the window leaves Orvia in the notification area. Its menu opens the mixer, mutes or unmutes the processed outputs, and quits the engine.
+Use **Preferences → Language** to follow Windows or choose English or Japanese. Closing the window leaves Orvia in the notification area. Its menu opens the mixer or quits the engine.
 
 With **Elgato Wave Link**, select a dedicated playback channel on the **Elgato Virtual Audio** adapter. Route only that channel to a mix in Wave Link and select that mix as the recording device in the receiving apps. [Wave Link audio routing](https://www.elgato.com/us/en/explorer/products/wave/wave-link-30-redefining-creator-audio-control/)
 

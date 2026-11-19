@@ -112,7 +112,7 @@ impl Processor {
         } else {
             1
         };
-        let filters = if settings.suppress_noise && !settings.muted {
+        let filters = if settings.suppress_noise {
             (0..channels)
                 .map(|_| match settings.noise_method {
                     NoiseMethod::Rnnoise => Filter::Rnnoise(DenoiseState::new()),
@@ -134,7 +134,7 @@ impl Processor {
     /// Process normalized stereo samples in place and return the absolute output peak.
     ///
     /// Non-finite input becomes silence. Gain is limited to 200% and the final
-    /// signal is clipped to full scale. A muted block is entirely silent.
+    /// signal is clipped to full scale.
     pub fn process(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> f32 {
         self.process_with_levels(frames).0
     }
@@ -148,10 +148,6 @@ impl Processor {
     /// Both filters use overlapping windows. The input envelope is delayed by one
     /// block to compare the same interval on both sides of the filter.
     pub fn process_with_levels(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> (f32, BlockLevels) {
-        if self.settings.muted {
-            frames.fill([0.; 2]);
-            return (0., BlockLevels::default());
-        }
         for frame in frames.iter_mut() {
             for sample in frame.iter_mut() {
                 *sample = if sample.is_finite() {
@@ -333,20 +329,13 @@ mod tests {
     }
 
     #[test]
-    fn mute_and_invalid_input_are_silent() {
-        for muted in [false, true] {
-            let mut processor = Processor::new(&Settings {
-                muted,
-                suppress_noise: true,
-                ..Default::default()
-            });
-            let mut frames = [if muted {
-                [1.; 2]
-            } else {
-                [f32::NAN, f32::INFINITY]
-            }; BLOCK];
-            assert_eq!(processor.process(&mut frames), 0.);
-            assert_eq!(frames, [[0.; 2]; BLOCK]);
-        }
+    fn invalid_input_is_silent() {
+        let mut processor = Processor::new(&Settings {
+            suppress_noise: true,
+            ..Default::default()
+        });
+        let mut frames = [[f32::NAN, f32::INFINITY]; BLOCK];
+        assert_eq!(processor.process(&mut frames), 0.);
+        assert_eq!(frames, [[0.; 2]; BLOCK]);
     }
 }

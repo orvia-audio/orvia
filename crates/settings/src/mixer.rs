@@ -163,7 +163,7 @@ impl Panel {
         let live = self
             .status
             .as_ref()
-            .filter(|s| !self.prefs.muted && s.message.starts_with("Streaming"));
+            .filter(|s| s.message.starts_with("Streaming"));
         let outdated = live
             .is_some_and(|s| s.signal.peaks.is_empty() && s.version != env!("CARGO_PKG_VERSION"));
         let levels = live.map(|s| s.signal.peaks.as_slice()).unwrap_or_default();

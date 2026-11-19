@@ -226,9 +226,6 @@ impl Panel {
 
     fn state_label(&self) -> &'static str {
         let l = self.prefs.language;
-        if self.prefs.muted {
-            return l.text("Muted", "ミュート中");
-        }
         match self.status.as_ref().map(|s| s.message.as_str()) {
             Some(s) if s.starts_with("Streaming") => l.text("Live", "出力中"),
             Some(s) if s.contains("Choose a virtual output") => {
@@ -271,8 +268,6 @@ impl Panel {
         let status = self.status.as_ref();
         let warning = if !enabled {
             None
-        } else if self.prefs.muted {
-            Some(l.text("Muted", "ミュート中"))
         } else if status.is_some_and(|s| s.monitor_error.is_some()) {
             Some(l.text("Headphones unavailable", "ヘッドホン未接続"))
         } else if !status.is_some_and(|s| s.monitoring) {

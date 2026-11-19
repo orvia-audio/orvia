@@ -94,10 +94,7 @@ impl Panel {
                 "{} · {e}",
                 Language::System.text("Cannot load settings", "設定を読み込めません")
             );
-            Settings {
-                muted: true,
-                ..Default::default()
-            }
+            Settings::default()
         });
         if let Err(e) = engine_control::start() {
             error = format!(

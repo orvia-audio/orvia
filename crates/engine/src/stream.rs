@@ -519,7 +519,7 @@ mod tests {
         assert!(rx.pop().is_err());
         drop(changing_device);
         Processor::new(&Settings {
-            muted: true,
+            gain_percent: 0,
             ..Default::default()
         })
         .process(&mut frames);

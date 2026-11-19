@@ -23,8 +23,6 @@ pub enum EngineEvent {
     Stopped,
     /// The named microphone and output streams opened successfully.
     Streaming(String),
-    /// The user muted both outputs.
-    Muted,
     /// The current stream stopped delivering audio or the default input changed.
     Reconnecting,
     /// An error prevented routing. The message includes its underlying cause.
@@ -35,4 +33,7 @@ pub enum EngineEvent {
     Monitoring(bool),
     /// Headphone playback failed independently of the main output.
     MonitorError(String),
+    /// A stored event that this version cannot describe.
+    #[serde(other)]
+    Unknown,
 }

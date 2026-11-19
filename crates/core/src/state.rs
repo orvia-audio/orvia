@@ -63,8 +63,6 @@ pub struct Settings {
     pub noise_method: crate::NoiseMethod,
     /// Linear gain as a percentage, limited to 200 at processing time.
     pub gain_percent: u16,
-    /// Silence every output frame, including after a reconnect.
-    pub muted: bool,
 }
 
 impl Default for Settings {
@@ -79,7 +77,6 @@ impl Default for Settings {
             suppress_noise: false,
             noise_method: Default::default(),
             gain_percent: 100,
-            muted: false,
         }
     }
 }
@@ -151,7 +148,7 @@ impl Settings {
     /// Whether the open WASAPI streams can be reused. Processing controls are
     /// applied at a block boundary without clearing the signal history.
     pub fn same_signal_path(&self, other: &Self) -> bool {
-        self.input == other.input && self.output == other.output && self.muted == other.muted
+        self.input == other.input && self.output == other.output
     }
 
     /// The filter currently applied to the signal, or bypass when disabled.
@@ -160,7 +157,7 @@ impl Settings {
     }
 
     /// Apply a settings edit while holding the per-user writer lock, shared by
-    /// the tray and settings window. Returns the newly persisted preferences.
+    /// settings writers. Returns the newly persisted preferences.
     ///
     /// # Errors
     ///
@@ -204,9 +201,9 @@ mod tests {
             ..original.clone()
         };
         assert!(original.same_signal_path(&changed));
-        changed.muted = true;
+        changed.output = Some("virtual-output".into());
         assert!(!original.same_signal_path(&changed));
-        assert_eq!(changed.language.text("Mute", "ミュート"), "ミュート");
+        assert_eq!(changed.language.text("Mixer", "ミキサー"), "ミキサー");
     }
 
     #[test]
@@ -235,15 +232,14 @@ mod tests {
     }
 
     #[test]
-    fn old_settings_preserve_mute_and_corruption_is_reported() {
+    fn settings_ignore_unknown_fields_and_report_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
-        assert!(!Settings::load(&path).unwrap().muted);
-        fs::write(&path, br#"{"muted":true}"#).unwrap();
+        assert_eq!(Settings::load(&path).unwrap(), Settings::default());
+        fs::write(&path, br#"{"obsolete_setting":true,"gain_percent":139}"#).unwrap();
         let settings = Settings::load(&path).unwrap();
-        assert!(settings.muted);
         assert_eq!(settings.output, None);
-        assert_eq!(settings.gain_percent, 100);
+        assert_eq!(settings.gain_percent, 139);
         let selected = Settings {
             output: Some("saved-playback-id".into()),
             ..settings

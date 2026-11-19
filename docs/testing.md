@@ -20,29 +20,27 @@ The lab installer owns `ROOT\ORVIAAUDIO\0000` and its driver package. A lab upgr
 
 The Windows workflow checks formatting, Clippy, Rustdoc links and missing documentation, unit tests and doctests. It builds and test-signs the x64 driver, checks the INF, generates a catalog, and packages development artifacts. It does not publish a GitHub Release.
 
-The deterministic audio tests cover channel selection, suppression of stationary noise, gain, clipping, mute, monitor isolation, stale queue recovery and rate conversion. Capture supports float shared formats from 8 to 48 kHz. For multichannel inputs it uses the first two channels. Output negotiates float or 16-bit PCM at the available rate closest to 48 kHz. On multichannel monitoring devices Orvia uses the front stereo pair. The processor runs at 48 kHz regardless of the endpoint rates.
+The deterministic audio tests cover channel selection, suppression of stationary noise, gain, clipping, monitor isolation, stale queue recovery and rate conversion. Capture supports float shared formats from 8 to 48 kHz. For multichannel inputs it uses the first two channels. Output negotiates float or 16-bit PCM at the available rate closest to 48 kHz. On multichannel monitoring devices Orvia uses the front stereo pair. The processor runs at 48 kHz regardless of the endpoint rates.
 
 ## Verification on a test machine
 
-For the standard edition, use a Secure Boot system and a vendor-signed cable. Compare simultaneous captures of the physical microphone and the cable while varying suppression, gain and mute. Check that the Windows defaults remain unchanged and that disabling the selected cable stops output until it returns. The lab edition instead requires its matching test certificate. Keep measurements with the build commit, Windows build, endpoint formats, application versions and boot policy.
+For the standard edition, use a Secure Boot system and a vendor-signed cable. Compare simultaneous captures of the physical microphone and the cable while varying suppression and gain. Check that the Windows defaults remain unchanged and that disabling the selected cable stops output until it returns. The lab edition instead requires its matching test certificate. Keep measurements with the build commit, Windows build, endpoint formats, application versions and boot policy.
 
 | Check | Procedure and evidence |
 | --- | --- |
 | First install | Install on a clean machine with the appropriate boot policy for the edition. Open settings as a standard user. Record the capture endpoint ID and check that the default speakers remain usable. |
 | Delivery | Record speech in Windows Sound Recorder, then in a browser call and a desktop calling app. Feed distinct signals into each channel. Check independent stereo and a centered mono average. Open two consumers at once. |
 | Quality | Compare a fixed speech-and-noise sample with Off, RNNoise and Spectral subtraction. Allow the spectral estimate to settle on steady noise. Compare both envelopes during pauses and speech. Drag the gain slider and check the pre-gain comparison stays stable. Listen for clipped consonants, pumping and switch noise. Inspect clipping at 100% and 200% gain. |
-| Recovery | Unplug the selected microphone, disable and re-enable it, sleep and resume, then restart the engine. Verify silence during loss and no buffered replay. Repeat with mute enabled. |
+| Recovery | Unplug the selected microphone, disable and re-enable it, sleep and resume, then restart the engine. Verify silence during loss and no buffered replay. |
 | Timing | During an extended run and a separate high-load run, log elapsed time, missing and dropped frames, CPU utilization and loopback impulse delay. Establish pass thresholds from measured baseline data. |
 | Input diversity | Cover a single-channel microphone, a stereo or multichannel USB interface, and a wireless headset. The Steinberg UR12 and Razer Barracuda X are example devices. Record the format Windows actually negotiates. |
 | Accessibility | Operate every control using Tab, Shift+Tab, Space and Enter. Check focus visibility, Windows contrast themes, 200% scaling and Narrator. |
-| Upgrade and removal | Change input, output, mute and gain. Install a newer MSI and compare the endpoint IDs and settings. Uninstall and check that the startup entry and executables are removed. A third-party cable belongs to its vendor. Only the lab MSI removes its own device. |
+| Upgrade and removal | Change input, output and gain. Install a newer MSI and compare the endpoint IDs and settings. Uninstall and check that the startup entry and executables are removed. A third-party cable belongs to its vendor. Only the lab MSI removes its own device. |
 | Boot policy | Verify that the standard MSI works with Secure Boot enabled and test signing off. Use the lab MSI only in an environment prepared for its test signature. |
 
-### Verify mute with an independent recording
+### Verify output gain with an independent recording
 
-Feed a continuous tone to the selected input. Set gain to 100% and turn off noise suppression. Start a WASAPI recording of **Microphone Array (Orvia Audio v1)** and a second recording of the source input. Keep both recorders open while choosing **Mute output** in the notification area, waiting at least six seconds, and choosing **Unmute output**. Check that the tone continues in the reference recording throughout. Inspect a settled interval in each phase of the Orvia recording for the original tone, digital silence and the return of the tone.
-
-On Windows 11 Enterprise LTSC 2024 x64 (build 26100.1742), a QEMU line input carried a 440 Hz and 880 Hz tone. The reference recorder used 44.1 kHz and the Orvia recorder used 48 kHz. The source measured −19.1 dBFS RMS in all three intervals. Orvia measured −19.1 dBFS before and after mute. All 168,000 samples in the 3.5-second muted interval were zero in the recorded channel. This test covers the installed driver, audio engine and settings buttons with an emulated input. Hardware compatibility and sustained audio quality need separate measurements.
+Feed a continuous tone to the selected input. Turn off suppression and record the physical input and virtual microphone simultaneously. Move output gain from 100% to 0% and back to 100%, leaving six seconds at each setting. Check that the physical recording stays at the same level and the virtual output reaches digital silence at 0%.
 
 ## Troubleshooting
 

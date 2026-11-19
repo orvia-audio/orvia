@@ -51,7 +51,7 @@ pub(super) fn description(event: &EngineEvent, l: Language) -> String {
         EngineEvent::Streaming(route) => {
             format!("{} · {route}", l.text("Streaming", "音声出力を開始"))
         }
-        EngineEvent::Muted => l.text("Output muted", "出力をミュート").into(),
+        EngineEvent::Unknown => l.text("Unrecognized event", "不明なイベント").into(),
         EngineEvent::Reconnecting => l.text("Reconnecting microphone", "マイクを再接続中").into(),
         EngineEvent::RouteError(e) => format!(
             "{} · {e}",

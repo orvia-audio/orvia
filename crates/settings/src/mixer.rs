@@ -371,6 +371,9 @@ impl Panel {
                     .child(
                         row()
                             .justify_between()
+                            .border_t_1()
+                            .border_color(rgb(LINE))
+                            .pt_2()
                             .child(heading(
                                 l.text("Channels", "チャンネル"),
                                 "arrows-split-2.svg",

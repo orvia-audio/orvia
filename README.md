@@ -1,4 +1,4 @@
-# Orvia
+# <img src="assets/orvia.svg" alt="" width="40" height="40" align="center"> Orvia
 
 Orvia sends one microphone through channel mixing, optional noise suppression, gain and mute to a virtual audio device. A game or recorder can use the processed signal while a call uses the original microphone. Closing the settings window leaves the audio engine running.
 

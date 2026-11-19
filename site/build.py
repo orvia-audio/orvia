@@ -1,5 +1,6 @@
 """Assemble the public Pages site from the explicitly listed project assets."""
 
+import hashlib
 from pathlib import Path
 import shutil
 
@@ -8,8 +9,13 @@ root = site.parent
 out = root / "dist" / "pages"
 media = out / "media"
 media.mkdir(parents=True, exist_ok=True)
-for name in ("index.html", "style.css", "player.js"):
-    shutil.copyfile(site / name, out / name)
+html = (site / "index.html").read_text(encoding="utf-8")
+for name in ("style.css", "player.js"):
+    content = (site / name).read_bytes()
+    (out / name).write_bytes(content)
+    version = hashlib.sha256(content).hexdigest()[:16]
+    html = html.replace(f'"{name}"', f'"{name}?v={version}"')
+(out / "index.html").write_text(html, encoding="utf-8")
 shutil.copyfile(site / "brand-github.svg", media / "brand-github.svg")
 for name in ("orvia.svg", "mixer.png"):
     shutil.copyfile(root / "assets" / name, media / name)

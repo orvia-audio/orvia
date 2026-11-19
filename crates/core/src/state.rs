@@ -55,6 +55,8 @@ pub struct Settings {
     pub monitor_enabled: bool,
     /// Language shared by settings and tray controls.
     pub language: Language,
+    /// Check for new stable releases while the mixer window is open.
+    pub check_updates_automatically: bool,
     /// Channel routing independent of the denoiser.
     pub mixing: crate::Mixing,
     /// Enable the selected noise filter.
@@ -73,6 +75,7 @@ impl Default for Settings {
             monitor: None,
             monitor_enabled: false,
             language: Language::System,
+            check_updates_automatically: true,
             mixing: Default::default(),
             suppress_noise: true,
             noise_method: Default::default(),
@@ -244,6 +247,18 @@ mod tests {
             assert_eq!(settings.mixing, crate::Mixing::Average);
             assert!(settings.suppress_noise);
         }
+    }
+
+    #[test]
+    fn automatic_update_checks_default_on_and_remember_an_opt_out() {
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert!(old.check_updates_automatically);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        Settings::update(&path, |s| s.check_updates_automatically = false).unwrap();
+        let saved = Settings::load(&path).unwrap();
+        assert!(!saved.check_updates_automatically);
+        assert!(old.same_signal_path(&saved));
     }
 
     #[test]

@@ -6,7 +6,7 @@ use gpui::{
     Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 use orvia_core::{EngineStatus, Language, Mixing, NoiseMethod, Settings, data_dir, read_json};
-use serde::Deserialize;
+use semver::Version;
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -22,7 +22,7 @@ actions!(
         PreviousControl
     ]
 );
-const RELEASES: &str = "https://github.com/sya-ri/orvia/releases";
+const RELEASES: &str = "https://github.com/sya-ri/orvia/releases/latest";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Endpoint {
@@ -51,6 +51,7 @@ enum Control {
     RestartEngine,
     DismissError,
     Gain(u16),
+    AutomaticUpdates,
     CheckUpdate,
     Releases,
 }
@@ -80,13 +81,13 @@ struct Panel {
     status: Option<EngineStatus>,
     log: engine_log::LogView,
     error: String,
-    update: String,
-    checking: bool,
+    updates: updates::Updates,
+    installed: Version,
     restarting: bool,
 }
 
 impl Panel {
-    fn new(dir: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(dir: PathBuf, installed: Version, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let root = cx.focus_handle();
         window.focus(&root);
         let mut error = String::new();
@@ -146,6 +147,9 @@ impl Panel {
                         if let Some(prefs) = prefs {
                             p.prefs = prefs;
                         }
+                        if p.prefs.check_updates_automatically && p.updates.due() {
+                            p.check_for_updates(cx);
+                        }
                         if p.page != Page::Log
                             || p.log.refresh(&poll_dir)
                             || p.prefs.language != language
@@ -163,6 +167,7 @@ impl Panel {
         .detach();
         let inputs = orvia_engine::inputs().unwrap_or_default();
         Self {
+            updates: updates::Updates::load(&dir),
             dir,
             root,
             gain_focus: cx.focus_handle().tab_stop(true),
@@ -187,10 +192,25 @@ impl Panel {
             status: None,
             log: Default::default(),
             error,
-            update: String::new(),
-            checking: false,
+            installed,
             restarting: false,
         }
+    }
+
+    fn check_for_updates(&mut self, cx: &mut Context<Self>) {
+        self.updates.start();
+        let dir = self.dir.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { updates::fetch(&dir) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |panel, cx| {
+                panel.updates.finish(result);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
@@ -244,27 +264,7 @@ impl Panel {
             }
             Control::RestartEngine => {}
             Control::DismissError => self.error.clear(),
-            Control::CheckUpdate if !self.checking => {
-                self.checking = true;
-                self.update = self
-                    .prefs
-                    .language
-                    .text("Checking releases…", "更新を確認中…")
-                    .into();
-                let language = self.prefs.language;
-                let task = cx
-                    .background_executor()
-                    .spawn(async move { latest_release(language) });
-                cx.spawn(async move |this, cx| {
-                    let result = task.await;
-                    let _ = this.update(cx, |p, cx| {
-                        p.update = result;
-                        p.checking = false;
-                        cx.notify();
-                    });
-                })
-                .detach();
-            }
+            Control::CheckUpdate if !self.updates.checking => self.check_for_updates(cx),
             Control::CheckUpdate => {}
             Control::Releases => cx.open_url(RELEASES),
             change => {
@@ -284,7 +284,9 @@ impl Panel {
                     Control::Mix(mode) => settings.mixing = mode,
                     Control::Language(l) => {
                         settings.language = l;
-                        self.update.clear();
+                    }
+                    Control::AutomaticUpdates => {
+                        settings.check_updates_automatically = !settings.check_updates_automatically
                     }
                     Control::Monitor => settings.monitor_enabled = !settings.monitor_enabled,
                     Control::Noise(method) => {
@@ -319,59 +321,7 @@ mod engine_log;
 mod icons;
 mod view;
 
-#[derive(Deserialize)]
-struct Release {
-    tag_name: String,
-}
-
-fn latest_release(l: Language) -> String {
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .build()
-        .new_agent();
-    let result = agent
-        .get("https://api.github.com/repos/sya-ri/orvia/releases/latest")
-        .header("User-Agent", "Orvia")
-        .call();
-    let mut response = match result {
-        Ok(r) => r,
-        Err(ureq::Error::StatusCode(404)) => {
-            return l
-                .text("No public release available.", "公開リリースはありません。")
-                .into();
-        }
-        Err(_) => {
-            return l
-                .text(
-                    "Update check failed. Check your connection.",
-                    "更新を確認できません。接続を確認してください。",
-                )
-                .into();
-        }
-    };
-    let Ok(release) = response.body_mut().read_json::<Release>() else {
-        return l
-            .text(
-                "Unrecognized release information",
-                "リリース情報を読み取れません",
-            )
-            .into();
-    };
-    let latest = semver::Version::parse(release.tag_name.trim_start_matches('v'));
-    let current = semver::Version::parse(env!("CARGO_PKG_VERSION"));
-    match (latest, current) {
-        (Ok(v), Ok(installed)) if v > installed => {
-            format!(
-                "{} · {v}",
-                l.text("Update available", "アップデートがあります")
-            )
-        }
-        (Ok(_), Ok(_)) => l.text("Up to date", "最新バージョンです").into(),
-        _ => l
-            .text("Unrecognized release version", "バージョンを読み取れません")
-            .into(),
-    }
-}
+mod updates;
 
 fn main() -> io::Result<()> {
     let dir = data_dir()?;
@@ -388,11 +338,12 @@ fn main() -> io::Result<()> {
         return Err(e);
     }
     let _ = fs::remove_file(dir.join("close-window"));
-    run(&dir);
+    let installed = Version::parse(env!("CARGO_PKG_VERSION")).map_err(io::Error::other)?;
+    run(&dir, installed);
     Ok(())
 }
 
-fn run(dir: &Path) {
+fn run(dir: &Path, installed: Version) {
     let dir = dir.to_owned();
     Application::new().with_assets(icons::Icons).run(move |cx| {
         cx.bind_keys([
@@ -416,7 +367,7 @@ fn run(dir: &Path) {
                 window_min_size: Some(size(px(590.), px(440.))),
                 ..Default::default()
             },
-            |w, cx| cx.new(|cx| Panel::new(dir, w, cx)),
+            |w, cx| cx.new(|cx| Panel::new(dir, installed, w, cx)),
         );
         if opened.is_err() {
             cx.quit();

@@ -53,7 +53,7 @@ impl Panel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let disabled = (matches!(control, Control::RestartEngine) && self.restarting)
-            || (matches!(control, Control::CheckUpdate) && self.checking);
+            || (matches!(control, Control::CheckUpdate) && self.updates.checking);
         let leading = match &control {
             Control::RestartEngine => Some("refresh.svg"),
             Control::Page(Page::Log) => Some("activity.svg"),
@@ -331,6 +331,17 @@ impl Panel {
                     .child(note(format!("Orvia {}", env!("CARGO_PKG_VERSION"))))
                     .child(
                         row()
+                            .justify_between()
+                            .child(l.text("Automatically check for updates", "更新を自動で確認"))
+                            .child(self.switch(
+                                "automatic-updates",
+                                self.prefs.check_updates_automatically,
+                                Control::AutomaticUpdates,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        row()
                             .child(self.button(
                                 "updates",
                                 l.text("Check for updates", "更新を確認"),
@@ -351,7 +362,7 @@ impl Panel {
                             .id("update-result")
                             .h(px(24.))
                             .overflow_y_scroll()
-                            .child(note(self.update.clone())),
+                            .child(note(self.updates.status(l, &self.installed))),
                     ),
             )
             .child(
@@ -596,9 +607,33 @@ impl Render for Panel {
                             .p_5()
                             .child(
                                 div()
-                                    .text_2xl()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(title),
+                                    .h(px(38.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_2xl()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .child(title),
+                                    )
+                                    .when_some(
+                                        self.updates
+                                            .available(&self.installed)
+                                            .filter(|_| self.prefs.check_updates_automatically),
+                                        |header, version| {
+                                            header.child(self.button(
+                                                "available-release",
+                                                format!(
+                                                    "{} · v{version}",
+                                                    l.text("Update available", "更新があります")
+                                                ),
+                                                true,
+                                                Control::Releases,
+                                                cx,
+                                            ))
+                                        },
+                                    ),
                             )
                             .child(content),
                     ),

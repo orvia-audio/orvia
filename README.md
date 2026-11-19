@@ -29,6 +29,8 @@ https://github.com/user-attachments/assets/f70d9515-6fc0-45b6-9218-495529a97bc9
 2. In **Devices**, choose your physical microphone and virtual output. In **Mixer**, set the gain and turn on headphone monitoring if you want to hear the result.
 3. In each app's audio settings, select the physical microphone for the original audio or the virtual microphone for the Orvia mix.
 
+Orvia checks for a new stable release when you open the mixer and once a day while it stays open. Select the update notice to open the release. You can turn off automatic checks in **Preferences**.
+
 ## Development
 
 - [Build and test Orvia](docs/testing.md)

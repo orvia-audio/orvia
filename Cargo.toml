@@ -4,7 +4,7 @@ resolver = "3"
 
 [workspace.package]
 edition = "2024"
-version = "0.1.0-snapshot.1"
+version = "0.1.0-snapshot.2"
 license = "MIT"
 repository = "https://github.com/sya-ri/orvia"
 rust-version = "1.93"

@@ -60,6 +60,7 @@ impl Panel {
                 _ => false,
             };
         let leading = match &control {
+            Control::AutoAdjust => Some("adjustments-horizontal.svg"),
             Control::Test(TestAction::Record) => Some("microphone.svg"),
             Control::Test(TestAction::Play) => Some("player-play.svg"),
             Control::Test(TestAction::FinishRecording | TestAction::StopPlayback) => {
@@ -239,6 +240,11 @@ impl Panel {
                 &self.monitors,
                 l.text("Select headphones", "ヘッドホンを選択"),
             ),
+            Endpoint::Receiver => (
+                &self.prefs.receiver,
+                &self.receivers,
+                l.text("Match virtual output", "仮想出力に合わせる"),
+            ),
             Endpoint::TestSource => (
                 &self.test.source,
                 &self.test.sources,
@@ -278,6 +284,9 @@ impl Panel {
 
     fn mic_test_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let l = self.prefs.language;
+        if let Some(adjust) = &self.test.adjust {
+            return self.adjustment_page(adjust, cx);
+        }
         let recording = self.test.recording.as_ref();
         let action = self.test.primary_action();
         let length = recording
@@ -345,6 +354,175 @@ impl Panel {
             )
     }
 
+    fn adjustment_page(
+        &self,
+        adjust: &auto_adjust::AutoAdjust,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        use auto_adjust::Stage;
+        use orvia_core::calibration::{DURATION, speech_cue};
+
+        let l = self.prefs.language;
+        let mut panel = card().child(heading(
+            l.text("Auto adjust", "自動調節"),
+            "adjustments-horizontal.svg",
+            TERRACOTTA,
+        ));
+        match &adjust.stage {
+            Stage::Measuring(recording, _) => {
+                let elapsed = recording.duration();
+                let cue = speech_cue(elapsed);
+                let prompt = match cue {
+                    Some(n) => format!(
+                        "{}  {n}/2",
+                        l.text("Speak at your usual distance", "普段の距離で話してください")
+                    ),
+                    None => l
+                        .text("Stay quiet for a moment", "少し静かにしてください")
+                        .to_owned(),
+                };
+                panel =
+                    panel
+                        .child(note(self.device_name(Endpoint::Input)))
+                        .child(
+                            row()
+                                .justify_between()
+                                .child(div().text_lg().child(prompt))
+                                .child(note(format!(
+                                    "{:.1} / {} s",
+                                    elapsed.as_secs_f32(),
+                                    DURATION.as_secs()
+                                ))),
+                        )
+                        .child(
+                            div().h(px(5.)).w_full().rounded_full().bg(rgb(LINE)).child(
+                                div().h_full().rounded_full().bg(rgb(TERRACOTTA)).w(
+                                    gpui::relative(
+                                        (elapsed.as_secs_f32() / DURATION.as_secs_f32()).min(1.),
+                                    ),
+                                ),
+                            ),
+                        )
+                        .child(note(l.text(
+                            "Count from one to five at each prompt. Then speak once more to record the suggested mix on the virtual microphone.",
+                            "合図に合わせて1から5まで数えてください。最後にもう一度話すと、おすすめの設定で仮想マイクから録音します。",
+                        )));
+            }
+            Stage::Analyzing(_) => {
+                panel = panel.child(note(l.text(
+                    "Finding a suppression limit…",
+                    "声の出だしと環境音を解析中…",
+                )))
+            }
+            Stage::Auditioning { recording, .. } => {
+                panel = panel.child(heading(
+                    l.text("Record the virtual microphone", "仮想マイクから録音"),
+                    "microphone.svg",
+                    TERRACOTTA,
+                ));
+                if let Some((r, _)) = recording {
+                    panel = panel
+                        .child(div().text_lg().child(l.text(
+                            "Speak again at your usual distance",
+                            "普段の距離でもう一度話してください",
+                        )))
+                        .child(note(format!(
+                            "{:.1} / {} s",
+                            r.duration().as_secs_f32(),
+                            auto_adjust::PREVIEW_DURATION.as_secs()
+                        )));
+                } else {
+                    panel = panel.child(note(l.text(
+                        "Preparing the recording endpoint…",
+                        "仮想マイクの録音側を準備中…",
+                    )));
+                }
+            }
+            Stage::Restoring { .. } => {
+                panel = panel.child(note(l.text("Preparing playback…", "録音を再生します…")));
+            }
+            Stage::Ready(result) => {
+                let action = self.test.primary_action();
+                let limit = if result.limit_db == Settings::UNLIMITED_ATTENUATION_DB {
+                    l.text("Unlimited", "上限なし").into()
+                } else {
+                    format!("{} dB", result.limit_db)
+                };
+                let preview_label = if action == TestAction::StopPlayback {
+                    l.text("Stop preview", "プレビューを停止")
+                } else {
+                    l.text("Replay preview", "もう一度聴く")
+                };
+                panel = panel
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(l.text("Recommended limit", "おすすめの抑制上限"))
+                            .child(
+                                div()
+                                    .text_xl()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(limit),
+                            ),
+                    )
+                    .child(note(format!(
+                        "{} {:.1} dB   ·   {} {:.1} dB",
+                        l.text("Phrase onset loss", "声の出だしの減衰"),
+                        result.onset_loss_db,
+                        l.text("Room noise reduction", "環境音の低減"),
+                        result.room_reduction_db
+                    )))
+                    .child(heading(
+                        l.text("Virtual mic playback", "仮想マイクの録音を再生"),
+                        "headphones.svg",
+                        TERRACOTTA,
+                    ))
+                    .child(self.picker(Endpoint::TestSpeaker, cx))
+                    .child(
+                        row()
+                            .child(self.button(
+                                "adjust-preview",
+                                preview_label,
+                                false,
+                                Control::Test(action),
+                                cx,
+                            ))
+                            .child(self.button(
+                                "adjust-apply",
+                                l.text("Apply", "適用"),
+                                true,
+                                Control::ApplyAdjustment,
+                                cx,
+                            )),
+                    );
+            }
+            Stage::Failed(error) => panel = panel.child(note(error.clone())),
+        }
+        stack().child(panel).child(
+            row()
+                .child(self.button(
+                    "adjust-back",
+                    l.text("Back to mixer", "ミキサーに戻る"),
+                    false,
+                    Control::Page(Page::Mixer),
+                    cx,
+                ))
+                .when(
+                    matches!(adjust.stage, Stage::Failed(_) | Stage::Ready(_))
+                        && self.prefs.active_noise_method() == Some(NoiseMethod::DeepFilterNet3),
+                    |r| {
+                        r.child(self.button(
+                            "adjust-retry",
+                            l.text("Retake", "録り直す"),
+                            false,
+                            Control::AutoAdjust,
+                            cx,
+                        ))
+                    },
+                ),
+        )
+    }
+
     fn devices(&self, cx: &mut Context<Self>) -> gpui::Div {
         let l = self.prefs.language;
         stack()
@@ -364,7 +542,16 @@ impl Panel {
                         "route.svg",
                         TERRACOTTA,
                     ))
-                    .child(self.picker(Endpoint::Output, cx)),
+                    .child(self.picker(Endpoint::Output, cx))
+                    .child(heading(
+                        l.text(
+                            "Virtual microphone recording endpoint",
+                            "仮想マイクの録音側",
+                        ),
+                        "microphone.svg",
+                        TERRACOTTA,
+                    ))
+                    .child(self.picker(Endpoint::Receiver, cx)),
             )
     }
 
@@ -375,7 +562,10 @@ impl Panel {
         let warning = if !enabled {
             None
         } else if status.is_some_and(|s| s.monitor_error.is_some()) {
-            Some(l.text("Headphones unavailable", "ヘッドホン未接続"))
+            Some(l.text(
+                "Check receiver and headphones",
+                "仮想マイクの録音側とヘッドホンを確認",
+            ))
         } else if !status.is_some_and(|s| s.monitoring) {
             Some(l.text("Waiting for audio", "音声入力待ち"))
         } else {

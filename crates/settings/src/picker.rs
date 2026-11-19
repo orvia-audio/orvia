@@ -7,6 +7,7 @@ impl Panel {
             Endpoint::Input => (&self.inputs, self.prefs.input.as_deref()),
             Endpoint::Output => (&self.outputs, self.prefs.output.as_deref()),
             Endpoint::Monitor => (&self.monitors, self.prefs.monitor.as_deref()),
+            Endpoint::Receiver => (&self.receivers, self.prefs.receiver.as_deref()),
             Endpoint::TestSource => (&self.test.sources, self.test.source.as_deref()),
             Endpoint::TestSpeaker => (&self.monitors, self.test.speaker.as_deref()),
         }
@@ -15,6 +16,9 @@ impl Panel {
     fn choices(&self, side: Endpoint) -> impl Iterator<Item = (Option<&str>, &str)> {
         let l = self.prefs.language;
         let default = match side {
+            Endpoint::Receiver => {
+                Some((None, l.text("Match virtual output", "仮想出力に合わせる")))
+            }
             Endpoint::Input => Some((
                 None,
                 l.text("System default microphone", "システムの既定のマイク"),
@@ -72,6 +76,7 @@ impl Panel {
                 && let Some(side) = [
                     Endpoint::Input,
                     Endpoint::Output,
+                    Endpoint::Receiver,
                     Endpoint::Monitor,
                     Endpoint::TestSource,
                     Endpoint::TestSpeaker,
@@ -106,6 +111,7 @@ impl Panel {
             Endpoint::Input => "input",
             Endpoint::Output => "output",
             Endpoint::Monitor => "headphones",
+            Endpoint::Receiver => "receiver",
             Endpoint::TestSource => "test-source",
             Endpoint::TestSpeaker => "test-speaker",
         };

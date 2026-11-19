@@ -32,6 +32,7 @@ enum Endpoint {
     Monitor,
     TestSource,
     TestSpeaker,
+    Receiver,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -53,6 +54,8 @@ enum Control {
     Mix(Mixing),
     Noise(Option<NoiseMethod>),
     Test(TestAction),
+    AutoAdjust,
+    ApplyAdjustment,
     RestartEngine,
     DismissError,
     Slide(Slider, u16),
@@ -83,7 +86,7 @@ impl ControlAnchor {
 }
 
 struct Panel {
-    picker_anchors: [ControlAnchor; 5],
+    picker_anchors: [ControlAnchor; 6],
     picker_cursor: usize,
     picker_scroll: gpui::ScrollHandle,
     dir: PathBuf,
@@ -94,6 +97,7 @@ struct Panel {
     inputs: Vec<(String, String)>,
     outputs: Vec<(String, String)>,
     monitors: Vec<(String, String)>,
+    receivers: Vec<(String, String)>,
     test: microphone_test::MicTest,
     test_primary_focus: FocusHandle,
     page: Page,
@@ -176,7 +180,7 @@ impl Panel {
                             p.prefs = prefs;
                         }
                         if p.page == Page::MicTest {
-                            p.poll_mic_test();
+                            p.poll_mic_test(cx);
                         }
                         if !p.test_only && p.prefs.check_updates_automatically && p.updates.due() {
                             p.check_for_updates(cx);
@@ -209,6 +213,7 @@ impl Panel {
             prefs,
             inputs,
             outputs: orvia_engine::outputs().unwrap_or_default(),
+            receivers: orvia_engine::mic_test::sources().unwrap_or_default(),
             monitors: orvia_engine::monitors().unwrap_or_default(),
             test: Default::default(),
             test_primary_focus: cx.focus_handle().tab_stop(true),
@@ -251,7 +256,7 @@ impl Panel {
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
         match control {
             Control::Page(page) => {
-                if self.page != page {
+                if self.page != page || self.test.adjust.is_some() {
                     if self.page == Page::MicTest {
                         self.finish_test_recording();
                         self.test = Default::default();
@@ -282,6 +287,9 @@ impl Panel {
                         Endpoint::Monitor | Endpoint::TestSpeaker => {
                             (&mut self.monitors, orvia_engine::monitors())
                         }
+                        Endpoint::Receiver => {
+                            (&mut self.receivers, orvia_engine::mic_test::sources())
+                        }
                         Endpoint::TestSource => {
                             (&mut self.test.sources, orvia_engine::mic_test::sources())
                         }
@@ -301,6 +309,8 @@ impl Panel {
                 self.test.speaker = id;
                 self.choosing = None;
             }
+            Control::AutoAdjust => self.start_adjustment(),
+            Control::ApplyAdjustment => self.apply_adjustment(cx),
             Control::Test(action) => self.run_test_action(action),
             Control::RestartEngine if !self.restarting => {
                 self.restarting = true;
@@ -335,7 +345,13 @@ impl Panel {
                     Control::Select(side, id) => {
                         match side {
                             Endpoint::Input => settings.input = id,
-                            Endpoint::Output => settings.output = id,
+                            Endpoint::Output => {
+                                if settings.output != id {
+                                    settings.receiver = None;
+                                }
+                                settings.output = id;
+                            }
+                            Endpoint::Receiver => settings.receiver = id,
                             Endpoint::Monitor => {
                                 settings.monitor_enabled = id.is_some();
                                 settings.monitor = id;
@@ -380,6 +396,7 @@ impl Panel {
     }
 }
 
+mod auto_adjust;
 mod engine_control;
 mod engine_log;
 mod icons;

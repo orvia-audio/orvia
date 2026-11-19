@@ -139,6 +139,80 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     assert take.read_bytes() == second and not recording()
     test_panel.terminate()
     test_panel.wait(timeout=10)
+
+    # The marker exists only on the cable. Hearing it distinguishes a receiver
+    # capture from an internal mix tap, even when the physical input is silent.
+    def set_controls(**values):
+        path = state / "settings.json"
+        settings = json.loads(path.read_text())
+        stage = state / "test-settings.tmp"
+        stage.write_text(json.dumps({**settings, **values}))
+        stage.replace(path)
+
+    def play_pcm(sink, pcm):
+        subprocess.run(["pacat", "-d", sink, "--latency-msec=20", "--raw", "--format=s16le",
+                        "--channels=1", "--rate=48000"], env=env, input=pcm.tobytes(), check=True, timeout=18)
+
+    marker = array.array("h", (int(1300 * math.sin(2 * math.pi * 750 * i / 48000))
+                               for i in range(48000)))
+
+    def record_headphones(action):
+        path = Path(tmp, "headphones.raw")
+        with path.open("wb") as output:
+            capture = start("parec", "-d", "test_headphones.monitor", "--latency-msec=20", "--raw",
+                            "--format=s16le", "--channels=1", "--rate=48000", stdout=output)
+            time.sleep(0.3)
+            action()
+            time.sleep(0.4)
+            capture.terminate()
+            capture.wait(timeout=5)
+        pcm = array.array("h", path.read_bytes())
+        # Measure RMS in the loudest 100 ms, excluding stream startup and silence.
+        return max((math.sqrt(sum(x*x for x in pcm[i:i+4800]) / 4800)
+                    for i in range(0, len(pcm)-4800, 4800)), default=0)
+
+    set_controls(monitor_enabled=True)
+    wait_for(playing, "Receiver monitor did not open headphones")
+    unity = record_headphones(lambda: play_pcm("orvia_output", marker))
+    assert unity > 150, unity
+    set_controls(monitor_enabled=False, suppress_noise=True,
+                 noise_method="deepfilternet3", deep_filter_limit_db=12, mixing="average",
+                 check_updates_automatically=False)
+    wait_for(lambda: not playing(), "Headphone monitor did not stop")
+
+    mixer = start("orvia")
+    wait_for(window_visible, "Mixer did not reopen", timeout=45)
+    window = run("xdotool", "search", "--onlyvisible", "--name", "^Orvia$").splitlines()[0]
+    run("xdotool", "windowfocus", "--sync", window)
+    physical = device_index("sources", "test_microphone")
+
+    def mic_count():
+        return sum(s["source"] == physical for s in pulse_devices("source-outputs"))
+
+    # Four sidebar controls, four suppression choices, then Auto adjust.
+    time.sleep(1)
+    guide = array.array("h")
+    block = array.array("h", (int(3800 * math.sin(2 * math.pi * 300 * i / 48000)) for i in range(480)))
+    quiet = array.array("h", [0]*480)
+    for n in range(960):
+        guide.extend(block if 225 <= n < 410 or 725 <= n < 910 else quiet)
+    run("xdotool", "key", "--delay", "100", *["Tab"]*9, "Return")
+    wait_for(lambda: mic_count() >= 2, "Auto adjust did not start the physical mic test")
+    play_pcm("test_input", guide)
+    wait_for(recording, "The suggested mix was not recorded on the virtual microphone", timeout=35)
+    trial = state / "suppression-audition.json"
+    assert trial.is_file()
+    assert json.loads((state / "settings.json").read_text())["deep_filter_limit_db"] == 12
+    play_pcm("orvia_output", marker)
+    def hear_preview():
+        wait_for(playing, "The virtual microphone take did not play automatically", timeout=12)
+        wait_for(lambda: not playing(), "The preview did not finish", timeout=12)
+    preview = record_headphones(hear_preview)
+    assert 0.8 < preview/unity < 1.25, (preview, unity)
+    assert not trial.exists() and take.read_bytes() == second
+    assert json.loads((state / "settings.json").read_text())["deep_filter_limit_db"] == 12
+    (state / "close-window").touch()
+    assert mixer.wait(timeout=10) == 0
     assert engine.poll() is None
     (state / f"stop-engine-{engine.pid}").touch()
     assert engine.wait(timeout=10) == 0

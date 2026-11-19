@@ -32,6 +32,7 @@ pub(super) struct MicTest {
     pub(super) recording: Option<Recording>,
     pub(super) clip: Option<Clip>,
     pub(super) playback: Option<Playback>,
+    pub(super) adjust: Option<super::auto_adjust::AutoAdjust>,
     started: Option<Instant>,
     recording_route: Option<(String, String)>,
 }
@@ -63,25 +64,7 @@ impl Panel {
         if let Ok(devices) = orvia_engine::monitors() {
             self.monitors = devices;
         }
-        let candidates = &self.test.sources;
-        let output = self
-            .outputs
-            .iter()
-            .find(|(id, _)| Some(id) == self.prefs.output.as_ref());
-        let mut matching = candidates.iter().filter(|(id, name)| {
-            output.is_some_and(|(out, label)| {
-                id == out
-                    || name == label
-                    || (out == "pulseaudio:orvia_output" && id == "pulseaudio:orvia_microphone")
-            })
-        });
-        let preferred = matching.next().filter(|_| matching.next().is_none());
-        self.test.source = preferred
-            .or(match candidates.as_slice() {
-                [only] => Some(only),
-                _ => None,
-            })
-            .map(|(id, _)| id.clone());
+        self.test.source = mic_test::routed_source(&self.prefs).ok();
         self.test.speaker = self.prefs.monitor.clone();
         match Clip::load_latest(&self.dir.join("mic-test")) {
             Ok(clip) => self.test.clip = clip,
@@ -90,6 +73,11 @@ impl Panel {
     }
 
     pub(super) fn test_action_enabled(&self, action: TestAction) -> bool {
+        if self.test.adjust.is_some()
+            && !matches!(action, TestAction::Play | TestAction::StopPlayback)
+        {
+            return false;
+        }
         let primary = self.test.primary_action();
         match action {
             TestAction::Record | TestAction::Retake => {
@@ -154,7 +142,7 @@ impl Panel {
         }
     }
 
-    fn play_test(&mut self) {
+    pub(super) fn play_test(&mut self) {
         if let Some(clip) = &self.test.clip {
             match clip.play(self.test.speaker.as_deref()) {
                 Ok(playback) => {
@@ -176,7 +164,10 @@ impl Panel {
         );
     }
 
-    pub(super) fn poll_mic_test(&mut self) {
+    pub(super) fn poll_mic_test(&mut self, cx: &mut Context<Self>) {
+        if self.test.adjust.is_some() {
+            self.poll_adjustment(cx);
+        }
         let timeout = self
             .test
             .started

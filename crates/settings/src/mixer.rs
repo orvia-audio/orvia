@@ -350,7 +350,21 @@ impl Panel {
                                 .justify_between()
                                 .text_sm()
                                 .child(l.text("Suppression limit", "抑制の上限"))
-                                .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(limit)),
+                                .child(
+                                    row()
+                                        .child(
+                                            div()
+                                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                                .child(limit),
+                                        )
+                                        .child(self.button(
+                                            "auto-adjust",
+                                            l.text("Auto adjust", "自動調節"),
+                                            false,
+                                            Control::AutoAdjust,
+                                            cx,
+                                        )),
+                                ),
                         )
                         .child(self.slider(Slider::Suppression, cx))
                     })

@@ -1,6 +1,6 @@
 # <img src="assets/orvia-wordmark.svg" alt="Orvia" width="560">
 
-Orvia is a desktop microphone mixer for Windows, macOS, and Linux. Send a processed microphone to a game or recording app while your voice chat uses the original input.
+Orvia is a desktop microphone mixer for Windows, macOS, and Linux. Adjust your microphone's gain, channels, and noise suppression, then listen to the mix through headphones.
 
 ![Orvia mixer with live input and filtered signal levels, channel controls, output gain, and headphone monitoring](assets/mixer.png)
 
@@ -25,6 +25,6 @@ https://github.com/user-attachments/assets/f70d9515-6fc0-45b6-9218-495529a97bc9
 
 1. Install Orvia and the virtual audio device for your system. On Ubuntu, sign out and back in after installation.
 2. In **Devices**, choose your physical microphone and virtual output. In **Mixer**, set the gain and turn on headphone monitoring if you want to hear the result.
-3. In your game or recorder, select the virtual microphone. Leave your physical input selected in apps that should receive the original sound.
+3. In each app's audio settings, select the physical microphone for the original audio or the virtual microphone for the Orvia mix.
 
 [Listening samples and A/B player](docs/samples/) · [Build and test](docs/testing.md) · [Contributing](CONTRIBUTING.md) · [MIT license](LICENSE)

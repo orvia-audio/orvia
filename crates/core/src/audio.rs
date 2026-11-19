@@ -29,6 +29,9 @@ pub enum NoiseMethod {
     /// WebRTC speech-oriented suppression at the high suppression level.
     #[serde(rename = "webrtc", alias = "spectral")]
     WebRtc,
+    /// DeepFilterNet3 speech enhancement with an embedded CPU model.
+    #[serde(rename = "deepfilternet3")]
+    DeepFilterNet3,
 }
 
 /// Signal envelopes and mean-square energies for one aligned 10 ms block.
@@ -92,6 +95,7 @@ fn levels(frames: &[[f32; 2]; BLOCK]) -> (f32, f32) {
 enum Filter {
     Rnnoise(Box<DenoiseState<'static>>),
     WebRtc(Box<sonora::AudioProcessing>),
+    DeepFilterNet3(Box<dfn3_rs::Denoiser>),
 }
 
 /// Stateful block processor for one uninterrupted segment of microphone input.
@@ -101,7 +105,7 @@ enum Filter {
 pub struct Processor {
     settings: crate::Settings,
     filters: Vec<Filter>,
-    previous_input: (f32, f32),
+    delayed_levels: std::collections::VecDeque<(f32, f32)>,
 }
 
 impl Processor {
@@ -117,6 +121,7 @@ impl Processor {
             (0..channels)
                 .map(|_| match settings.noise_method {
                     NoiseMethod::Rnnoise => Filter::Rnnoise(DenoiseState::new()),
+                    NoiseMethod::DeepFilterNet3 => Filter::DeepFilterNet3(Box::default()),
                     NoiseMethod::WebRtc => {
                         let config = sonora::Config {
                             noise_suppression: Some(sonora::config::NoiseSuppression {
@@ -136,10 +141,15 @@ impl Processor {
         } else {
             Vec::new()
         };
+        let delay_blocks = match settings.active_noise_method() {
+            None => 0,
+            Some(NoiseMethod::DeepFilterNet3) => dfn3_rs::ALGORITHM_DELAY / BLOCK,
+            Some(NoiseMethod::WebRtc | NoiseMethod::Rnnoise) => 1,
+        };
         Self {
             settings: settings.clone(),
             filters,
-            previous_input: (0., 0.),
+            delayed_levels: vec![(0., 0.); delay_blocks].into(),
         }
     }
 
@@ -157,8 +167,7 @@ impl Processor {
     }
 
     /// Process one block and return its output peak and pre-gain filter measurements.
-    /// Filtered input envelopes are offset by one 10 ms block to approximate
-    /// the analysis and synthesis delay at the display's block resolution.
+    /// The input envelope follows each filter's delay to the nearest 10 ms.
     pub fn process_with_levels(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> (f32, BlockLevels) {
         for frame in frames.iter_mut() {
             for sample in frame.iter_mut() {
@@ -184,6 +193,10 @@ impl Processor {
                         *s /= 32768.;
                     }
                 }
+                Filter::DeepFilterNet3(f) => {
+                    let input = std::array::from_fn(|i| frames[i][channel]);
+                    f.process(&input, &mut output);
+                }
                 Filter::WebRtc(f) => {
                     let input: [f32; BLOCK] = std::array::from_fn(|i| frames[i][channel]);
                     if f.process_capture_f32(&[&input], &mut [&mut output])
@@ -200,13 +213,11 @@ impl Processor {
                 }
             }
         }
-        let (before, after) = if self.filters.is_empty() {
-            (input_levels, input_levels)
+        let (before, after) = if let Some(before) = self.delayed_levels.pop_front() {
+            self.delayed_levels.push_back(input_levels);
+            (before, levels(frames))
         } else {
-            (
-                std::mem::replace(&mut self.previous_input, input_levels),
-                levels(frames),
-            )
+            (input_levels, input_levels)
         };
         let gain = f32::from(self.settings.gain_percent.min(200)) / 100.;
         let mut peak = 0_f32;
@@ -247,7 +258,11 @@ mod tests {
 
     #[test]
     fn suppression_reduces_stationary_noise() {
-        for method in [NoiseMethod::Rnnoise, NoiseMethod::WebRtc] {
+        for method in [
+            NoiseMethod::Rnnoise,
+            NoiseMethod::WebRtc,
+            NoiseMethod::DeepFilterNet3,
+        ] {
             let mut processor = Processor::new(&Settings {
                 suppress_noise: true,
                 noise_method: method,

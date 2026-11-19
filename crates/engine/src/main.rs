@@ -80,6 +80,7 @@ fn supervise(dir: &Path) -> Result<()> {
                     |method| match method {
                         orvia_core::NoiseMethod::Rnnoise => "rnnoise".into(),
                         orvia_core::NoiseMethod::WebRtc => "webrtc".into(),
+                        orvia_core::NoiseMethod::DeepFilterNet3 => "deepfilternet3".into(),
                     },
                 )));
             }

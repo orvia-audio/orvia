@@ -183,6 +183,11 @@ impl Panel {
             ("bypass", l.text("Off", "オフ"), None),
             ("rnnoise", "RNNoise", Some(NoiseMethod::Rnnoise)),
             ("webrtc", "WebRTC", Some(NoiseMethod::WebRtc)),
+            (
+                "deepfilternet3",
+                "DeepFilterNet3",
+                Some(NoiseMethod::DeepFilterNet3),
+            ),
         ] {
             methods = methods.child(self.button(
                 id,

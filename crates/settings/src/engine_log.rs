@@ -62,6 +62,7 @@ pub(super) fn description(event: &EngineEvent, l: Language) -> String {
                 None => l.text("Off", "オフ"),
                 Some("rnnoise") => "RNNoise",
                 Some("webrtc") => "WebRTC",
+                Some("deepfilternet3") => "DeepFilterNet3",
                 Some("spectral") => l.text("Spectral subtraction", "スペクトル減算"),
                 Some(other) => other,
             };

@@ -8,7 +8,7 @@ Use Rust 1.93.1. Build both executables with `cargo build --workspace --locked` 
 | macOS | Xcode Command Line Tools, jq and cargo-about 0.9.3 | Run `MACOSX_DEPLOYMENT_TARGET=13.0 bash installer/desktop.sh` for a native disk image. |
 | Ubuntu 24.04 amd64 | Install the packages listed in the [desktop workflow](../.github/workflows/desktop.yml), plus jq and cargo-about 0.9.3. | Run `bash installer/desktop.sh` for a DEB with a PipeWire virtual sink and capture source. |
 
-Find native packages in `dist/`. The macOS snapshot is ad-hoc signed. If Gatekeeper blocks the first launch, review the app under **System Settings → Privacy & Security**. Quit Orvia from its menu before replacing or removing the macOS or Linux app. Windows Installer resumes an active engine after an upgrade or repair.
+Find native packages in `dist/`. The macOS app is ad-hoc signed. If Gatekeeper blocks the first launch, review the app under **System Settings → Privacy & Security**. Quit Orvia from its menu before replacing or removing the macOS or Linux app. Windows Installer resumes an active engine after an upgrade or repair.
 
 ## Audio routing checks
 

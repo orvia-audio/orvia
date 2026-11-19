@@ -17,8 +17,6 @@ case "$host" in
         install -m755 target/release/orvia target/release/orvia-engine "$app/Contents/MacOS/"
         cp installer/macos/Info.plist "$app/Contents/"
         plutil -replace CFBundleShortVersionString -string "${version%%-*}" "$app/Contents/Info.plist"
-        build=${version##*.}
-        plutil -replace CFBundleVersion -string "$build" "$app/Contents/Info.plist"
         icon_dir=$(jq -r 'select(.reason=="build-script-executed" and (.package_id | contains("/crates/settings#"))) | .out_dir' "$work/build.json")
         for size in 16 32 128 256 512; do
             for scale in 1 2; do

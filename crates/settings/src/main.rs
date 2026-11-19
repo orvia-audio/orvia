@@ -49,6 +49,7 @@ enum Control {
     Mix(Mixing),
     Noise(Option<NoiseMethod>),
     RestartEngine,
+    DismissError,
     Gain(u16),
     CheckUpdate,
     Releases,
@@ -242,6 +243,7 @@ impl Panel {
                 .detach();
             }
             Control::RestartEngine => {}
+            Control::DismissError => self.error.clear(),
             Control::CheckUpdate if !self.checking => {
                 self.checking = true;
                 self.update = self
@@ -338,11 +340,13 @@ fn latest_release(l: Language) -> String {
                 .text("No public release available.", "公開リリースはありません。")
                 .into();
         }
-        Err(e) => {
-            return format!(
-                "{} · {e}",
-                l.text("Update check failed", "更新を確認できません")
-            );
+        Err(_) => {
+            return l
+                .text(
+                    "Update check failed. Check your connection.",
+                    "更新を確認できません。接続を確認してください。",
+                )
+                .into();
         }
     };
     let Ok(release) = response.body_mut().read_json::<Release>() else {

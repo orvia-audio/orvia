@@ -52,7 +52,8 @@ impl Panel {
         control: Control,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let disabled = matches!(control, Control::RestartEngine) && self.restarting;
+        let disabled = (matches!(control, Control::RestartEngine) && self.restarting)
+            || (matches!(control, Control::CheckUpdate) && self.checking);
         let leading = match &control {
             Control::RestartEngine => Some("refresh.svg"),
             Control::Page(Page::Log) => Some("activity.svg"),
@@ -278,18 +279,24 @@ impl Panel {
         card()
             .gap_2()
             .child(
-                row()
-                    .justify_between()
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
                     .child(heading(
                         l.text("Headphone monitor", "ヘッドホンモニター"),
                         "headphones.svg",
                         TERRACOTTA,
                     ))
                     .child(
-                        row()
-                            .when_some(warning, |d, message| d.child(note(message)))
-                            .child(self.switch("monitor", enabled, Control::Monitor, cx)),
-                    ),
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_right()
+                            .child(note(warning.unwrap_or(""))),
+                    )
+                    .child(self.switch("monitor", enabled, Control::Monitor, cx)),
             )
             .child(self.picker(Endpoint::Monitor, cx))
     }
@@ -339,9 +346,13 @@ impl Panel {
                                 cx,
                             )),
                     )
-                    .when(!self.update.is_empty(), |v| {
-                        v.child(note(self.update.clone()))
-                    }),
+                    .child(
+                        div()
+                            .id("update-result")
+                            .h(px(24.))
+                            .overflow_y_scroll()
+                            .child(note(self.update.clone())),
+                    ),
             )
             .child(
                 card()
@@ -364,29 +375,56 @@ impl Panel {
                                     ))
                                     .child(self.button(
                                         "restart-engine",
-                                        if self.restarting {
-                                            l.text("Restarting…", "再起動中…")
-                                        } else {
-                                            l.text("Restart", "再起動")
-                                        },
+                                        l.text("Restart", "再起動"),
                                         false,
                                         Control::RestartEngine,
                                         cx,
                                     )),
                             ),
                     )
-                    .when_some(
-                        self.status
-                            .as_ref()
-                            .filter(|s| s.version != env!("CARGO_PKG_VERSION")),
-                        |d, s| {
-                            d.child(note(format!(
-                                "{}  {}",
-                                l.text("Running version", "実行中のバージョン"),
-                                s.version
-                            )))
-                        },
-                    ),
+                    .child(self.engine_version()),
+            )
+    }
+
+    fn engine_version(&self) -> gpui::Div {
+        let l = self.prefs.language;
+        let (icon, label, color) = if self.restarting {
+            ("refresh.svg", l.text("Restarting", "再起動中"), MUTED)
+        } else {
+            match self.status.as_ref() {
+                Some(s) if s.version == env!("CARGO_PKG_VERSION") => (
+                    "check.svg",
+                    l.text("Version matches", "バージョン一致"),
+                    0x246345,
+                ),
+                Some(_) => (
+                    "x.svg",
+                    l.text("Version mismatch", "バージョン不一致"),
+                    0xa03023,
+                ),
+                None => (
+                    "info-circle.svg",
+                    l.text("Awaiting engine", "エンジン応答待ち"),
+                    MUTED,
+                ),
+            }
+        };
+        let version = self.status.as_ref().map_or("—", |s| s.version.as_str());
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(24.))
+            .text_sm()
+            .child(glyph(icon, 17., color))
+            .child(div().text_color(rgb(color)).child(label))
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_right()
+                    .child(version.to_owned()),
             )
     }
 
@@ -563,12 +601,36 @@ impl Render for Panel {
                                     .font_weight(gpui::FontWeight::SEMIBOLD)
                                     .child(title),
                             )
-                            .child(content)
-                            .when(!self.error.is_empty(), |v| {
-                                v.child(note(self.error.clone()))
-                            }),
+                            .child(content),
                     ),
             )
+            .when(!self.error.is_empty(), |d| {
+                d.child(
+                    div()
+                        .id("panel-error")
+                        .absolute()
+                        .bottom_2()
+                        .left(px(172.))
+                        .right_2()
+                        .occlude()
+                        .rounded_md()
+                        .bg(rgb(0xffeadf))
+                        .border_1()
+                        .border_color(rgb(TERRACOTTA))
+                        .flex()
+                        .items_center()
+                        .p_2()
+                        .gap_2()
+                        .child(div().flex_1().min_w_0().text_sm().child(self.error.clone()))
+                        .child(self.button(
+                            "dismiss-error",
+                            l.text("Dismiss", "閉じる"),
+                            false,
+                            Control::DismissError,
+                            cx,
+                        )),
+                )
+            })
             .when_some(self.choosing, |workspace, side| {
                 workspace.child(self.picker_menu(side, window, cx))
             })

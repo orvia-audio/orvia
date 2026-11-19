@@ -253,12 +253,12 @@ impl Panel {
             .child(
                 row()
                     .justify_between()
-                    .when(filtered, |d| {
-                        d.child(div().text_sm().child(format!(
+                    .child(div().flex_1().when(filtered, |d| {
+                        d.text_sm().child(format!(
                             "{}  {change}",
                             l.text("Pre-gain attenuation", "ゲイン適用前の減衰量")
-                        )))
-                    })
+                        ))
+                    }))
                     .child(
                         div()
                             .text_sm()

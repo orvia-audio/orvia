@@ -17,6 +17,8 @@ hound = "3.5"
 tempfile = "3"
 time = { version = "0.3", features = ["local-offset"] }
 [target.'cfg(windows)'.dependencies]
+# WASAPI capture and render callbacks must keep running when the mixer is in the background.
+cpal = { version = "0.18.2", features = ["realtime"] }
 tray-item = "0.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]

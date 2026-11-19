@@ -1,6 +1,6 @@
 //! Short recordings from the receiving side of a virtual microphone.
 use crate::{
-    formats::{Port, config, stream_config},
+    formats::{Port, config, stream_config, stream_continues},
     host, is_virtual_cable, label,
 };
 use anyhow::{Context, Result, anyhow, ensure};
@@ -58,7 +58,7 @@ fn errors() -> (
     let (tx, rx) = mpsc::sync_channel(1);
     (
         move |error: cpal::Error| {
-            if error.kind() != cpal::ErrorKind::Xrun {
+            if !stream_continues(&error) {
                 let _ = tx.try_send(error);
             }
         },

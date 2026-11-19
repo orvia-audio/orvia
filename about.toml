@@ -8,5 +8,8 @@ accepted = ["Unlicense"]
 [option-ext]
 accepted = ["MPL-2.0"]
 
+[audio_thread_priority]
+accepted = ["MPL-2.0"]
+
 [cbindgen]
 accepted = ["MPL-2.0"]

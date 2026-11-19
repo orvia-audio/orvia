@@ -4,6 +4,21 @@ use anyhow::{Result, anyhow};
 use cpal::{Device, SampleFormat, SupportedStreamConfig, traits::DeviceTrait};
 use orvia_core::SAMPLE_RATE;
 
+/// Whether CPAL continues delivering callbacks after this runtime notification.
+pub fn stream_continues(error: &cpal::Error) -> bool {
+    // CPAL 0.18's WASAPI fallback preserves the Win32 error kind when both
+    // priority requests fail, then enters the normal stream loop.
+    let priority_denied = cfg!(windows)
+        && error.message().is_some_and(|s| {
+            s.starts_with("Failed to promote audio thread to real-time priority:")
+        });
+    priority_denied
+        || matches!(
+            error.kind(),
+            cpal::ErrorKind::Xrun | cpal::ErrorKind::RealtimeDenied
+        )
+}
+
 /// Use a ten-millisecond server buffer on Linux.
 pub fn stream_config(config: &SupportedStreamConfig) -> cpal::StreamConfig {
     let mut stream = config.config();

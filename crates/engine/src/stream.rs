@@ -6,7 +6,7 @@ use cpal::{
 };
 use orvia_core::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings};
 use orvia_engine::{
-    formats::{Port, config, stream_config},
+    formats::{Port, config, stream_config, stream_continues},
     host, is_virtual_cable, label,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -313,9 +313,7 @@ impl Monitor {
 fn on_error(counters: &Arc<Counters>) -> impl FnMut(cpal::Error) + Send + 'static {
     let counters = counters.clone();
     move |error| {
-        // CPAL keeps delivering samples after a discontinuity. The heartbeat
-        // still detects a device that has actually stopped sending callbacks.
-        if error.kind() != cpal::ErrorKind::Xrun {
+        if !stream_continues(&error) {
             counters.failed.store(true, Relaxed);
         }
     }
@@ -471,11 +469,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_buffer_discontinuity_keeps_the_stream_open() {
+    fn recoverable_audio_notifications_keep_the_stream_open() {
         let counters = Arc::new(Counters::default());
         let mut callback = on_error(&counters);
         callback(cpal::ErrorKind::Xrun.into());
         assert!(!counters.failed.load(Relaxed));
+        callback(cpal::ErrorKind::RealtimeDenied.into());
+        assert!(!counters.failed.load(Relaxed));
+        #[cfg(windows)]
+        {
+            callback(cpal::Error::with_message(
+                cpal::ErrorKind::BackendError,
+                "Failed to promote audio thread to real-time priority: Access is denied.",
+            ));
+            assert!(!counters.failed.load(Relaxed));
+        }
         callback(cpal::ErrorKind::DeviceNotAvailable.into());
         assert!(counters.failed.load(Relaxed));
     }

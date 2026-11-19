@@ -38,9 +38,23 @@
         <div class="wave"><canvas id="waveform" aria-hidden="true"></canvas><input id="seek" type="range" aria-label="Playback position" min="0" max="14" step="0.01" value="0"></div>
         <div class="transport">
           <button class="play" type="button" id="play"><svg viewBox="0 0 20 20" aria-hidden="true"><path id="play-icon" d="m6 3 11 7-11 7Z"/></svg><span id="play-label">Play</span></button>
-          <button class="replay" type="button" id="replay" aria-label="Replay the last three seconds"><img src="media/refresh.svg" width="16" height="16" alt="">3 s</button>
           <output id="clock" for="seek">0:00 / 0:14</output>
-          <a class="sample-credits" href="sample-credits.html">Audio credits</a>
+          <button type="button" class="sample-credits" popovertarget="audio-credits">Audio credits</button>
+        </div>
+        <div class="credits-panel" id="audio-credits" popover role="dialog" aria-labelledby="credits-title">
+          <div class="credits-head">
+            <h2 id="credits-title">Audio credits</h2>
+            <button type="button" popovertarget="audio-credits" popovertargetaction="hide" aria-label="Close audio credits" autofocus><img src="media/x.svg" width="20" height="20" alt=""></button>
+          </div>
+          <dl>
+            <dt>Speech</dt>
+            <dd><a href="https://commons.wikimedia.org/wiki/File:Speech_12dB_s16.flac">IETF / Opus Codec working group</a> · <a href="https://creativecommons.org/licenses/by/3.0/">CC BY 3.0</a></dd>
+            <dt>Air conditioner</dt>
+            <dd><a href="https://commons.wikimedia.org/wiki/File:Air_conditioner_hum_(Gravity_Sound).wav">Gravity Sound</a> · <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a></dd>
+            <dt>Keyboard</dt>
+            <dd><a href="https://commons.wikimedia.org/wiki/File:Keyboard_noise.ogg">Yuyudevil</a> · Public domain</dd>
+          </dl>
+          <p>Orvia mixed the recordings, applied each filter at 100% gain, and aligned the clips for playback.</p>
         </div>
         <p id="notice" role="status"></p>
         <noscript><video controls preload="metadata" src="media/compare-16s.mp4"></video></noscript>
@@ -59,7 +73,7 @@
           <dd>Keep stereo or mix down to mono. Set output gain from 0% to 200%.</dd>
         </dl>
       </div>
-      <a class="screen" href="media/mixer.png" aria-label="Open the full-size Orvia mixer screenshot"><img src="media/mixer.png" width="830" height="640" alt="Orvia’s Mixer tab with the live signal graph, DeepFilterNet3 selected, mono output and the headphone monitor on."></a>
+      <img class="screen" src="media/mixer.png" width="830" height="640" alt="Orvia’s Mixer tab with the live signal graph, DeepFilterNet3 selected, mono output and the headphone monitor on.">
     </section>
 
     <div class="setup">

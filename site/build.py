@@ -8,12 +8,12 @@ root = site.parent
 out = root / "dist" / "pages"
 media = out / "media"
 media.mkdir(parents=True, exist_ok=True)
-for name in ("index.html", "sample-credits.html", "style.css", "player.js"):
+for name in ("index.html", "style.css", "player.js"):
     shutil.copyfile(site / name, out / name)
 shutil.copyfile(site / "brand-github.svg", media / "brand-github.svg")
 for name in ("orvia.svg", "mixer.png"):
     shutil.copyfile(root / "assets" / name, media / name)
-for name in ("microphone.svg", "chevron-down.svg", "activity.svg", "filter.svg", "volume.svg", "refresh.svg"):
+for name in ("microphone.svg", "chevron-down.svg", "activity.svg", "filter.svg", "volume.svg", "x.svg"):
     shutil.copyfile(root / "assets" / "tabler" / "outline" / name, media / name)
 samples = root / "docs" / "samples"
 for scene in ("air-conditioner", "keyboard"):

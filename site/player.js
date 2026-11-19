@@ -191,6 +191,5 @@ function jump(to) {
   if (live) start(); else draw();
 }
 seek.addEventListener("input", () => jump(Number(seek.value)));
-document.getElementById("replay").addEventListener("click", () => jump(position() - 3));
 new ResizeObserver(draw).observe(canvas);
 void loadScene();

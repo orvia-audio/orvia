@@ -309,7 +309,13 @@ impl Monitor {
 
 fn on_error(counters: &Arc<Counters>) -> impl FnMut(cpal::Error) + Send + 'static {
     let counters = counters.clone();
-    move |_| counters.failed.store(true, Relaxed)
+    move |error| {
+        // CPAL keeps delivering samples after a discontinuity. The heartbeat
+        // still detects a device that has actually stopped sending callbacks.
+        if error.kind() != cpal::ErrorKind::Xrun {
+            counters.failed.store(true, Relaxed);
+        }
+    }
 }
 
 fn playback_stream<T: SizedSample + FromSample<f32>>(
@@ -502,6 +508,16 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_buffer_discontinuity_keeps_the_stream_open() {
+        let counters = Arc::new(Counters::default());
+        let mut callback = on_error(&counters);
+        callback(cpal::ErrorKind::Xrun.into());
+        assert!(!counters.failed.load(Relaxed));
+        callback(cpal::ErrorKind::DeviceNotAvailable.into());
+        assert!(counters.failed.load(Relaxed));
+    }
     #[test]
     fn headphones_receive_the_processed_block_without_backpressure_on_the_source() {
         let (tx, mut rx) = RingBuffer::new(BLOCK);

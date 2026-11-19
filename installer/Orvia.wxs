@@ -15,6 +15,16 @@
       <UpgradeVersion Minimum="0.0.0" IncludeMinimum="yes" OnlyDetect="yes" Property="ORVIA_OTHER_EDITION" />
     </Upgrade>
     <Launch Condition="Installed OR NOT ORVIA_OTHER_EDITION" Message="Uninstall the other edition of Orvia before installing this one. Your microphone settings will be kept." />
+    <Property Id="MSIRMSHUTDOWN" Value="1" />
+    <Binary Id="SessionActions" SourceFile="$(sys.SOURCEFILEDIR)session.js" />
+    <CustomAction Id="RememberOrvia" BinaryRef="SessionActions" JScriptCall="rememberSession" />
+    <CustomAction Id="RestoreOrvia" BinaryRef="SessionActions" JScriptCall="resumeSession" Execute="rollback" Impersonate="yes" Return="ignore" />
+    <CustomAction Id="ResumeOrvia" BinaryRef="SessionActions" JScriptCall="resumeSession" Execute="commit" Impersonate="yes" Return="check" />
+    <InstallExecuteSequence>
+      <Custom Action="RememberOrvia" Before="InstallValidate" Condition="(Installed OR WIX_UPGRADE_DETECTED) AND NOT (REMOVE ~= &quot;ALL&quot;)" />
+      <Custom Action="RestoreOrvia" After="InstallInitialize" Condition="RestoreOrvia" />
+      <Custom Action="ResumeOrvia" Before="InstallFinalize" Condition="ResumeOrvia" />
+    </InstallExecuteSequence>
     <MediaTemplate EmbedCab="yes" />
     <Icon Id="Orvia.ico" SourceFile="$(var.Icon)" />
     <Property Id="ARPPRODUCTICON" Value="Orvia.ico" />

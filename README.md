@@ -18,7 +18,7 @@ Development builds for the first release carry versions such as `0.1.0-snapshot.
 
 To hear the same processing, select a playback device under **Mixer → Headphone monitor**. Use the monitor switch to listen or stop listening. Orvia remembers the selected headphones and reconnects when they return.
 
-Use **Preferences → Audio engine → Restart** to reload the installed engine after an update. This briefly interrupts processed audio. **View log** shows engine starts, stops, device errors and changes to processing as they happen. The 160 most recent events survive a restart and carry local timestamps. The log contains no audio samples.
+Updating or repairing the MSI resumes the signed-in user's running engine and reopens the settings window if it was open. Processed audio briefly stops during replacement. **Preferences → Audio engine** shows whether the running version matches the app and provides a manual **Restart**. **View log** shows engine starts, stops, device errors and changes to processing as they happen. The 160 most recent events survive a restart and carry local timestamps. The log contains no audio samples.
 
 Use **Preferences → Language** to follow Windows or choose English or Japanese. Closing the window leaves Orvia in the notification area. Its menu opens the mixer or quits the engine.
 

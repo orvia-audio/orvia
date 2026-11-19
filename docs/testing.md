@@ -35,7 +35,7 @@ For the standard edition, use a Secure Boot system and a vendor-signed cable. Co
 | Timing | During an extended run and a separate high-load run, log elapsed time, missing and dropped frames, CPU utilization and loopback impulse delay. Establish pass thresholds from measured baseline data. |
 | Input diversity | Cover a single-channel microphone, a stereo or multichannel USB interface, and a wireless headset. The Steinberg UR12 and Razer Barracuda X are example devices. Record the format Windows actually negotiates. |
 | Accessibility | Operate every control using Tab, Shift+Tab, Space and Enter. Check focus visibility, Windows contrast themes, 200% scaling and Narrator. |
-| Upgrade and removal | Change input, output and gain. Install a newer MSI and compare the endpoint IDs and settings. Uninstall and check that the startup entry and executables are removed. A third-party cable belongs to its vendor. Only the lab MSI removes its own device. |
+| Upgrade and removal | Leave the engine running with the window closed. Upgrade and verify a new process in the same desktop session, the new version and the same settings. Repair with the window open and verify both processes return. Repeat with the engine stopped and check it stays stopped. Uninstall and check that the startup entry and executables are removed. A third-party cable belongs to its vendor. Only the lab MSI removes its own device. |
 | Boot policy | Verify that the standard MSI works with Secure Boot enabled and test signing off. Use the lab MSI only in an environment prepared for its test signature. |
 
 ### Verify output gain with an independent recording

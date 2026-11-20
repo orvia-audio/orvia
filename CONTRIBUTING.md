@@ -18,7 +18,7 @@ The Linux build resolves `xattr 0.2.3` through GPUI's `zed-async-tar` dependency
 Ubuntu 24.04 CI renders each mixer screen in English and Japanese at 96 DPI. The fixtures use synthetic devices, a fixed waveform and a silent recording. Install the Linux dependencies from the desktop workflow and run:
 
 ```sh
-xvfb-run -a -s "-screen 0 1280x1024x24 -dpi 96" dbus-run-session -- /usr/bin/python3 tests/ui/snapshots.py
+sh tests/ui/run.sh
 ```
 
 A mismatch saves the actual image, the previous image and a highlighted diff under `target/ui-snapshots/`. CI uploads them as `ui-snapshot-differences`. For an intentional change, append `--update` and review the changed PNGs in [the baseline directory](tests/ui/snapshots). Add a fixture and a capture case when adding a screen.

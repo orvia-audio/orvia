@@ -43,7 +43,7 @@ jobs:
           cargo test --workspace --locked
       - name: Compare desktop UI snapshots
         if: runner.os == 'Linux'
-        run: xvfb-run -a -s "-screen 0 1280x1024x24 -dpi 96" dbus-run-session -- /usr/bin/python3 tests/ui/snapshots.py
+        run: sh tests/ui/run.sh
       - name: Upload changed UI snapshots
         if: failure() && runner.os == 'Linux'
         uses: actions/upload-artifact@v7.0.2

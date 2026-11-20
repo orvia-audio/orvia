@@ -6,8 +6,8 @@
     <key>CFBundleExecutable</key><string>orvia</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>Orvia</string>
-    <key>CFBundleVersion</key><string>6</string>
-    <key>CFBundleShortVersionString</key><string>0.1.1</string>
+    <key>CFBundleVersion</key><string>7</string>
+    <key>CFBundleShortVersionString</key><string>0.1.3</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>Orvia processes your selected microphone for games and recordings.</string>

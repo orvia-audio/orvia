@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 const repo = "sya-ri/orvia";
 const prefix = "orvia-review-v1/";
 const params = new URLSearchParams(location.search);
+const touchPreview = matchMedia("(pointer: coarse), (max-width: 830px)");
 const words = {
   review: ["Snapshot review", "画面レビュー"], report: ["Review notes", "指摘をまとめる"], latest: ["Latest screens", "最新の画面"],
   compare: ["Compare", "差分を比較"], screen: ["Screen", "画面"],
@@ -13,6 +14,9 @@ const words = {
   noPullDiff: ["No committed snapshot changes in this PR.", "この PR で変更された基準画像はありません。"],
   missingBase: ["Select the original base and head in Two commits.", "「コミット間」で元の比較元と先端を指定してください。"],
   comments: ["Comments", "コメント"], hint: ["Click a point in the image to leave a comment.", "画像の気になる位置をクリックして、コメントを残せます。"],
+  touchHint: ["Tap a screenshot to enlarge it or mark a point.", "画像をタップすると、拡大して気になる位置にコメントできます。"],
+  enlarge: ["Enlarge image", "画像を拡大"], fit: ["Fit to width", "幅に合わせる"],
+  actualSize: ["Actual size", "原寸で表示"], markPoint: ["Mark a point", "位置にコメント"],
   general: ["Comment on the whole screen", "画面全体にコメント"], whole: ["Whole screen", "画面全体"],
   base: ["Before", "変更前"], head: ["After", "変更後"], side: ["Side by side", "並べて表示"],
   diff: ["Pixel differences", "画像の差分"], showDiff: ["Show differences", "差分を表示"],
@@ -189,7 +193,15 @@ function localize() {
   $("previous").ariaLabel = t("prev"); $("next").ariaLabel = t("next");
   $("language").value = lang;
   $("general").title = t("local");
+  updateImageLabels();
 }
+function updateImageLabels() {
+  $("hint").textContent = t(touchPreview.matches ? "touchHint" : "hint");
+  document.querySelectorAll(".surface").forEach(surface => {
+    surface.ariaLabel = t(touchPreview.matches ? "enlarge" : "point") + " · " + surface.dataset.label;
+  });
+}
+touchPreview.addEventListener("change", updateImageLabels);
 function savePosition() {
   if (scene) write(sessionKey(), scene);
   write("session", {lang, head, base, view, changedOnly, ...contextParams()});
@@ -291,6 +303,57 @@ function drawPins() {
     }
   }
 }
+function imagePoint(event, surface, width, height) {
+  const rect = surface.getBoundingClientRect();
+  const x = event.detail ? (event.clientX - rect.left) / rect.width : .5;
+  const y = event.detail ? (event.clientY - rect.top) / rect.height : .5;
+  return {x: Math.max(0, Math.min(width - 1, Math.floor(x * width))),
+    y: Math.max(0, Math.min(height - 1, Math.floor(y * height)))};
+}
+function enlargeImage(node, caption, width, height, point, owner) {
+  const dialog = $("image-dialog"), scroll = $("image-scroll"), detail = $("image-detail");
+  const scale = $("image-scale"), mark = $("image-point");
+  const copy = node.cloneNode();
+  if (node instanceof HTMLCanvasElement) copy.getContext("2d").drawImage(node, 0, 0);
+  const label = [title(scene), caption].filter(Boolean).join(" · ");
+  $("image-title").textContent = label;
+  detail.replaceChildren(copy); detail.style.width = width + "px"; detail.className = "";
+  mark.setAttribute("aria-pressed", "false");
+  function resize(fit, center) {
+    detail.classList.toggle("fit", fit);
+    scale.textContent = t(fit ? "actualSize" : "fit");
+    const action = detail.classList.contains("marking") ? t("markPoint") : scale.textContent;
+    detail.ariaLabel = action + " · " + label;
+    scroll.scrollLeft = center.x * detail.offsetWidth / width - scroll.clientWidth / 2;
+    scroll.scrollTop = center.y * detail.offsetHeight / height - scroll.clientHeight / 2;
+  }
+  scale.onclick = () => {
+    const area = scroll.getBoundingClientRect(), image = detail.getBoundingClientRect();
+    resize(!detail.classList.contains("fit"), {
+      x: (area.left + scroll.clientWidth / 2 - image.left) * width / image.width,
+      y: (area.top + scroll.clientHeight / 2 - image.top) * height / image.height,
+    });
+  };
+  mark.onclick = () => {
+    const marking = detail.classList.toggle("marking");
+    mark.setAttribute("aria-pressed", String(marking));
+    detail.ariaLabel = (marking ? t("markPoint") : scale.textContent) + " · " + label;
+    if (marking) detail.focus({preventScroll: true});
+  };
+  detail.onclick = event => {
+    const selected = imagePoint(event, detail, width, height);
+    if (detail.classList.contains("marking")) {
+      const sha = owner(selected);
+      if (sha) { dialog.close(); addNote(sha, selected); }
+    } else resize(!detail.classList.contains("fit"), selected);
+  };
+  dialog.showModal(); resize(false, point);
+}
+$("image-dialog").addEventListener("close", () => {
+  if ($("image-dialog").open) return;
+  $("image-detail").replaceChildren();
+  for (const id of ["image-detail", "image-scale", "image-point"]) $(id).onclick = null;
+});
 function frame(node, caption, width, height, refs, owner) {
   const block = element("div", undefined, "frame");
   block.style.width = width + "px";
@@ -298,14 +361,12 @@ function frame(node, caption, width, height, refs, owner) {
   const wrap = element("div", undefined, "image-wrap");
   Object.assign(wrap.dataset, {width, height, refs: refs.join(",")});
   const surface = element("button", undefined, "surface");
-  surface.type = "button"; surface.ariaLabel = t("point") + " · " + (caption || title(scene));
+  surface.type = "button"; surface.dataset.label = caption || title(scene);
+  surface.ariaLabel = t(touchPreview.matches ? "enlarge" : "point") + " · " + surface.dataset.label;
   surface.append(node);
   surface.onclick = event => {
-    const rect = surface.getBoundingClientRect();
-    const px = event.detail ? (event.clientX - rect.left) / rect.width : .5;
-    const py = event.detail ? (event.clientY - rect.top) / rect.height : .5;
-    const point = {x: Math.max(0, Math.min(width - 1, Math.floor(px * width))),
-      y: Math.max(0, Math.min(height - 1, Math.floor(py * height)))};
+    const point = imagePoint(event, surface, width, height);
+    if (touchPreview.matches) { enlargeImage(node, caption, width, height, point, owner); return; }
     const sha = owner(point);
     if (sha) addNote(sha, point);
   };

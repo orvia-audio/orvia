@@ -43,7 +43,7 @@
         </section>
         <aside>
           <div class="aside-title"><h2 data-t="comments">Comments</h2><span id="count"></span></div>
-          <p id="hint" data-t="hint">Click a point in the image to leave a comment.</p>
+          <p id="hint"></p>
           <div id="notes"></div>
           <button id="general" class="general" data-t="general">Comment on the whole screen</button>
         </aside>
@@ -60,6 +60,15 @@
       </nav>
     </section>
   </main>
+  <dialog id="image-dialog" aria-labelledby="image-title">
+    <div class="image-heading"><h2 id="image-title"></h2>
+      <button class="close-dialog" data-t="close" autofocus>Close</button></div>
+    <div id="image-scroll"><button id="image-detail" type="button"></button></div>
+    <div class="image-tools">
+      <button id="image-scale" type="button"></button>
+      <button id="image-point" type="button" data-t="markPoint" aria-pressed="false">Mark a point</button>
+    </div>
+  </dialog>
   <dialog id="compare-dialog" aria-labelledby="compare-heading">
     <form id="compare-form">
       <div class="dialog-heading"><h2 id="compare-heading" data-t="compare">Compare commits</h2>

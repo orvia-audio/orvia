@@ -114,13 +114,18 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     def playing():
         return any(s["sink"] == headphones for s in pulse_devices("sink-inputs"))
 
-    speech_path = Path(tmp, "passage.wav")
-    run("espeak-ng", "-v", "en-us", "-s", "148", "-w", str(speech_path), "I opened the window and felt a cool breeze.")
-    with wave.open(str(speech_path)) as speech_file:
-        assert speech_file.getsampwidth() == 2 and speech_file.getnchannels() == 1
-        speech_rate = speech_file.getframerate()
-        speech = array.array("h", speech_file.readframes(speech_file.getnframes()))
-    def read_passage(sink, samples=speech):
+    def synthesize_count(words):
+        path = Path(tmp, "count.wav")
+        run("espeak-ng", "-v", "en-us", "-s", "148", "-w", str(path), words)
+        with wave.open(str(path)) as sound:
+            assert sound.getsampwidth() == 2 and sound.getnchannels() == 1
+            return sound.getframerate(), array.array("h", sound.readframes(sound.getnframes()))
+
+    speech_rate, first_numbers = synthesize_count("One, two.")
+    tail_rate, last_numbers = synthesize_count("Three, four, five.")
+    assert speech_rate == tail_rate
+
+    def read_count(sink, samples=first_numbers + last_numbers):
         # Lower the voice to exercise normalization and keep the cable-only marker distinct.
         pcm = array.array("h", (s // 32 for s in samples))
         subprocess.run(["pacat", "-d", sink, "--latency-msec=20", "--raw", "--format=s16le",
@@ -144,12 +149,11 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     # Retake is a separate control. It returns focus to the primary button.
     run("xdotool", "key", "--delay", "250", "Tab", "Return")
     wait_for(recording, "Retake did not start a new recording")
-    mid_sentence = int(speech_rate * 1.34)
-    read_passage("orvia_output", speech[:mid_sentence])
+    read_count("orvia_output", first_numbers)
     time.sleep(11)
-    assert recording() and take.read_bytes() == first, "A pause mid-passage must not end the take"
-    read_passage("orvia_output", speech[mid_sentence:])
-    wait_for(lambda: take.stat().st_size > len(first), "Reading the passage did not finish the retake", timeout=45)
+    assert recording() and take.read_bytes() == first, "A pause after two must not end the take"
+    read_count("orvia_output", last_numbers)
+    wait_for(lambda: take.stat().st_size > len(first), "Counting to five did not finish the retake", timeout=45)
     second = take.read_bytes()
     run("xdotool", "key", "Return")
     wait_for(playing, "The primary button did not play the automatically stopped retake")
@@ -215,8 +219,8 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         time.sleep(0.6)
         run("xdotool", "key", "Return")
         wait_for(lambda: mic_count() >= 2, "The reading button did not open the microphone")
-        read_passage("test_input")
-        wait_for(lambda: mic_count() == 1, "The passage was not recognized", timeout=45)
+        read_count("test_input")
+        wait_for(lambda: mic_count() == 1, "The count was not recognized", timeout=45)
     # Wait for analysis. The reading button only becomes active when the suggestion is ready.
     def start_preview():
         if recording():
@@ -230,7 +234,7 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     assert json.loads((state / "settings.json").read_text())["deep_filter_limit_db"] == 12
     play_pcm("orvia_output", marker)
     def hear_preview():
-        read_passage("test_input")
+        read_count("test_input")
         wait_for(playing, "The virtual microphone take did not play automatically", timeout=45)
         wait_for(lambda: not playing(), "The preview did not finish", timeout=45)
     preview = record_headphones(hear_preview)

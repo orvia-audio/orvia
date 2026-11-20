@@ -1,57 +1,57 @@
-//! Local recognition of the displayed reading passage. Audio never leaves the mixer.
+//! Local recognition of the spoken count during a microphone check.
 use super::*;
 use crate::transcription::transcribe;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
-pub(super) fn passage(l: Language) -> &'static str {
-    l.text(
-        "I opened the window and felt a cool breeze.",
-        "窓を開けると、涼しい風が入ってきました。",
-    )
-}
+/// Last number in the spoken microphone check.
+pub(super) const LAST_NUMBER: usize = 5;
 
 fn japanese(l: Language) -> bool {
     l.text("en", "ja") == "ja"
 }
 
+/// Recognize whole tokens, including a group of consecutive digits or Japanese number words.
+/// An overlapping transcription can repeat earlier numbers before it advances the count.
 fn advance(text: &str, ja: bool, mut progress: usize) -> usize {
-    // Match ordered anchors through the final word, allowing recognition errors between them.
-    let words: &[&str] = if ja {
-        &["まど", "あけると", "かぜが", "はいってきました"]
+    let words: [&[&str]; LAST_NUMBER] = if ja {
+        [
+            &["いち", "イチ", "一", "１", "1"],
+            &["に", "ニ", "二", "２", "2"],
+            &["さん", "サン", "三", "３", "3"],
+            &["よん", "ヨン", "し", "シ", "四", "４", "4"],
+            &["ご", "ゴ", "五", "５", "5"],
+        ]
     } else {
-        &["open", "window", "cool", "breeze"]
+        [
+            &["one", "1"],
+            &["two", "2"],
+            &["three", "3"],
+            &["four", "4"],
+            &["five", "5"],
+        ]
     };
-    let normalized = if ja {
-        text.replace("窓", "まど")
-            .replace("マド", "まど")
-            .replace("開ける", "あける")
-            .replace("風", "かぜ")
-            .replace("入って", "はいって")
-            .replace("来ました", "きました")
-            .chars()
-            .filter(|c| c.is_alphanumeric())
-            .collect::<String>()
-    } else {
-        let text = text.to_lowercase().replace(['’', '\''], "");
-        let words = text
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|s| !s.is_empty())
-            .map(|word| if word == "opened" { "open" } else { word })
-            .collect::<Vec<_>>();
-        format!(" {} ", words.join(" "))
-    };
-    let mut rest = normalized.as_str();
-    while let Some(&piece) = words.get(progress) {
-        let token = if ja {
-            piece.to_owned()
-        } else {
-            format!(" {piece} ")
-        };
-        let Some(start) = rest.find(&token) else {
-            break;
-        };
-        rest = &rest[start + token.len() - usize::from(!ja)..];
-        progress += 1;
+    for mut token in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
+        let mut first = 0;
+        let mut last = 0;
+        while !token.is_empty() {
+            let Some((number, rest)) = words.iter().enumerate().find_map(|(index, forms)| {
+                forms
+                    .iter()
+                    .find_map(|form| token.strip_prefix(form).map(|rest| (index + 1, rest)))
+            }) else {
+                break;
+            };
+            if first == 0 {
+                first = number;
+            } else if number != last + 1 {
+                break;
+            }
+            last = number;
+            token = rest;
+        }
+        if token.is_empty() && first <= progress + 1 {
+            progress = progress.max(last);
+        }
     }
     progress
 }
@@ -71,9 +71,9 @@ pub(super) struct Reader {
 }
 
 impl Reader {
-    /// Whether the opening clause has been recognized in this take.
-    pub(super) fn heard_first_half(&self) -> bool {
-        self.progress >= 2
+    /// Highest consecutively recognized number in this take, or zero before speech.
+    pub(super) fn progress(&self) -> usize {
+        self.progress
     }
 
     pub(super) fn listen(
@@ -113,7 +113,7 @@ impl Reader {
                 Err(TryRecvError::Empty) => {}
             }
         }
-        if self.progress == 4 {
+        if self.progress == LAST_NUMBER {
             return Ok(true);
         }
         let step = (rate / 50) as usize;
@@ -154,7 +154,7 @@ impl Reader {
         let end = frames.len().min(self.last_sound + rate as usize / 2);
         self.decoding = end.saturating_sub(rate as usize * 16)..end;
         let mut mono = Vec::new();
-        // Keep the previously recognized clause as context after a long pause.
+        // Keep the previously recognized numbers as context after a long pause.
         if !self.recognized.is_empty() && self.recognized.end <= self.decoding.start {
             let prefix = &frames[self.recognized.clone()];
             append_mono(
@@ -195,23 +195,38 @@ fn append_mono(mono: &mut Vec<f32>, input: &[[f32; 2]], rate: u32) {
 mod tests {
     use super::*;
     #[test]
-    fn pauses_and_unrelated_words_cannot_finish_the_passage() {
-        assert_eq!(advance("窓を開けると", true, 0), 2);
-        assert_eq!(advance("マドオオあけると", true, 0), 2);
-        assert_eq!(advance("", true, 2), 2);
-        assert_eq!(advance("入ってきました", true, 2), 2);
-        assert_eq!(advance("涼しい風が入って来ました。", true, 2), 4);
-        assert_eq!(advance("a cool breeze", false, 0), 0);
+    fn both_languages_accept_spoken_and_printed_numbers() {
+        for text in [
+            "いち、に、さん、よん、ご",
+            "いちにさんしご",
+            "１二三４五",
+            "1, 2, 3, 4, 5",
+        ] {
+            assert_eq!(advance(text, true, 0), LAST_NUMBER, "{text}");
+        }
         assert_eq!(
-            advance("I opened the window and felt a cool breeze.", false, 0),
-            4
+            advance("One, TWO, three, four, FIVE.", false, 0),
+            LAST_NUMBER
         );
-        assert_eq!(advance("a cool breezeway", false, 3), 3);
-        assert_eq!(advance("まどを開けると数指風が入ってきました", true, 0), 4);
-        assert_eq!(
-            advance("I open the window and fell to cool breeze.", false, 0),
-            4
-        );
-        assert_eq!(advance("マイクの音を確認します。", true, 0), 0);
+        assert_eq!(advance("12345", false, 3), LAST_NUMBER);
+    }
+
+    #[test]
+    fn pauses_repetitions_and_out_of_order_numbers_do_not_finish_early() {
+        let four = advance("one two three four", false, 0);
+        assert_eq!(four, 4);
+        assert_eq!(advance("", false, four), four);
+        assert_eq!(advance("4 3 4 4", false, four), four);
+        assert_eq!(advance("one two four five", false, 0), 2);
+        assert_eq!(advance("Three, four, five.", false, 2), LAST_NUMBER);
+        assert_eq!(advance("五", true, 0), 0);
+        assert_eq!(advance("四 五", true, 3), LAST_NUMBER);
+    }
+
+    #[test]
+    fn embedded_numbers_and_unrelated_words_do_not_advance() {
+        assert_eq!(advance("15 45th fifty-fivefold", false, 4), 4);
+        assert_eq!(advance("ごはん 五十 15", true, 4), 4);
+        assert_eq!(advance("にわ", true, 1), 1);
     }
 }

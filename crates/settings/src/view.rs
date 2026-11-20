@@ -43,18 +43,26 @@ fn note(s: impl Into<SharedString>) -> gpui::Div {
     div().text_sm().text_color(rgb(MUTED)).child(s.into())
 }
 
-fn reading_passage(l: Language) -> gpui::Div {
-    let text = reading::passage(l);
+/// Show the complete count at a fixed position and mark numbers heard in this take.
+fn counting_prompt(l: Language, progress: usize) -> gpui::Div {
     stack()
         .gap_1()
-        .child(note(
-            l.text("Read this passage aloud", "声に出して読む例文"),
-        ))
+        .child(note(l.text(
+            "Count aloud from 1 to 5",
+            "1から5まで声に出して数えてください",
+        )))
         .child(
-            div()
-                .text_xl()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(format!("{}{text}{}", l.text("“", "「"), l.text("”", "」"))),
+            row()
+                .gap_4()
+                .children((1..=reading::LAST_NUMBER).map(|number| {
+                    div()
+                        .text_xl()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .when(number <= progress, |d| {
+                            d.text_color(rgb(TERRACOTTA)).underline()
+                        })
+                        .child(number.to_string())
+                })),
         )
 }
 
@@ -342,20 +350,22 @@ impl Panel {
                         TERRACOTTA,
                     ))
                     .child(self.picker(Endpoint::TestSpeaker, cx))
-                    .child(reading_passage(l))
+                    .child(counting_prompt(
+                        l,
+                        if recording.is_some() {
+                            self.test.reader.progress()
+                        } else {
+                            0
+                        },
+                    ))
                     .child(note(match action {
-                        TestAction::FinishRecording if self.test.reader.heard_first_half() => l
-                            .text(
-                                "Opening words recognized. Continue to the end.",
-                                "前半を確認しました。最後まで読んでください。",
-                            ),
                         TestAction::FinishRecording => l.text(
-                            "Read aloud to finish automatically.",
-                            "例文を読み終えると録音が止まります。",
+                            "Recording stops after five.",
+                            "5まで数えると録音が止まります。",
                         ),
                         TestAction::Record => l.text(
-                            "Press Record, then read the passage aloud.",
-                            "録音を押してから例文を読んでください。",
+                            "Press Record to begin.",
+                            "準備ができたら録音を押してください。",
                         ),
                         _ => "",
                     }))
@@ -393,7 +403,7 @@ impl Panel {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let l = self.prefs.language;
-        let mut body = stack().child(reading_passage(l));
+        let mut body = stack().child(counting_prompt(l, reader.progress()));
         if active {
             body = body
                 .child(heading(
@@ -401,17 +411,10 @@ impl Panel {
                     "microphone.svg",
                     TERRACOTTA,
                 ))
-                .child(note(if reader.heard_first_half() {
-                    l.text(
-                        "Opening words recognized. Continue to the end.",
-                        "前半を確認しました。最後まで読んでください。",
-                    )
-                } else {
-                    l.text(
-                        "Read the passage aloud when ready.",
-                        "準備ができたら例文を読んでください。",
-                    )
-                }));
+                .child(note(l.text(
+                    "Recording stops after five.",
+                    "5まで数えると録音が止まります。",
+                )));
         } else {
             body = body.child(row().child(self.button(
                 "begin-reading",
@@ -446,10 +449,10 @@ impl Panel {
                         "環境音を測っています。少し静かにしてください",
                     )))
                     .child(note(l.text(
-                        "Next, read this passage twice at your own pace.",
-                        "次の文を普段の速さで2回読みます。",
+                        "Next, count twice at your usual pace.",
+                        "このあと、普段の速さで2回数えます。",
                     )))
-                    .child(reading_passage(l));
+                    .child(counting_prompt(l, 0));
             }
             Stage::Phrase {
                 first,
@@ -487,7 +490,7 @@ impl Panel {
                 if recording.is_some() {
                     panel = panel.child(self.reading_prompt(true, reader, cx));
                 } else {
-                    panel = panel.child(reading_passage(l)).child(note(l.text(
+                    panel = panel.child(counting_prompt(l, 0)).child(note(l.text(
                         "Opening the recording endpoint…",
                         "仮想マイクの録音側を準備中…",
                     )));

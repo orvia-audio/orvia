@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Snapshot review · Orvia</title>
+  <link rel="icon" href="../media/orvia.svg">
+  <link rel="stylesheet" href="review.css">
+  <script defer src="review.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><a href="../"><img src="../media/orvia.svg" alt="">Orvia</a>
+      <span class="divider">/</span><span data-t="review">Snapshot review</span></div>
+    <div class="tools">
+      <select id="language" aria-label="Language"><option value="ja">日本語</option><option value="en">English</option></select>
+      <button id="compare" data-t="compare" disabled>Compare commits</button>
+      <button id="export" data-t="report" disabled>Review notes</button>
+    </div>
+  </header>
+  <main>
+    <p id="message" role="status"></p>
+    <section id="content" hidden>
+      <div class="heading">
+        <div><div class="revision-line"><label for="scene" data-t="screen">Screen</label>
+          <a id="current-commit" class="hash" target="_blank" rel="noreferrer"></a>
+          <button id="latest" data-t="latest" hidden>Latest screens</button></div>
+          <h1><select id="scene"></select></h1></div>
+        <div class="progress"><span id="progress-label"></span><progress id="progress" max="1" value="0"></progress></div>
+      </div>
+      <div id="comparison" hidden>
+        <span id="revisions" class="hash"></span>
+        <label><input id="changes-only" type="checkbox" checked><span data-t="changedOnly">Changed screens only</span></label>
+        <button id="exit-compare" data-t="single">Single revision</button>
+      </div>
+      <div class="workspace">
+        <section class="preview">
+          <div id="views" class="segments" hidden></div>
+          <div id="frames" class="frames"></div>
+          <div class="navigation">
+            <div class="paging">
+              <button id="previous" aria-label="Previous screen"><img class="prev arrow" src="../media/chevron-down.svg" alt=""></button>
+              <span id="position" class="hash"></span>
+              <button id="next" aria-label="Next screen"><img class="next arrow" src="../media/chevron-down.svg" alt=""></button>
+            </div>
+            <button id="accept" class="primary"></button>
+          </div>
+        </section>
+        <aside>
+          <div class="aside-title"><h2 data-t="comments">Comments</h2><span id="count"></span></div>
+          <p id="hint" data-t="hint">Click a point in the image to leave a comment.</p>
+          <div id="notes"></div>
+          <button id="general" class="general" data-t="general">Comment on the whole screen</button>
+        </aside>
+      </div>
+    </section>
+  </main>
+  <dialog id="compare-dialog" aria-labelledby="compare-heading">
+    <form id="compare-form">
+      <div class="dialog-heading"><h2 id="compare-heading" data-t="compare">Compare commits</h2>
+        <button type="button" class="close-dialog" data-t="close">Close</button></div>
+      <label for="base" data-t="base">Before</label>
+      <input id="base" required pattern="[0-9a-fA-F]{7,40}" list="history" spellcheck="false" autocomplete="off">
+      <label for="head" data-t="head">After</label>
+      <input id="head" required pattern="[0-9a-fA-F]{7,40}" list="history" spellcheck="false" autocomplete="off">
+      <datalist id="history"></datalist>
+      <p id="compare-error" role="status"></p>
+      <button id="apply" class="primary" data-t="showDiff">Show differences</button>
+    </form>
+  </dialog>
+  <dialog id="report-dialog" aria-labelledby="report-heading">
+    <div class="dialog-heading"><h2 id="report-heading" data-t="report">Review notes</h2>
+      <button class="close-dialog" data-t="close">Close</button></div>
+    <textarea id="markdown" aria-labelledby="report-heading" readonly></textarea>
+    <div class="report-actions"><span id="report-status" role="status"></span>
+      <button id="download" data-t="download">Save .md</button><button id="copy" class="primary" data-t="copy">Copy</button></div>
+  </dialog>
+</body>
+</html>

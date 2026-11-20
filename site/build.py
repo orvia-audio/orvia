@@ -3,6 +3,8 @@
 import hashlib
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 
 site = Path(__file__).resolve().parent
 root = site.parent
@@ -30,3 +32,4 @@ for scene in ("air-conditioner", "keyboard"):
 shutil.copyfile(samples / "compare-16s.mp4", media / "compare-16s.mp4")
 notices = [root / "LICENSE", root / "assets" / "tabler" / "LICENSE", site / "octicons-LICENSE.txt"]
 (out / "licenses.txt").write_text("\n\n".join(p.read_text(encoding="utf-8") for p in notices), encoding="utf-8")
+subprocess.run([sys.executable, site / "review/build.py"], check=True)

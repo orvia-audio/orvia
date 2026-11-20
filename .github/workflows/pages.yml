@@ -4,6 +4,7 @@ on:
     branches: [main]
     paths:
       - "site/**"
+      - "tests/ui/snapshots/**"
       - "docs/samples/*.flac"
       - "docs/samples/compare-16s.mp4"
       - "assets/mixer.png"
@@ -27,6 +28,8 @@ jobs:
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/configure-pages@v6.0.0
       - run: python3 site/build.py
       - uses: actions/upload-pages-artifact@v5.0.0

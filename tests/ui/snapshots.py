@@ -1,6 +1,8 @@
 """Compare the rendered GPUI panels on an isolated Ubuntu X11 display."""
 
 import argparse
+from contextlib import contextmanager
+import io
 import json
 import os
 from pathlib import Path
@@ -40,6 +42,27 @@ def test_binary():
     raise RuntimeError("Cargo did not produce the mixer test executable")
 
 
+@contextmanager
+def window_manager():
+    """GPUI's X11 surface starts presenting when a window manager maps the client."""
+    manager = subprocess.Popen(["openbox", "--sm-disable"])
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            prop = subprocess.check_output(["xprop", "-root", "_NET_SUPPORTING_WM_CHECK"], text=True)
+            if "window id #" in prop:
+                break
+            if manager.poll() is not None:
+                raise RuntimeError("Openbox exited before managing the display")
+            time.sleep(0.1)
+        else:
+            raise RuntimeError("Openbox did not acquire the display")
+        yield
+    finally:
+        manager.terminate()
+        manager.wait(timeout=10)
+
+
 def capture(executable, directory, scene, language):
     env = dict(os.environ, ORVIA_SNAPSHOT_SCENE=scene, ORVIA_SNAPSHOT_LANGUAGE=language,
                ORVIA_SNAPSHOT_DIR=str(directory), FONTCONFIG_FILE=str(HERE / "fonts.conf"),
@@ -61,14 +84,11 @@ def capture(executable, directory, scene, language):
                                       "^Orvia snapshot$"], capture_output=True, text=True)
             if windows.stdout.strip():
                 wid = windows.stdout.splitlines()[-1]
-                geometry = subprocess.check_output(["xdotool", "getwindowgeometry", "--shell", wid],
-                                                   text=True)
-                values = dict(line.split("=", 1) for line in geometry.splitlines())
-                x, y, width, height = (int(values[k]) for k in ("X", "Y", "WIDTH", "HEIGHT"))
-                if (width, height) != (830, 900 if scene == "mixer-full" else 610):
-                    raise RuntimeError(f"{scene}: unexpected window size {width}x{height}")
-                image = ImageGrab.grab((x, y, x + width, y + height),
-                                       xdisplay=env["DISPLAY"]).convert("RGB")
+                pixels = subprocess.check_output(["import", "-window", wid, "png:-"], timeout=10)
+                with Image.open(io.BytesIO(pixels)) as frame:
+                    image = frame.convert("RGB")
+                if image.size != (830, 900 if scene == "mixer-full" else 610):
+                    raise RuntimeError(f"{scene}: unexpected window size {image.size}")
                 # Wait for the initial paint, asynchronous icons and the popup anchor layout.
                 if image.getcolors(64) is None:
                     if previous is not None and not ImageChops.difference(previous, image).getbbox():
@@ -124,7 +144,7 @@ def main():
     obsolete = {p.relative_to(BASELINES) for p in BASELINES.rglob("*.png")} - cases
     if obsolete:
         raise SystemExit(f"Remove obsolete baselines: {sorted(str(p) for p in obsolete)}")
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory() as tmp, window_manager():
         directory = Path(tmp)
         # A one-second stereo IEEE-float take, in the engine's on-disk format.
         data = bytes(8000 * 2 * 4)

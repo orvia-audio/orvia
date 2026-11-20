@@ -110,6 +110,8 @@ struct Panel {
     installed: Version,
     restarting: bool,
     test_only: bool,
+    #[cfg(test)]
+    adjustment_snapshot: Option<view::AdjustmentScreen<'static>>,
 }
 
 impl Panel {
@@ -120,8 +122,6 @@ impl Panel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let root = cx.focus_handle();
-        window.focus(&root);
         let mut error = String::new();
         let prefs = Settings::load(&dir.join("settings.json")).unwrap_or_else(|e| {
             error = format!(
@@ -200,21 +200,38 @@ impl Panel {
             }
         })
         .detach();
-        let inputs = orvia_engine::inputs().unwrap_or_default();
-        let mut panel = Self {
-            updates: updates::Updates::load(&dir),
+        let mut panel = Self::empty(dir, installed, test_only, cx);
+        window.focus(&panel.root);
+        panel.updates = updates::Updates::load(&panel.dir);
+        panel.prefs = prefs;
+        panel.error = error;
+        panel.inputs = orvia_engine::inputs().unwrap_or_default();
+        panel.outputs = orvia_engine::outputs().unwrap_or_default();
+        panel.receivers = orvia_engine::mic_test::sources().unwrap_or_default();
+        panel.monitors = orvia_engine::monitors().unwrap_or_default();
+        if test_only {
+            panel.page = Page::MicTest;
+            panel.open_mic_test();
+        }
+        panel
+    }
+
+    /// Construct the window state before attaching audio devices and background tasks.
+    fn empty(dir: PathBuf, installed: Version, test_only: bool, cx: &Context<Self>) -> Self {
+        Self {
+            updates: Default::default(),
             dir,
-            root,
+            root: cx.focus_handle(),
             slider_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
             picker_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
             picker_cursor: 0,
             picker_scroll: gpui::ScrollHandle::new(),
             dragging_slider: None,
-            prefs,
-            inputs,
-            outputs: orvia_engine::outputs().unwrap_or_default(),
-            receivers: orvia_engine::mic_test::sources().unwrap_or_default(),
-            monitors: orvia_engine::monitors().unwrap_or_default(),
+            prefs: Settings::default(),
+            inputs: Vec::new(),
+            outputs: Vec::new(),
+            receivers: Vec::new(),
+            monitors: Vec::new(),
             test: Default::default(),
             test_primary_focus: cx.focus_handle().tab_stop(true),
             page: Page::Mixer,
@@ -225,16 +242,13 @@ impl Panel {
             choosing: None,
             status: None,
             log: Default::default(),
-            error,
+            error: String::new(),
             installed,
             restarting: false,
             test_only,
-        };
-        if test_only {
-            panel.page = Page::MicTest;
-            panel.open_mic_test();
+            #[cfg(test)]
+            adjustment_snapshot: None,
         }
-        panel
     }
 
     fn check_for_updates(&mut self, cx: &mut Context<Self>) {
@@ -405,6 +419,9 @@ mod reading;
 mod view;
 
 mod updates;
+
+#[cfg(test)]
+mod snapshots;
 
 fn main() -> io::Result<()> {
     let test_only = std::env::args_os().skip(1).any(|arg| arg == "--mic-test");

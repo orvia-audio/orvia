@@ -77,7 +77,7 @@ impl Reader {
     }
 
     /// Observe mean-square power in one 20 ms block.
-    fn observe(&mut self, power: f32, armed: bool) -> bool {
+    pub(super) fn observe(&mut self, power: f32, armed: bool) -> bool {
         if !self.ready() {
             self.baseline[self.measured] = power;
             self.measured += 1;

@@ -34,16 +34,25 @@ pub(super) struct MicTest {
     pub(super) clip: Option<Clip>,
     pub(super) playback: Option<Playback>,
     pub(super) adjust: Option<super::auto_adjust::AutoAdjust>,
+    #[cfg(test)]
+    pub(super) snapshot_action: Option<TestAction>,
     started: Option<Instant>,
     recording_route: Option<(String, String)>,
 }
 
 impl MicTest {
     pub(super) fn busy(&self) -> bool {
-        self.recording.is_some() || self.playback.is_some()
+        matches!(
+            self.primary_action(),
+            TestAction::FinishRecording | TestAction::StopPlayback
+        )
     }
 
     pub(super) fn primary_action(&self) -> TestAction {
+        #[cfg(test)]
+        if let Some(action) = self.snapshot_action {
+            return action;
+        }
         if self.recording.is_some() {
             TestAction::FinishRecording
         } else if self.playback.is_some() {

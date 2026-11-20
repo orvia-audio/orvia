@@ -43,16 +43,66 @@ fn note(s: impl Into<SharedString>) -> gpui::Div {
     div().text_sm().text_color(rgb(MUTED)).child(s.into())
 }
 
-/// Reveal the optional count only after the recording endpoint is ready for speech.
-fn speech_prompt(l: Language, reader: &reading::Reader) -> gpui::Div {
-    let body = stack().h(px(64.)).gap_1();
-    if !reader.ready() {
-        return body.child(note(l.text("Measuring room level…", "周囲の音量を測定中…")));
+#[derive(Clone, Copy)]
+pub(super) enum ReadingCue {
+    Measuring,
+    Read,
+    Recording,
+}
+
+impl From<&reading::Reader> for ReadingCue {
+    fn from(reader: &reading::Reader) -> Self {
+        if !reader.ready() {
+            Self::Measuring
+        } else if reader.heard_voice() {
+            Self::Recording
+        } else {
+            Self::Read
+        }
     }
-    let cue = if reader.heard_voice() {
-        l.text("Recording", "録音中")
-    } else {
-        l.text("Read aloud", "読み上げてください")
+}
+
+/// Visible stages of a guided adjustment, independent of the active audio streams.
+#[derive(Clone, Copy)]
+pub(super) enum AdjustmentScreen<'a> {
+    Room,
+    Phrase(u8, ReadingCue),
+    Analyzing,
+    Preview(Option<ReadingCue>),
+    Restoring,
+    Ready(orvia_core::calibration::Recommendation),
+    Failed(&'a str),
+}
+
+impl<'a> From<&'a auto_adjust::Stage> for AdjustmentScreen<'a> {
+    fn from(stage: &'a auto_adjust::Stage) -> Self {
+        use auto_adjust::Stage;
+
+        match stage {
+            Stage::Room(..) => Self::Room,
+            Stage::Phrase { first, reader, .. } => {
+                Self::Phrase(if first.is_some() { 2 } else { 1 }, reader.into())
+            }
+            Stage::Analyzing(_) => Self::Analyzing,
+            Stage::Auditioning {
+                recording, reader, ..
+            } => Self::Preview(recording.as_ref().map(|_| reader.into())),
+            Stage::Restoring { .. } => Self::Restoring,
+            Stage::Ready(result) => Self::Ready(*result),
+            Stage::Failed(error) => Self::Failed(error),
+        }
+    }
+}
+
+/// Reveal the optional count only after the recording endpoint is ready for speech.
+fn speech_prompt(l: Language, cue: ReadingCue) -> gpui::Div {
+    let body = stack().h(px(64.)).gap_1();
+    let cue = match cue {
+        ReadingCue::Measuring => {
+            return body.child(note(l.text("Measuring room level…", "周囲の音量を測定中…")));
+        }
+        ReadingCue::Read => l.text("Read aloud", "読み上げてください"),
+        ReadingCue::Recording => l.text("Recording", "録音中"),
     };
     body.child(heading(cue, "microphone.svg", TERRACOTTA))
         .child(
@@ -304,8 +354,12 @@ impl Panel {
 
     fn mic_test_page(&self, cx: &mut Context<Self>) -> gpui::Div {
         let l = self.prefs.language;
+        #[cfg(test)]
+        if let Some(screen) = self.adjustment_snapshot {
+            return self.adjustment_page(screen, cx);
+        }
         if let Some(adjust) = &self.test.adjust {
-            return self.adjustment_page(adjust, cx);
+            return self.adjustment_page((&adjust.stage).into(), cx);
         }
         let recording = self.test.recording.as_ref();
         let action = self.test.primary_action();
@@ -346,10 +400,10 @@ impl Panel {
                         TERRACOTTA,
                     ))
                     .child(self.picker(Endpoint::TestSpeaker, cx))
-                    .when(recording.is_some(), |d| {
-                        d.child(speech_prompt(l, &self.test.reader))
+                    .when(action == TestAction::FinishRecording, |d| {
+                        d.child(speech_prompt(l, (&self.test.reader).into()))
                     })
-                    .when(recording.is_none(), |d| {
+                    .when(action != TestAction::FinishRecording, |d| {
                         d.child(div().h(px(64.)).when(action == TestAction::Record, |d| {
                             d.child(note(l.text(
                                 "Press Record to begin.",
@@ -384,21 +438,15 @@ impl Panel {
             )
     }
 
-    fn adjustment_page(
-        &self,
-        adjust: &auto_adjust::AutoAdjust,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        use auto_adjust::Stage;
-
+    fn adjustment_page(&self, screen: AdjustmentScreen, cx: &mut Context<Self>) -> gpui::Div {
         let l = self.prefs.language;
         let mut panel = card().child(heading(
             l.text("Auto adjust", "自動調節"),
             "adjustments-horizontal.svg",
             TERRACOTTA,
         ));
-        match &adjust.stage {
-            Stage::Room(_, _) => {
+        match screen {
+            AdjustmentScreen::Room => {
                 panel = panel
                     .child(note(self.device_name(Endpoint::Input)))
                     .child(div().text_lg().child(l.text(
@@ -410,29 +458,27 @@ impl Panel {
                         "数字が表示されたら、普段の距離で話してください。",
                     )));
             }
-            Stage::Phrase { first, reader, .. } => {
+            AdjustmentScreen::Phrase(take, cue) => {
                 panel = panel
                     .child(note(format!(
                         "{} {} / 2",
                         l.text("Microphone reading", "マイクで読み上げ"),
-                        if first.is_some() { 2 } else { 1 }
+                        take
                     )))
-                    .child(speech_prompt(l, reader));
+                    .child(speech_prompt(l, cue));
             }
-            Stage::Analyzing(_) => {
+            AdjustmentScreen::Analyzing => {
                 panel = panel.child(note(l.text(
                     "Finding a suppression limit…",
                     "声の出だしと環境音を解析中…",
                 )))
             }
-            Stage::Auditioning {
-                recording, reader, ..
-            } => {
+            AdjustmentScreen::Preview(cue) => {
                 panel = panel.child(note(
                     l.text("Virtual microphone preview", "仮想マイクのプレビュー"),
                 ));
-                if recording.is_some() {
-                    panel = panel.child(speech_prompt(l, reader));
+                if let Some(cue) = cue {
+                    panel = panel.child(speech_prompt(l, cue));
                 } else {
                     panel = panel.child(note(l.text(
                         "Opening the recording endpoint…",
@@ -440,10 +486,10 @@ impl Panel {
                     )));
                 }
             }
-            Stage::Restoring { .. } => {
+            AdjustmentScreen::Restoring => {
                 panel = panel.child(note(l.text("Preparing playback…", "録音を再生します…")));
             }
-            Stage::Ready(result) => {
+            AdjustmentScreen::Ready(result) => {
                 let action = self.test.primary_action();
                 let limit = if result.limit_db == Settings::UNLIMITED_ATTENUATION_DB {
                     l.text("Unlimited", "上限なし").into()
@@ -498,7 +544,7 @@ impl Panel {
                             )),
                     );
             }
-            Stage::Failed(error) => panel = panel.child(note(error.clone())),
+            AdjustmentScreen::Failed(error) => panel = panel.child(note(error.to_owned())),
         }
         stack().child(panel).child(
             row()
@@ -510,8 +556,10 @@ impl Panel {
                     cx,
                 ))
                 .when(
-                    matches!(adjust.stage, Stage::Failed(_) | Stage::Ready(_))
-                        && self.prefs.active_noise_method() == Some(NoiseMethod::DeepFilterNet3),
+                    matches!(
+                        screen,
+                        AdjustmentScreen::Failed(_) | AdjustmentScreen::Ready(_)
+                    ) && self.prefs.active_noise_method() == Some(NoiseMethod::DeepFilterNet3),
                     |r| {
                         r.child(self.button(
                             "adjust-retry",
@@ -625,7 +673,7 @@ impl Panel {
                         "info-circle.svg",
                         TERRACOTTA,
                     ))
-                    .child(note(format!("Orvia {}", env!("CARGO_PKG_VERSION"))))
+                    .child(note(format!("Orvia {}", self.installed)))
                     .child(
                         row()
                             .justify_between()
@@ -700,7 +748,7 @@ impl Panel {
             ("refresh.svg", l.text("Restarting", "再起動中"), MUTED)
         } else {
             match self.status.as_ref() {
-                Some(s) if s.version == env!("CARGO_PKG_VERSION") => (
+                Some(s) if s.version == self.installed.to_string() => (
                     "check.svg",
                     l.text("Version matches", "バージョン一致"),
                     0x246345,

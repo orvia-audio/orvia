@@ -45,26 +45,22 @@ fn note(s: impl Into<SharedString>) -> gpui::Div {
 
 /// Reveal the optional count only after the recording endpoint is ready for speech.
 fn speech_prompt(l: Language, reader: &reading::Reader) -> gpui::Div {
-    let body = stack().h(px(88.)).gap_1();
+    let body = stack().h(px(64.)).gap_1();
     if !reader.ready() {
         return body.child(note(l.text("Measuring room level…", "周囲の音量を測定中…")));
     }
     let cue = if reader.heard_voice() {
         l.text("Recording", "録音中")
     } else {
-        l.text("Speak now", "話し始めてください")
+        l.text("Read aloud", "読み上げてください")
     };
     body.child(heading(cue, "microphone.svg", TERRACOTTA))
         .child(
             div()
                 .text_xl()
                 .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child("1　2　3　4　5"),
+                .child(l.text("1　2　3　4　5", "１　２　３　４　５")),
         )
-        .child(note(l.text(
-            "Count or say a few words. Recording stops when you finish.",
-            "数字でも、ひと言でも。声が途切れると録音が終わります。",
-        )))
 }
 
 impl Panel {
@@ -354,7 +350,7 @@ impl Panel {
                         d.child(speech_prompt(l, &self.test.reader))
                     })
                     .when(recording.is_none(), |d| {
-                        d.child(div().h(px(88.)).when(action == TestAction::Record, |d| {
+                        d.child(div().h(px(64.)).when(action == TestAction::Record, |d| {
                             d.child(note(l.text(
                                 "Press Record to begin.",
                                 "準備ができたら録音を押してください。",

@@ -7,6 +7,9 @@
   --muted: #52605b;
   --ink: #233831;
   --coral: #a54c34;
+  --navigation-height: 4rem;
+  scrollbar-gutter: stable;
+  scroll-padding-bottom: calc(var(--navigation-height) + env(safe-area-inset-bottom) + 1rem);
 }
 * { box-sizing: border-box; }
 body, h1, h2, p { margin: 0; }
@@ -20,15 +23,15 @@ button:not(:disabled):hover, select:hover { border-color: #788d82; }
 button:disabled { opacity: .46; cursor: default; }
 :focus-visible { outline: 3px solid #3179aa; outline-offset: 2px; }
 .primary { background: var(--ink); border-color: var(--ink); color: white; font-weight: 600; }
-.topbar, main { padding-inline: clamp(1rem, 4vw, 4rem); }
+.topbar, main, .navigation-inner { padding-inline: clamp(1rem, 4vw, 4rem); }
 .topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-height: 70px; background: white; border-bottom: 1px solid var(--line); }
-.brand, .brand a, .tools, .heading, .paging, .navigation, .dialog-heading, .report-actions, .aside-title, #comparison, #comparison label { display: flex; align-items: center; gap: .6rem; }
+.brand, .brand a, .tools, .heading, .paging, .navigation-inner, .dialog-heading, .report-actions, .aside-title, #comparison, #comparison label { display: flex; align-items: center; gap: .6rem; }
 .brand { color: var(--muted); font-size: .9rem; }
 .brand a { font-size: 1.3rem; font-weight: 680; text-decoration: none; color: var(--ink); }
 .brand img { width: 28px; height: 28px; }
 .divider { margin: 0 .1rem; color: #9aa59f; }
-main { max-width: 1550px; margin: auto; padding-block: 1.6rem 2.5rem; }
-.heading, .navigation, .dialog-heading, .aside-title { justify-content: space-between; }
+main { max-width: 1550px; margin: auto; padding-block: 1.6rem calc(var(--navigation-height) + env(safe-area-inset-bottom) + 1rem); }
+.heading, .navigation-inner, .dialog-heading, .aside-title { justify-content: space-between; }
 .heading { align-items: end; gap: 1rem; margin-bottom: 1rem; }
 .heading > div:first-child { min-width: 0; }
 .revision-line { display: flex; align-items: center; gap: .65rem; }
@@ -50,8 +53,10 @@ progress { width: 100%; height: 5px; accent-color: #47705b; }
 .surface { display: block; padding: 0; border: 0; box-shadow: 0 0 0 1px #c4cbc3; min-height: 0; border-radius: 2px; cursor: crosshair; width: 100%; }
 .surface img, .surface canvas { display: block; max-width: 100%; height: auto; }
 .pin { position: absolute; transform: translate(-50%, -50%); min-height: 0; padding: 0; width: 25px; height: 25px; border: 2px solid white; color: white; background: var(--coral); border-radius: 50%; font: bold 12px/1 system-ui; box-shadow: 0 0 0 1px #6b382b; }
-.navigation, .segments { padding: .7rem 1rem; gap: .65rem; }
-.navigation { border-top: 1px solid var(--line); }
+.navigation { position: fixed; z-index: 5; inset: auto 0 0; padding-bottom: env(safe-area-inset-bottom); border-top: 1px solid var(--line); background: white; }
+.navigation-inner { max-width: 1550px; margin: auto; min-height: var(--navigation-height); }
+#position { min-width: 7ch; text-align: center; }
+#accept { width: 10rem; max-width: 52%; }
 .paging { gap: .55rem; }
 .paging button { display: grid; place-items: center; padding: .25rem .5rem; }
 .arrow { width: 18px; height: 18px; }
@@ -68,7 +73,7 @@ textarea, dialog input { width: 100%; padding: .55rem .65rem; border: 1px solid 
 textarea { display: block; min-height: 4.5rem; resize: vertical; }
 #comparison { flex-wrap: wrap; margin-bottom: 1rem; font-size: .86rem; gap: 1rem; color: var(--muted); }
 #comparison button { margin-left: auto; }
-.segments { display: flex; flex-wrap: wrap; gap: .35rem; }
+.segments { display: flex; flex-wrap: wrap; gap: .35rem; padding: .7rem 1rem; }
 .segments button[aria-pressed="true"] { background: #e5eee6; border-color: #819b87; }
 .empty { padding: 2.8rem .8rem; text-align: center; color: var(--muted); }
 dialog { width: min(32rem, calc(100vw - 2rem)); max-height: 90dvh; overflow: auto; padding: 1.2rem; border: 1px solid var(--line); border-radius: 12px; color: inherit; }
@@ -89,6 +94,5 @@ dialog input { font-family: Consolas, monospace; }
   .frames.pair { grid-template-columns: 1fr; }
   .heading { flex-wrap: wrap; gap: .4rem; }
   .progress { min-width: 7rem; }
-  .navigation { padding-inline: .6rem; }
   #comparison button { margin-left: 0; }
 }

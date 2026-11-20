@@ -1,9 +1,9 @@
 """Index committed UI snapshots and package the two most recent revisions for Pages."""
 
+import hashlib
 import json
 from pathlib import Path
 import re
-import shutil
 import subprocess
 
 
@@ -54,8 +54,13 @@ def build(destination):
     catalog = dict(current=current, base=base, recent=recent[:20], revisions=revisions,
                    trees=trees, bundled=sorted(bundled))
     (destination / "catalog.json").write_text(json.dumps(catalog, separators=(",", ":")), encoding="utf-8")
-    for name in ("index.html", "review.css", "review.js"):
-        shutil.copyfile(HERE / name, destination / name)
+    html = (HERE / "index.html").read_text(encoding="utf-8")
+    for name in ("review.css", "review.js"):
+        content = (HERE / name).read_bytes()
+        (destination / name).write_bytes(content)
+        version = hashlib.sha256(content).hexdigest()[:16]
+        html = html.replace(f'"{name}"', f'"{name}?v={version}"')
+    (destination / "index.html").write_text(html, encoding="utf-8")
 
 
 if __name__ == "__main__":

@@ -23,7 +23,7 @@
     <p id="message" role="status"></p>
     <section id="content" hidden>
       <div class="heading">
-        <div><div class="revision-line"><label for="scene" data-t="screen">Screen</label>
+        <div><div class="revision-line"><label id="screen-label" for="scene" data-t="screen">Screen</label>
           <a id="current-commit" class="hash" target="_blank" rel="noreferrer"></a>
           <button id="latest" data-t="latest" hidden>Latest screens</button></div>
           <h1><select id="scene"></select></h1></div>
@@ -38,14 +38,6 @@
         <section class="preview">
           <div id="views" class="segments" hidden></div>
           <div id="frames" class="frames"></div>
-          <div class="navigation">
-            <div class="paging">
-              <button id="previous" aria-label="Previous screen"><img class="prev arrow" src="../media/chevron-down.svg" alt=""></button>
-              <span id="position" class="hash"></span>
-              <button id="next" aria-label="Next screen"><img class="next arrow" src="../media/chevron-down.svg" alt=""></button>
-            </div>
-            <button id="accept" class="primary"></button>
-          </div>
         </section>
         <aside>
           <div class="aside-title"><h2 data-t="comments">Comments</h2><span id="count"></span></div>
@@ -54,6 +46,16 @@
           <button id="general" class="general" data-t="general">Comment on the whole screen</button>
         </aside>
       </div>
+      <nav class="navigation" aria-labelledby="screen-label">
+        <div class="navigation-inner">
+          <div class="paging">
+            <button id="previous" aria-label="Previous screen"><img class="prev arrow" src="../media/chevron-down.svg" alt=""></button>
+            <span id="position" class="hash"></span>
+            <button id="next" aria-label="Next screen"><img class="next arrow" src="../media/chevron-down.svg" alt=""></button>
+          </div>
+          <button id="accept" class="primary"></button>
+        </div>
+      </nav>
     </section>
   </main>
   <dialog id="compare-dialog" aria-labelledby="compare-heading">

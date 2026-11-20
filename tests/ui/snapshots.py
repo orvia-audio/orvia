@@ -11,6 +11,7 @@ import subprocess
 import tempfile
 import time
 
+from fontTools.ttLib import TTFont
 from PIL import Image, ImageChops, ImageGrab, ImageOps
 
 
@@ -26,6 +27,18 @@ SCENES = (
     "adjust-analyzing", "adjust-opening", "adjust-preview", "adjust-restoring", "adjust-ready",
     "adjust-failed",
 )
+
+
+def install_fallback_fonts(directory):
+    """Give every CI render the same Japanese faces, including full-width punctuation."""
+    fonts = directory / "fonts"
+    fonts.mkdir()
+    for weight in ("Regular", "Bold"):
+        path = Path(f"/usr/share/fonts/opentype/noto/NotoSansCJK-{weight}.ttc")
+        with TTFont(path, fontNumber=0) as font:
+            if font["name"].getDebugName(6) != f"NotoSansCJKjp-{weight}":
+                raise RuntimeError(f"Unexpected Japanese face in {path}")
+            font.save(fonts / f"NotoSansCJKjp-{weight}.otf")
 
 
 def test_binary():
@@ -147,6 +160,7 @@ def main():
         raise SystemExit(f"Remove obsolete baselines: {sorted(str(p) for p in obsolete)}")
     with tempfile.TemporaryDirectory() as tmp, window_manager():
         directory = Path(tmp)
+        install_fallback_fonts(directory)
         # A one-second stereo IEEE-float take, in the engine's on-disk format.
         data = bytes(8000 * 2 * 4)
         fmt = struct.pack("<HHIIHH", 3, 2, 8000, 64000, 8, 32)

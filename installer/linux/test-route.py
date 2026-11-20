@@ -89,6 +89,11 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         snapshot = json.loads(status.read_text()) if status.exists() else {}
         snapshot.pop("signal", None)
         raise AssertionError(f"440 Hz amplitude {amplitude:.0f} in {len(captured)} samples; engine {snapshot}")
+    # Stand in for the desktop text viewer inside this isolated X11 session.
+    opener = Path(tmp, "xdg-open")
+    opener.write_text('#!/bin/sh\nprintf "%s" "$1" > "$XDG_RUNTIME_DIR/opened-file"\n')
+    opener.chmod(0o755)
+    env["PATH"] = tmp + os.pathsep + env["PATH"]
     mixer = start("orvia")
     def window_visible():
         if (code := mixer.poll()) is not None:
@@ -96,6 +101,21 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         return subprocess.run(["xdotool", "search", "--onlyvisible", "--name", "^Orvia$"],
                               env=env, capture_output=True).returncode == 0
     wait_for(window_visible, "The installed mixer window did not appear", timeout=45)
+    window = run("xdotool", "search", "--onlyvisible", "--name", "^Orvia$").splitlines()[0]
+    run("xdotool", "windowsize", window, "830", "610")
+    opened = Path(tmp, "opened-file")
+
+    def open_log_from_preferences():
+        if opened.exists():
+            return True
+        run("xdotool", "mousemove", "--window", window, "70", "575", "click", "1",
+            "sleep", "0.2", "mousemove", "--window", window, "620", "430", "click", "1")
+        return False
+
+    wait_for(open_log_from_preferences, "Preferences did not open the log file")
+    log = state / "engine-log.txt"
+    assert Path(opened.read_text()) == log
+    assert any("INFO   Streaming:" in line for line in log.read_text().splitlines())
     (state / "close-window").touch()
     assert mixer.wait(timeout=10) == 0
 

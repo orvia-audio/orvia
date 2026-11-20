@@ -873,9 +873,7 @@ impl Render for Panel {
             })
             .child(
                 div()
-                    .id(match self.page {
-                        _ => "page-scroll",
-                    })
+                    .id("page-scroll")
                     .flex_1()
                     .h_full()
                     .min_w_0()

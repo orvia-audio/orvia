@@ -1,4 +1,4 @@
-"use strict";
+import {matchingPulls, pullMergeBase} from "./pulls.mjs";
 
 const $ = id => document.getElementById(id);
 const repo = "sya-ri/orvia";
@@ -6,7 +6,12 @@ const prefix = "orvia-review-v1/";
 const params = new URLSearchParams(location.search);
 const words = {
   review: ["Snapshot review", "画面レビュー"], report: ["Review notes", "指摘をまとめる"], latest: ["Latest screens", "最新の画面"],
-  compare: ["Compare commits", "コミットを比較"], screen: ["Screen", "画面"],
+  compare: ["Compare", "差分を比較"], screen: ["Screen", "画面"],
+  twoCommits: ["Two commits", "コミット間"], pullHead: ["PR head commit", "PR 先端のコミットハッシュ"],
+  choosePull: ["Choose a pull request", "比較する PR を選択"], checks: ["CI checks", "CI の結果"],
+  noPull: ["No Orvia PR has this head commit.", "このハッシュを先端に持つ Orvia の PR は見つかりませんでした。"],
+  noPullDiff: ["No committed snapshot changes in this PR.", "この PR で変更された基準画像はありません。"],
+  missingBase: ["Select the original base and head in Two commits.", "「コミット間」で元の比較元と先端を指定してください。"],
   comments: ["Comments", "コメント"], hint: ["Click a point in the image to leave a comment.", "画像の気になる位置をクリックして、コメントを残せます。"],
   general: ["Comment on the whole screen", "画面全体にコメント"], whole: ["Whole screen", "画面全体"],
   base: ["Before", "変更前"], head: ["After", "変更後"], side: ["Side by side", "並べて表示"],
@@ -82,7 +87,16 @@ const rootPath = "tests/ui/snapshots/";
 let catalog, bundled, head, base, scene, scenes = [], view = "diff", frameVersion = 0;
 let changedOnly = true;
 let linkedPoint = null;
+let headRepo = repo, pullNumber = null, candidates = [];
 const remote = new Map(), images = new Map();
+function repository(value) {
+  return typeof value === "string" && /^[\w.-]+\/[\w.-]+$/.test(value) && !value.split("/").some(part => part === "." || part === "..") ? value : repo;
+}
+function originOf(sha) { return sha === head ? headRepo : repo; }
+function pullId(value) { return /^[1-9]\d{0,9}$/.test(value ?? "") ? Number(value) : null; }
+function contextParams() {
+  return {...(headRepo !== repo ? {source: headRepo} : {}), ...(base && pullNumber ? {pull: pullNumber} : {})};
+}
 function files(sha) { return remote.get(sha) ?? catalog.trees[catalog.revisions[sha]] ?? {}; }
 function doneKey(item) { return ["seen", lang, base || "-", head, item].join("/"); }
 function savedNote(note) { notes.set(note.id, note); write("note/" + note.id, note); }
@@ -104,29 +118,48 @@ function button(text, action) {
   return node;
 }
 
-async function api(path) {
-  const response = await fetch("https://api.github.com/repos/" + repo + "/" + path);
+async function api(path, source = repo) {
+  const response = await fetch("https://api.github.com/repos/" + source + "/" + path);
   if (!response.ok) throw new Error(t("unknown") + " (GitHub HTTP " + response.status + ")");
   return response.json();
 }
-async function resolveRef(input) {
+function hash(input) {
   const value = input.trim().toLowerCase();
   if (!/^[0-9a-f]{7,40}$/.test(value)) throw new Error(t("badRef"));
+  return value;
+}
+async function resolveRef(input, source = repo) {
+  const value = hash(input);
   const matches = [...Object.keys(catalog.revisions), ...remote.keys()].filter(sha => sha.startsWith(value));
   if (matches.length > 1) throw new Error(t("ambiguous") + " · " + value);
   if (matches.length === 1) return matches[0];
-  const commit = await api("commits/" + value);
+  const commit = await api("commits/" + value, source);
   let tree = commit.commit.tree.sha;
   for (const name of ["tests", "ui", "snapshots"]) {
-    const listing = await api("git/trees/" + tree);
+    const listing = await api("git/trees/" + tree, source);
     tree = listing.tree.find(entry => entry.type === "tree" && entry.path === name)?.sha;
     if (!tree) break;
   }
-  const listing = tree ? await api("git/trees/" + tree + "?recursive=1") : {tree: []};
+  const listing = tree ? await api("git/trees/" + tree + "?recursive=1", source) : {tree: []};
   if (listing.truncated) throw new Error(t("unknown") + " · " + value);
   remote.set(commit.sha, Object.fromEntries(listing.tree.filter(entry =>
     entry.type === "blob" && /^(ja|en)\/[a-z0-9-]+\.png$/.test(entry.path)).map(entry => [entry.path, entry.sha])));
   return commit.sha;
+}
+async function findPulls(input) {
+  const matches = await matchingPulls(api, hash(input));
+  if (!matches.length) throw new Error(t("noPull"));
+  return matches;
+}
+async function pullRange(pr, tip = pr.head.sha, target = pr.base.sha) {
+  const source = repository(pr.head.repo?.full_name);
+  const tipSha = await resolveRef(tip, source);
+  const common = await pullMergeBase(api, pr, tipSha, hash(target));
+  if (!common) throw new Error(t("missingBase"));
+  return {base: await resolveRef(common), head: tipSha, source, pull: pr.number};
+}
+function useRange(range) {
+  base = range.base; head = range.head; headRepo = range.source; pullNumber = range.pull;
 }
 function loadImage(sha, item) {
   const path = pathFor(item), blob = files(sha)[path];
@@ -136,7 +169,7 @@ function loadImage(sha, item) {
     const image = new Image();
     image.crossOrigin = "anonymous";
     image.src = bundled.has(blob) ? "images/" + blob + ".png" :
-      "https://raw.githubusercontent.com/" + repo + "/" + sha + "/" + rootPath + path;
+      "https://raw.githubusercontent.com/" + originOf(sha) + "/" + sha + "/" + rootPath + path;
     images.set(blob, image.decode().then(() => image).catch(error => { images.delete(blob); throw error; }));
   }
   return images.get(blob);
@@ -159,9 +192,9 @@ function localize() {
 }
 function savePosition() {
   if (scene) write(sessionKey(), scene);
-  write("session", {lang, head, base, view, changedOnly});
+  write("session", {lang, head, base, view, changedOnly, ...contextParams()});
   const url = new URL(location.href);
-  url.search = new URLSearchParams({lang, head, ...(base ? {base, view, only: changedOnly ? "1" : "0"} : {}),
+  url.search = new URLSearchParams({lang, head, ...contextParams(), ...(base ? {base, view, only: changedOnly ? "1" : "0"} : {}),
     ...(scene ? {screen: scene} : {})});
   if (linkedPoint?.scene === scene && linkedPoint.lang === lang && (linkedPoint.sha === head || linkedPoint.sha === base)) {
     url.searchParams.set("point", linkedPoint.point.x + "," + linkedPoint.point.y);
@@ -191,7 +224,14 @@ function navigate(to) {
   scenes = listScenes();
   scene = scenes.includes(to) ? to : scenes[0] ?? "";
   $("current-commit").textContent = short(head);
-  $("current-commit").href = "https://github.com/" + repo + "/commit/" + head;
+  $("current-commit").href = "https://github.com/" + headRepo + "/commit/" + head;
+  $("pull-link").hidden = !pullNumber;
+  $("pull-checks").hidden = !pullNumber;
+  if (pullNumber) {
+    $("pull-link").href = "https://github.com/" + repo + "/pull/" + pullNumber;
+    $("pull-link").textContent = "PR #" + pullNumber;
+    $("pull-checks").href = $("pull-link").href + "/checks";
+  }
   $("latest").hidden = head === catalog.current;
   $("comparison").hidden = !base; $("views").hidden = !base || !scene;
   $("revisions").textContent = base ? short(base) + " → " + short(head) : "";
@@ -225,7 +265,7 @@ function pixelDiff(before, after) {
   return {canvas, count};
 }
 function addNote(sha, point) {
-  const note = {id: crypto.randomUUID(), created: Date.now(), sha, lang, scene, point, text: ""};
+  const note = {id: crypto.randomUUID(), created: Date.now(), sha, source: originOf(sha), lang, scene, point, text: ""};
   savedNote(note); drawNotes(note.id); drawPins();
 }
 function drawPins() {
@@ -284,7 +324,8 @@ async function drawFrames() {
     const tab = button(t(mode), () => { view = mode; savePosition(); drawFrames(); });
     tab.setAttribute("aria-pressed", String(view === mode)); return tab;
   }));
-  area.replaceChildren(element("p", scene ? t("loading") : t(base && changedOnly ? "noChanges" : "noImages"), "empty"));
+  const empty = base && changedOnly ? (pullNumber ? "noPullDiff" : "noChanges") : "noImages";
+  area.replaceChildren(element("p", t(scene ? "loading" : empty), "empty"));
   if (!scene) return;
   try {
     const [before, after] = await Promise.all([base && view !== "head" ? loadImage(base, scene) : null,
@@ -328,6 +369,7 @@ function drawNotes(focusId) {
 }
 function openReport() {
   const out = ["# Orvia · " + t("review"), "", base ? base + " → " + head : head, lang, ""];
+  if (pullNumber) out.push("[PR #" + pullNumber + "](https://github.com/" + repo + "/pull/" + pullNumber + ")", "");
   const items = [...new Set([...scenes, ...[...notes.values()].map(n => n.scene)])];
   let count = 0;
   for (const item of items) {
@@ -336,11 +378,11 @@ function openReport() {
     out.push("## " + title(item), "");
     for (const note of entries) {
       const path = rootPath + pathFor(item);
-      const link = "https://github.com/" + repo + "/blob/" + note.sha + "/" + path;
+      const link = "https://github.com/" + (note.source || originOf(note.sha)) + "/blob/" + note.sha + "/" + path;
       let where = t("whole");
       if (note.point) {
         const url = new URL(location.href);
-        url.search = new URLSearchParams({lang, head, screen: item, on: note.sha,
+        url.search = new URLSearchParams({lang, head, ...contextParams(), screen: item, on: note.sha,
           point: note.point.x + "," + note.point.y,
           ...(base ? {base, view: note.sha === base ? "base" : "head", only: "0"} : {})});
         where = "[x=" + note.point.x + ", y=" + note.point.y + " px](" + url.href + ")";
@@ -371,21 +413,63 @@ $("general").onclick = () => {
 };
 $("language").onchange = () => { lang = $("language").value; localize(); navigate(scene); };
 $("changes-only").onchange = () => { changedOnly = $("changes-only").checked; navigate(scene); };
-$("exit-compare").onclick = () => { base = null; navigate(scene); };
-$("latest").onclick = () => { base = null; head = catalog.current; navigate(read(sessionKey())); };
+$("exit-compare").onclick = () => { base = null; pullNumber = null; navigate(scene); };
+$("latest").onclick = () => {
+  useRange({head: catalog.current, base: null, source: repo, pull: null}); navigate(read(sessionKey()));
+};
+const modes = [...document.querySelectorAll("input[name=comparison-kind]")];
+let compareAttempt = 0;
+function clearCandidates() {
+  candidates = []; $("pull-choice").hidden = true;
+  compareAttempt++; $("apply").disabled = false; $("compare-error").textContent = "";
+}
+function setMode(mode) {
+  clearCandidates();
+  modes.forEach(input => { input.checked = input.value === mode; });
+  const pr = mode === "pr";
+  $("base-field").hidden = pr; $("base").disabled = pr;
+  $("head").labels[0].textContent = t(pr ? "pullHead" : "head");
+  if (pr) $("head").removeAttribute("list"); else $("head").setAttribute("list", "history");
+}
+function selectPull(matches) {
+  candidates = matches;
+  $("pull-number").replaceChildren(...matches.map(pr => new Option("#" + pr.number + " → " + pr.base.ref + " · " + pr.title, pr.number)));
+  $("pull-choice").hidden = false; $("compare-error").textContent = t("choosePull"); $("pull-number").focus();
+}
+modes.forEach(input => input.onchange = () => {
+  setMode(input.value);
+  if (input.value === "pr") {
+    if (!pullNumber && $("head").value === head) $("head").value = "";
+    $("head").focus(); $("head").select();
+  } else if (!$("head").value) $("head").value = head;
+});
+$("head").oninput = clearCandidates; $("base").oninput = clearCandidates;
+$("compare-dialog").addEventListener("close", clearCandidates);
 $("compare").onclick = () => {
   $("base").value = base || catalog.base || ""; $("head").value = head;
-  $("compare-error").textContent = ""; $("compare-dialog").showModal();
+  setMode(pullNumber ? "pr" : "commits"); $("compare-dialog").showModal();
 };
 $("compare-form").onsubmit = async event => {
-  event.preventDefault(); $("apply").disabled = true; $("compare-error").textContent = t("loading");
+  event.preventDefault();
+  const attempt = ++compareAttempt;
+  $("apply").disabled = true; $("compare-error").textContent = t("loading");
   try {
-    const refs = await Promise.all([resolveRef($("base").value), resolveRef($("head").value)]);
-    if (!$("compare-dialog").open) return;
-    [base, head] = refs; view = "diff"; changedOnly = true;
+    let range;
+    if (modes.find(input => input.checked).value === "pr") {
+      const choice = candidates.find(pr => pr.number === Number($("pull-number").value));
+      const matches = choice ? [choice] : await findPulls($("head").value);
+      if (attempt !== compareAttempt) return;
+      if (matches.length > 1) { selectPull(matches); return; }
+      range = await pullRange(matches[0]);
+    } else {
+      const [left, right] = await Promise.all([resolveRef($("base").value), resolveRef($("head").value)]);
+      range = {base: left, head: right, source: repo, pull: null};
+    }
+    if (attempt !== compareAttempt || !$("compare-dialog").open) return;
+    useRange(range); view = "diff"; changedOnly = true; $("message").textContent = storageFailed ? t("offline") : "";
     $("compare-dialog").close(); navigate(read(sessionKey()));
-  } catch (error) { $("compare-error").textContent = error.message; }
-  finally { $("apply").disabled = false; }
+  } catch (error) { if (attempt === compareAttempt) $("compare-error").textContent = error.message; }
+  finally { if (attempt === compareAttempt) $("apply").disabled = false; }
 };
 document.querySelectorAll(".close-dialog").forEach(btn => btn.onclick = () => btn.closest("dialog").close());
 $("export").onclick = openReport;
@@ -405,12 +489,27 @@ async function start() {
   catalog = await response.json(); bundled = new Set(catalog.bundled);
   head = catalog.current; base = null;
   // An explicit revision link takes precedence over the last local review.
-  const explicit = params.has("head") || params.has("base");
+  const explicit = params.has("head") || params.has("base") || params.has("pr");
   const headRef = explicit ? params.get("head") : saved.head, baseRef = explicit ? params.get("base") : saved.base;
-  let error;
+  const source = repository(explicit ? params.get("source") : saved.source);
+  const number = pullId(explicit ? params.get("pull") : saved.pull);
+  let error, choices;
   try {
-    const refs = await Promise.all([headRef ? resolveRef(headRef) : head, baseRef ? resolveRef(baseRef) : null]);
-    [head, base] = refs;
+    if (params.has("pr")) {
+      const value = hash(params.get("pr"));
+      const matches = number ? [await api("pulls/" + number)] : await findPulls(value);
+      if (matches.length > 1) choices = matches;
+      else {
+        const pr = matches[0], target = params.get("target");
+        // CI permalinks retain both event SHAs, even after a PR is updated.
+        const pinned = number && /^[0-9a-f]{40}$/.test(target || "") && value.length === 40;
+        if (!pinned && !pr.head.sha.startsWith(value)) throw new Error(t("noPull"));
+        useRange(await pullRange(pr, pinned ? value : pr.head.sha, pinned ? target : pr.base.sha));
+      }
+    } else {
+      const [right, left] = await Promise.all([headRef ? resolveRef(headRef, source) : head, baseRef ? resolveRef(baseRef) : null]);
+      useRange({head: right, base: left, source, pull: left ? number : null});
+    }
   } catch (cause) { error = cause.message; }
   const mode = explicit ? params.get("view") : saved.view;
   view = ["base", "head", "side", "diff"].includes(mode) ? mode : "diff";
@@ -425,5 +524,12 @@ async function start() {
   $("language").disabled = false; $("compare").disabled = false; $("export").disabled = false;
   $("content").hidden = false;
   navigate(params.get("screen") || read(sessionKey()));
+  if (params.has("pr") && (choices || error)) {
+    $("head").value = params.get("pr"); setMode("pr"); $("compare-dialog").showModal();
+    if (choices) selectPull(choices); else $("compare-error").textContent = error;
+  } else if (params.get("mode") === "pr") {
+    $("base").value = base || catalog.base || ""; $("head").value = pullNumber ? head : "";
+    setMode("pr"); $("compare-dialog").showModal(); $("head").focus();
+  }
 }
 start().catch(error => { $("message").textContent = t("imageError") + " " + error.message; });

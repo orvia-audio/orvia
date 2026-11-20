@@ -55,8 +55,13 @@ def build(destination):
                    trees=trees, bundled=sorted(bundled))
     (destination / "catalog.json").write_text(json.dumps(catalog, separators=(",", ":")), encoding="utf-8")
     html = (HERE / "index.html").read_text(encoding="utf-8")
+    module = (HERE / "pulls.mjs").read_bytes()
+    module_name = "pulls." + hashlib.sha256(module).hexdigest()[:16] + ".mjs"
+    (destination / module_name).write_bytes(module)
     for name in ("review.css", "review.js"):
         content = (HERE / name).read_bytes()
+        if name == "review.js":
+            content = content.replace(b"./pulls.mjs", ("./" + module_name).encode())
         (destination / name).write_bytes(content)
         version = hashlib.sha256(content).hexdigest()[:16]
         html = html.replace(f'"{name}"', f'"{name}?v={version}"')

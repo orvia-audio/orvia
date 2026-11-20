@@ -7,7 +7,7 @@
   <title>Snapshot review · Orvia</title>
   <link rel="icon" href="../media/orvia.svg">
   <link rel="stylesheet" href="review.css">
-  <script defer src="review.js"></script>
+  <script type="module" src="review.js"></script>
 </head>
 <body>
   <header class="topbar">
@@ -30,6 +30,8 @@
         <div class="progress"><span id="progress-label"></span><progress id="progress" max="1" value="0"></progress></div>
       </div>
       <div id="comparison" hidden>
+        <a id="pull-link" target="_blank" rel="noreferrer" hidden></a>
+        <a id="pull-checks" target="_blank" rel="noreferrer" data-t="checks" hidden>CI checks</a>
         <span id="revisions" class="hash"></span>
         <label><input id="changes-only" type="checkbox" checked><span data-t="changedOnly">Changed screens only</span></label>
         <button id="exit-compare" data-t="single">Single revision</button>
@@ -62,11 +64,17 @@
     <form id="compare-form">
       <div class="dialog-heading"><h2 id="compare-heading" data-t="compare">Compare commits</h2>
         <button type="button" class="close-dialog" data-t="close">Close</button></div>
-      <label for="base" data-t="base">Before</label>
-      <input id="base" required pattern="[0-9a-fA-F]{7,40}" list="history" spellcheck="false" autocomplete="off">
+      <div class="compare-mode">
+        <label><input type="radio" name="comparison-kind" value="commits" checked><span data-t="twoCommits">Two commits</span></label>
+        <label><input type="radio" name="comparison-kind" value="pr"><span>PR</span></label>
+      </div>
+      <div id="base-field"><label for="base" data-t="base">Before</label>
+        <input id="base" required pattern="[0-9a-fA-F]{7,40}" list="history" spellcheck="false" autocomplete="off"></div>
       <label for="head" data-t="head">After</label>
       <input id="head" required pattern="[0-9a-fA-F]{7,40}" list="history" spellcheck="false" autocomplete="off">
       <datalist id="history"></datalist>
+      <div id="pull-choice" hidden><label for="pull-number" data-t="choosePull">Choose a pull request</label>
+        <select id="pull-number"></select></div>
       <p id="compare-error" role="status"></p>
       <button id="apply" class="primary" data-t="showDiff">Show differences</button>
     </form>

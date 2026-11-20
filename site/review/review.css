@@ -73,6 +73,7 @@ textarea, dialog input { width: 100%; padding: .55rem .65rem; border: 1px solid 
 textarea { display: block; min-height: 4.5rem; resize: vertical; }
 #comparison { flex-wrap: wrap; margin-bottom: 1rem; font-size: .86rem; gap: 1rem; color: var(--muted); }
 #comparison button { margin-left: auto; }
+#pull-link { color: var(--ink); text-underline-offset: .2em; }
 .segments { display: flex; flex-wrap: wrap; gap: .35rem; padding: .7rem 1rem; }
 .segments button[aria-pressed="true"] { background: #e5eee6; border-color: #819b87; }
 .empty { padding: 2.8rem .8rem; text-align: center; color: var(--muted); }
@@ -80,6 +81,10 @@ dialog { width: min(32rem, calc(100vw - 2rem)); max-height: 90dvh; overflow: aut
 dialog::backdrop { background: #19221d70; }
 .dialog-heading { margin-bottom: 1rem; }
 dialog label { display: block; margin-block: .75rem .2rem; }
+.compare-mode { display: flex; gap: 1.2rem; }
+.compare-mode label { display: inline-flex; align-items: center; gap: .35rem; margin: 0; cursor: pointer; }
+.compare-mode input { width: auto; accent-color: var(--ink); }
+#pull-number { max-width: 100%; }
 dialog input { font-family: Consolas, monospace; }
 #apply { margin-top: 1rem; }
 #message, #compare-error { padding: .65rem; color: #8f3b29; }

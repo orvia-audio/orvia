@@ -29,11 +29,6 @@ impl Reader {
         self.measured == BASELINE_BLOCKS
     }
 
-    /// Whether this take has contained a sustained rise above the room level.
-    pub(super) fn heard_voice(&self) -> bool {
-        self.speaking
-    }
-
     /// Process newly captured audio and report completion or a stalled device.
     pub(super) fn listen(
         &mut self,
@@ -125,7 +120,7 @@ mod tests {
         assert!(reader.ready());
         assert!(!play(&mut reader, 0.02, 2));
         assert!(!play(&mut reader, 1.2e-6, 100));
-        assert!(!reader.heard_voice());
+        assert!(!reader.speaking);
     }
 
     #[test]
@@ -133,7 +128,7 @@ mod tests {
         let mut reader = Reader::default();
         assert!(!play(&mut reader, 1e-8, BASELINE_BLOCKS));
         assert!(!play(&mut reader, 1e-6, 10));
-        assert!(reader.heard_voice());
+        assert!(reader.speaking);
         assert!(!play(&mut reader, 1e-8, RELEASE_BLOCKS - 1));
         assert!(play(&mut reader, 1e-8, 1));
     }

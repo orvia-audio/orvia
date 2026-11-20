@@ -48,15 +48,12 @@ fn note(s: impl Into<SharedString>) -> gpui::Div {
 pub(super) enum ReadingCue {
     Measuring,
     Read,
-    Recording,
 }
 
 impl From<&reading::Reader> for ReadingCue {
     fn from(reader: &reading::Reader) -> Self {
         if !reader.ready() {
             Self::Measuring
-        } else if reader.heard_voice() {
-            Self::Recording
         } else {
             Self::Read
         }
@@ -98,20 +95,20 @@ impl<'a> From<&'a auto_adjust::Stage> for AdjustmentScreen<'a> {
 /// Reveal the optional count only after the recording endpoint is ready for speech.
 fn speech_prompt(l: Language, cue: ReadingCue) -> gpui::Div {
     let body = stack().gap_1();
-    let cue = match cue {
-        ReadingCue::Measuring => {
-            return body.child(note(l.text("Measuring room level…", "周囲の音量を測定中…")));
-        }
-        ReadingCue::Read => l.text("Read aloud", "読み上げてください"),
-        ReadingCue::Recording => l.text("Recording", "録音中"),
-    };
-    body.child(heading(cue, "microphone.svg", TERRACOTTA))
-        .child(
-            div()
-                .text_xl()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(l.text("1　2　3　4　5", "１　２　３　４　５")),
-        )
+    if matches!(cue, ReadingCue::Measuring) {
+        return body.child(note(l.text("Measuring room level…", "周囲の音量を測定中…")));
+    }
+    body.child(heading(
+        l.text("Read aloud", "読み上げてください"),
+        "microphone.svg",
+        TERRACOTTA,
+    ))
+    .child(
+        div()
+            .text_xl()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(l.text("“1　2　3　4　5”", "「１　２　３　４　５」")),
+    )
 }
 
 impl Panel {
@@ -132,6 +129,7 @@ impl Panel {
             };
         let leading = match &control {
             Control::AutoAdjust => Some("adjustments-horizontal.svg"),
+            Control::ApplyAdjustment => Some("check.svg"),
             Control::Test(TestAction::Record) => Some("microphone.svg"),
             Control::Test(TestAction::Play) => Some("player-play.svg"),
             Control::Test(TestAction::FinishRecording | TestAction::StopPlayback) => {
@@ -139,7 +137,7 @@ impl Panel {
             }
             Control::Test(TestAction::Retake) => Some("refresh.svg"),
             Control::RestartEngine => Some("refresh.svg"),
-            Control::Page(Page::Log) => Some("activity.svg"),
+            Control::OpenLog => Some("external-link.svg"),
             Control::CheckUpdate => Some("refresh.svg"),
             Control::Releases => Some("external-link.svg"),
             _ => None,
@@ -155,12 +153,14 @@ impl Panel {
         };
         let wide = trigger.is_some();
         let primary = matches!(control, Control::Test(action) if action != TestAction::Retake);
+        let apply = matches!(control, Control::ApplyAdjustment);
         div()
             .id(id.into())
             .flex()
             .items_center()
             .gap_2()
             .when(wide, |d| d.w_full())
+            .when(apply, |d| d.min_w(px(148.)).min_h(px(44.)).justify_center())
             .tab_index(0)
             .when(primary, |d| {
                 d.track_focus(&self.test_primary_focus)
@@ -263,12 +263,12 @@ impl Panel {
         page: Page,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let active = self.page == page || (self.page == Page::Log && page == Page::Preferences);
+        let active = self.page == page;
         let icon = match page {
             Page::Mixer => "adjustments-horizontal.svg",
             Page::MicTest => "microphone.svg",
             Page::Devices => "plug-connected.svg",
-            Page::Preferences | Page::Log => "settings.svg",
+            Page::Preferences => "settings.svg",
         };
         let color = if active { 0xffc4a6 } else { 0xe1e4e0 };
         div()
@@ -374,60 +374,50 @@ impl Panel {
             TestAction::Play => l.text("Recorded", "録音済み"),
             _ => self.state_label(),
         };
-        stack()
+        card()
             .child(
-                card()
-                    .child(
-                        row()
-                            .justify_between()
-                            .child(heading(
-                                l.text("Virtual microphone", "仮想マイク"),
-                                "microphone.svg",
-                                TERRACOTTA,
-                            ))
-                            .child(note(status)),
-                    )
-                    .child(self.picker(Endpoint::TestSource, cx))
+                row()
+                    .justify_between()
                     .child(heading(
-                        l.text("Playback device", "再生先"),
-                        "headphones.svg",
+                        l.text("Virtual microphone", "仮想マイク"),
+                        "microphone.svg",
                         TERRACOTTA,
                     ))
-                    .child(self.picker(Endpoint::TestSpeaker, cx))
-                    .child(
-                        row()
-                            .border_t_1()
-                            .border_color(rgb(LINE))
-                            .pt_3()
-                            .child(self.button(
-                                "test-primary",
-                                action.label(l),
-                                true,
-                                Control::Test(action),
-                                cx,
-                            ))
-                            .child(note(format!("{:.1} s", length.as_secs_f32())))
-                            .child(div().flex_1())
-                            .when(self.test.clip.is_some(), |d| {
-                                d.child(self.button(
-                                    "test-retake",
-                                    TestAction::Retake.label(l),
-                                    false,
-                                    Control::Test(TestAction::Retake),
-                                    cx,
-                                ))
-                            }),
-                    )
-                    .when(action == TestAction::FinishRecording, |d| {
-                        d.child(speech_prompt(l, (&self.test.reader).into()))
+                    .child(note(status)),
+            )
+            .child(self.picker(Endpoint::TestSource, cx))
+            .child(heading(
+                l.text("Playback device", "再生先"),
+                "headphones.svg",
+                TERRACOTTA,
+            ))
+            .child(self.picker(Endpoint::TestSpeaker, cx))
+            .child(
+                row()
+                    .border_t_1()
+                    .border_color(rgb(LINE))
+                    .pt_3()
+                    .child(self.button(
+                        "test-primary",
+                        action.label(l),
+                        true,
+                        Control::Test(action),
+                        cx,
+                    ))
+                    .child(note(format!("{:.1} s", length.as_secs_f32())))
+                    .child(div().flex_1())
+                    .when(self.test.clip.is_some(), |d| {
+                        d.child(self.button(
+                            "test-retake",
+                            TestAction::Retake.label(l),
+                            false,
+                            Control::Test(TestAction::Retake),
+                            cx,
+                        ))
                     }),
             )
-            .when_some(self.status.as_ref(), |d, status| {
-                d.child(note(format!(
-                    "{} v{}",
-                    l.text("Running engine", "稼働中のエンジン"),
-                    status.version
-                )))
+            .when(action == TestAction::FinishRecording, |d| {
+                d.child(speech_prompt(l, (&self.test.reader).into()))
             })
     }
 
@@ -461,22 +451,17 @@ impl Panel {
                     .child(speech_prompt(l, cue));
             }
             AdjustmentScreen::Analyzing => {
-                panel = panel.child(note(l.text(
-                    "Finding a suppression limit…",
-                    "声の出だしと環境音を解析中…",
-                )))
+                panel = panel.child(note(
+                    l.text("Analyzing voice and room noise…", "声と環境音を解析中…"),
+                ))
             }
             AdjustmentScreen::Preview(cue) => {
-                panel = panel.child(note(
-                    l.text("Virtual microphone preview", "仮想マイクのプレビュー"),
-                ));
                 if let Some(cue) = cue {
                     panel = panel.child(speech_prompt(l, cue));
                 } else {
-                    panel = panel.child(note(l.text(
-                        "Opening the recording endpoint…",
-                        "仮想マイクの録音側を準備中…",
-                    )));
+                    panel = panel.child(note(
+                        l.text("Preparing the virtual microphone…", "仮想マイクを準備中…"),
+                    ));
                 }
             }
             AdjustmentScreen::Restoring => {
@@ -530,7 +515,7 @@ impl Panel {
                             ))
                             .child(self.button(
                                 "adjust-apply",
-                                l.text("Apply", "適用"),
+                                l.text("Apply settings", "適用する"),
                                 true,
                                 Control::ApplyAdjustment,
                                 cx,
@@ -712,9 +697,9 @@ impl Panel {
                                 row()
                                     .child(self.button(
                                         "view-log",
-                                        l.text("View log", "ログを表示"),
+                                        l.text("Open log file", "ログファイルを開く"),
                                         false,
-                                        Control::Page(Page::Log),
+                                        Control::OpenLog,
                                         cx,
                                     ))
                                     .child(self.button(
@@ -771,59 +756,6 @@ impl Panel {
                     .child(version.to_owned()),
             )
     }
-
-    fn log_page(&self, cx: &mut Context<Self>) -> gpui::Div {
-        use orvia_core::EngineEvent;
-        let l = self.prefs.language;
-        let mut list = card().gap_0().py_1();
-        for entry in self.log.entries.iter().rev() {
-            let (level, color) = match entry.event {
-                EngineEvent::RouteError(_) | EngineEvent::MonitorError(_) => {
-                    (l.text("Error", "エラー"), 0xa03023)
-                }
-                EngineEvent::Reconnecting => (l.text("Warning", "警告"), 0x835313),
-                _ => (l.text("Info", "情報"), MUTED),
-            };
-            list = list.child(
-                stack()
-                    .gap_0()
-                    .py_2()
-                    .border_b_1()
-                    .border_color(rgb(LINE))
-                    .child(
-                        row()
-                            .text_xs()
-                            .text_color(rgb(MUTED))
-                            .child(entry.timestamp.clone())
-                            .child(div().text_color(rgb(color)).child(level)),
-                    )
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(engine_log::description(&entry.event, l)),
-                    ),
-            );
-        }
-        stack()
-            .child(row().child(self.button(
-                "back-to-prefs",
-                l.text("Back to preferences", "設定に戻る"),
-                false,
-                Control::Page(Page::Preferences),
-                cx,
-            )))
-            .when_some(self.log.error.as_ref(), |d, e| {
-                d.child(note(format!(
-                    "{} · {e}",
-                    l.text("Cannot read log", "ログを読み込めません")
-                )))
-            })
-            .when(
-                self.log.entries.is_empty() && self.log.error.is_none(),
-                |d| d.child(note(l.text("No events yet", "ログはまだありません"))),
-            )
-            .when(!self.log.entries.is_empty(), |d| d.child(list))
-    }
 }
 
 impl Render for Panel {
@@ -845,7 +777,6 @@ impl Render for Panel {
         let (title, content) = match self.page {
             Page::Mixer => (l.text("Mixer", "ミキサー"), self.mixer(cx)),
             Page::MicTest => (l.text("Mic test", "マイクテスト"), self.mic_test_page(cx)),
-            Page::Log => (l.text("Engine log", "エンジンログ"), self.log_page(cx)),
             Page::Devices => (l.text("Devices", "デバイス"), self.devices(cx)),
             Page::Preferences => (l.text("Preferences", "設定"), self.preferences(cx)),
         };
@@ -942,10 +873,7 @@ impl Render for Panel {
             })
             .child(
                 div()
-                    .id(match self.page {
-                        Page::Log => "log-scroll",
-                        _ => "page-scroll",
-                    })
+                    .id("page-scroll")
                     .flex_1()
                     .h_full()
                     .min_w_0()

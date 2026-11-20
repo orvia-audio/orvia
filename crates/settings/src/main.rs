@@ -58,6 +58,7 @@ enum Control {
     ApplyAdjustment,
     RestartEngine,
     DismissError,
+    DismissUpdate,
     Slide(Slider, u16),
     AutomaticUpdates,
     CheckUpdate,
@@ -107,6 +108,7 @@ struct Panel {
     log: engine_log::LogView,
     error: String,
     updates: updates::Updates,
+    show_update_feedback: bool,
     installed: Version,
     restarting: bool,
     test_only: bool,
@@ -220,6 +222,7 @@ impl Panel {
     fn empty(dir: PathBuf, installed: Version, test_only: bool, cx: &Context<Self>) -> Self {
         Self {
             updates: Default::default(),
+            show_update_feedback: false,
             dir,
             root: cx.focus_handle(),
             slider_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
@@ -279,6 +282,7 @@ impl Panel {
                         self.open_mic_test();
                     }
                 }
+                self.show_update_feedback = false;
                 self.page = page;
                 if page == Page::Log {
                     self.log.refresh(&self.dir);
@@ -350,7 +354,11 @@ impl Panel {
             }
             Control::RestartEngine => {}
             Control::DismissError => self.error.clear(),
-            Control::CheckUpdate if !self.updates.checking => self.check_for_updates(cx),
+            Control::DismissUpdate => self.show_update_feedback = false,
+            Control::CheckUpdate if !self.updates.checking => {
+                self.show_update_feedback = true;
+                self.check_for_updates(cx);
+            }
             Control::CheckUpdate => {}
             Control::Releases => cx.open_url(RELEASES),
             change => {

@@ -43,6 +43,7 @@ fn note(s: impl Into<SharedString>) -> gpui::Div {
     div().text_sm().text_color(rgb(MUTED)).child(s.into())
 }
 
+/// The visible instruction for the current microphone reading.
 #[derive(Clone, Copy)]
 pub(super) enum ReadingCue {
     Measuring,
@@ -96,7 +97,7 @@ impl<'a> From<&'a auto_adjust::Stage> for AdjustmentScreen<'a> {
 
 /// Reveal the optional count only after the recording endpoint is ready for speech.
 fn speech_prompt(l: Language, cue: ReadingCue) -> gpui::Div {
-    let body = stack().h(px(64.)).gap_1();
+    let body = stack().gap_1();
     let cue = match cue {
         ReadingCue::Measuring => {
             return body.child(note(l.text("Measuring room level…", "周囲の音量を測定中…")));
@@ -374,13 +375,6 @@ impl Panel {
             _ => self.state_label(),
         };
         stack()
-            .child(div().h(px(20.)).when_some(self.status.as_ref(), |d, s| {
-                d.child(note(format!(
-                    "{} v{}",
-                    l.text("Running engine", "稼働中のエンジン"),
-                    s.version
-                )))
-            }))
             .child(
                 card()
                     .child(
@@ -400,17 +394,6 @@ impl Panel {
                         TERRACOTTA,
                     ))
                     .child(self.picker(Endpoint::TestSpeaker, cx))
-                    .when(action == TestAction::FinishRecording, |d| {
-                        d.child(speech_prompt(l, (&self.test.reader).into()))
-                    })
-                    .when(action != TestAction::FinishRecording, |d| {
-                        d.child(div().h(px(64.)).when(action == TestAction::Record, |d| {
-                            d.child(note(l.text(
-                                "Press Record to begin.",
-                                "準備ができたら録音を押してください。",
-                            )))
-                        }))
-                    })
                     .child(
                         row()
                             .border_t_1()
@@ -434,8 +417,18 @@ impl Panel {
                                     cx,
                                 ))
                             }),
-                    ),
+                    )
+                    .when(action == TestAction::FinishRecording, |d| {
+                        d.child(speech_prompt(l, (&self.test.reader).into()))
+                    }),
             )
+            .when_some(self.status.as_ref(), |d, status| {
+                d.child(note(format!(
+                    "{} v{}",
+                    l.text("Running engine", "稼働中のエンジン"),
+                    status.version
+                )))
+            })
     }
 
     fn adjustment_page(&self, screen: AdjustmentScreen, cx: &mut Context<Self>) -> gpui::Div {
@@ -546,31 +539,33 @@ impl Panel {
             }
             AdjustmentScreen::Failed(error) => panel = panel.child(note(error.to_owned())),
         }
-        stack().child(panel).child(
-            row()
-                .child(self.button(
-                    "adjust-back",
-                    l.text("Back to mixer", "ミキサーに戻る"),
-                    false,
-                    Control::Page(Page::Mixer),
-                    cx,
-                ))
-                .when(
-                    matches!(
-                        screen,
-                        AdjustmentScreen::Failed(_) | AdjustmentScreen::Ready(_)
-                    ) && self.prefs.active_noise_method() == Some(NoiseMethod::DeepFilterNet3),
-                    |r| {
-                        r.child(self.button(
-                            "adjust-retry",
-                            l.text("Retake", "録り直す"),
-                            false,
-                            Control::AutoAdjust,
-                            cx,
-                        ))
-                    },
-                ),
-        )
+        stack()
+            .child(
+                row()
+                    .child(self.button(
+                        "adjust-back",
+                        l.text("Back to mixer", "ミキサーに戻る"),
+                        false,
+                        Control::Page(Page::Mixer),
+                        cx,
+                    ))
+                    .when(
+                        matches!(
+                            screen,
+                            AdjustmentScreen::Failed(_) | AdjustmentScreen::Ready(_)
+                        ) && self.prefs.active_noise_method() == Some(NoiseMethod::DeepFilterNet3),
+                        |r| {
+                            r.child(self.button(
+                                "adjust-retry",
+                                l.text("Retake", "録り直す"),
+                                false,
+                                Control::AutoAdjust,
+                                cx,
+                            ))
+                        },
+                    ),
+            )
+            .child(panel)
     }
 
     fn devices(&self, cx: &mut Context<Self>) -> gpui::Div {
@@ -639,7 +634,7 @@ impl Panel {
                             .flex_1()
                             .truncate()
                             .text_right()
-                            .child(note(warning.unwrap_or(""))),
+                            .when_some(warning, |d, message| d.child(note(message))),
                     )
                     .child(self.switch("monitor", enabled, Control::Monitor, cx)),
             )
@@ -701,13 +696,6 @@ impl Panel {
                                 Control::Releases,
                                 cx,
                             )),
-                    )
-                    .child(
-                        div()
-                            .id("update-result")
-                            .h(px(24.))
-                            .overflow_y_scroll()
-                            .child(note(self.updates.status(l, &self.installed))),
                     ),
             )
             .child(
@@ -841,6 +829,19 @@ impl Panel {
 impl Render for Panel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let l = self.prefs.language;
+        let toast = if !self.error.is_empty() {
+            Some((
+                updates::Notice::Error,
+                self.error.clone(),
+                Control::DismissError,
+            ))
+        } else if self.page == Page::Preferences && self.show_update_feedback {
+            self.updates
+                .status(l, &self.installed)
+                .map(|(kind, message)| (kind, message, Control::DismissUpdate))
+        } else {
+            None
+        };
         let (title, content) = match self.page {
             Page::Mixer => (l.text("Mixer", "ミキサー"), self.mixer(cx)),
             Page::MicTest => (l.text("Mic test", "マイクテスト"), self.mic_test_page(cx)),
@@ -991,29 +992,36 @@ impl Render for Panel {
                             .child(content),
                     ),
             )
-            .when(!self.error.is_empty(), |d| {
+            .when_some(toast, |d, (kind, message, dismiss)| {
+                let (icon, accent, background) = match kind {
+                    updates::Notice::Error => ("alert-triangle.svg", TERRACOTTA, 0xffeadf),
+                    updates::Notice::Success => ("check.svg", 0x246345, 0xe8f4ec),
+                    updates::Notice::Progress => ("refresh.svg", 0x315e77, 0xedf4f7),
+                    updates::Notice::Information => ("info-circle.svg", 0x315e77, 0xedf4f7),
+                };
                 d.child(
                     div()
-                        .id("panel-error")
+                        .id("notification")
                         .absolute()
                         .bottom_2()
                         .left(if self.test_only { px(8.) } else { px(172.) })
                         .right_2()
                         .occlude()
                         .rounded_md()
-                        .bg(rgb(0xffeadf))
+                        .bg(rgb(background))
                         .border_1()
-                        .border_color(rgb(TERRACOTTA))
+                        .border_color(rgb(accent))
                         .flex()
                         .items_center()
                         .p_2()
                         .gap_2()
-                        .child(div().flex_1().min_w_0().text_sm().child(self.error.clone()))
+                        .child(glyph(icon, 20., accent))
+                        .child(div().flex_1().min_w_0().text_sm().child(message))
                         .child(self.button(
-                            "dismiss-error",
+                            "dismiss-notification",
                             l.text("Dismiss", "閉じる"),
                             false,
-                            Control::DismissError,
+                            dismiss,
                             cx,
                         )),
                 )

@@ -98,7 +98,36 @@ fn populate(panel: &mut Panel, scene: &str, language: Language) {
             Page::Devices
         }
         "preferences" => Page::Preferences,
+        "preferences-current" | "preferences-available" => {
+            panel.show_update_feedback = true;
+            let version = if scene == "preferences-available" {
+                Version::new(1, 1, 0)
+            } else {
+                panel.installed.clone()
+            };
+            panel.updates.finish(Ok(updates::Check::new(Some(version))));
+            Page::Preferences
+        }
+        "preferences-error" => {
+            panel.show_update_feedback = true;
+            panel.updates.finish(Err(updates::CheckError::Network));
+            Page::Preferences
+        }
+        "mic-error" => {
+            panel.error = language
+                .text(
+                    "Microphone disconnected or stalled.",
+                    "マイクから音声が届いていません。",
+                )
+                .into();
+            Page::MicTest
+        }
+        "mic-offline" => {
+            panel.status = None;
+            Page::MicTest
+        }
         "preferences-checking" => {
+            panel.show_update_feedback = true;
             panel.updates.start();
             Page::Preferences
         }

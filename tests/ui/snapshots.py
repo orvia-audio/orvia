@@ -20,7 +20,8 @@ BASELINES = HERE / "snapshots"
 OUTPUT = ROOT / "target/ui-snapshots"
 SCENES = (
     "mixer", "mixer-full", "mixer-bypass", "devices", "devices-picker", "preferences",
-    "preferences-checking", "log", "mic", "mic-standalone", "mic-recording", "mic-recorded",
+    "preferences-checking", "preferences-error", "preferences-current", "preferences-available",
+    "log", "mic", "mic-offline", "mic-error", "mic-standalone", "mic-recording", "mic-recorded",
     "mic-playing", "adjust-room", "adjust-measuring", "adjust-read", "adjust-recording",
     "adjust-analyzing", "adjust-opening", "adjust-preview", "adjust-restoring", "adjust-ready",
     "adjust-failed",

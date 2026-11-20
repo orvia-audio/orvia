@@ -20,9 +20,27 @@ pub(super) struct Check {
     version: Option<Version>,
 }
 
+impl Check {
+    /// Record the stable release seen by a completed check.
+    pub(super) fn new(version: Option<Version>) -> Self {
+        Self {
+            checked_at: SystemTime::now(),
+            version,
+        }
+    }
+}
+
 pub(super) enum CheckError {
     Network,
     Invalid,
+}
+
+/// Visual role of a short notification in the mixer.
+pub(super) enum Notice {
+    Progress,
+    Success,
+    Information,
+    Error,
 }
 
 /// The last successful check survives restarts. Failed refreshes retain it.
@@ -74,12 +92,16 @@ impl Updates {
             .filter(|v| v.pre.is_empty() && v.cmp_precedence(installed).is_gt())
     }
 
-    pub(super) fn status(&self, l: Language, installed: &Version) -> String {
+    /// Describe the current manual check for the dismissible notification.
+    pub(super) fn status(&self, l: Language, installed: &Version) -> Option<(Notice, String)> {
         if self.checking {
-            return l.text("Checking releases…", "更新を確認中…").into();
+            return Some((
+                Notice::Progress,
+                l.text("Checking releases…", "更新を確認中…").into(),
+            ));
         }
         if let Some(error) = &self.error {
-            return match error {
+            let message = match error {
                 CheckError::Network => l.text(
                     "Update check failed. Check your connection.",
                     "更新を確認できません。接続を確認してください。",
@@ -88,24 +110,30 @@ impl Updates {
                     "Unrecognized release information",
                     "リリース情報を読み取れません",
                 ),
-            }
-            .into();
+            };
+            return Some((Notice::Error, message.into()));
         }
-        let Some(check) = &self.last else {
-            return String::new();
-        };
+        let check = self.last.as_ref()?;
         if let Some(v) = self.available(installed) {
-            return format!(
-                "{} · {v}",
-                l.text("Update available", "アップデートがあります")
-            );
+            return Some((
+                Notice::Information,
+                format!(
+                    "{} · {v}",
+                    l.text("Update available", "アップデートがあります")
+                ),
+            ));
         }
         if check.version.is_none() {
-            return l
-                .text("No public release available.", "公開リリースはありません。")
-                .into();
+            return Some((
+                Notice::Information,
+                l.text("No public release available.", "公開リリースはありません。")
+                    .into(),
+            ));
         }
-        l.text("Up to date", "最新バージョンです").into()
+        Some((
+            Notice::Success,
+            l.text("Up to date", "最新バージョンです").into(),
+        ))
     }
 }
 
@@ -140,10 +168,7 @@ pub(super) fn fetch(dir: &Path) -> Result<Check, CheckError> {
         Err(ureq::Error::StatusCode(404)) => None,
         Err(_) => return Err(CheckError::Network),
     };
-    let check = Check {
-        checked_at: SystemTime::now(),
-        version,
-    };
+    let check = Check::new(version);
     let _ = write_json(&dir.join("release-check.json"), &check);
     Ok(check)
 }

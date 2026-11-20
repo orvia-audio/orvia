@@ -43,15 +43,17 @@ def test_binary():
 def capture(executable, directory, scene, language):
     env = dict(os.environ, ORVIA_SNAPSHOT_SCENE=scene, ORVIA_SNAPSHOT_LANGUAGE=language,
                ORVIA_SNAPSHOT_DIR=str(directory), FONTCONFIG_FILE=str(HERE / "fonts.conf"),
-               XDG_DATA_HOME=str(directory), XDG_SESSION_TYPE="x11", LANG="C.UTF-8",
+               XDG_DATA_HOME=str(directory), XDG_RUNTIME_DIR=str(directory), XDG_SESSION_TYPE="x11", LANG="C.UTF-8",
                LC_ALL="C.UTF-8")
     env.pop("WAYLAND_DISPLAY", None)
+    env.pop("ZED_HEADLESS", None)
     process = subprocess.Popen([executable, "--ignored", "--exact", "snapshots::render_window",
                                 "--nocapture"], cwd=directory, env=env)
     try:
+        image = None
         previous = None
         stable_since = None
-        deadline = time.monotonic() + 25
+        deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             if process.poll() is not None:
                 raise RuntimeError(f"{scene}: window exited with status {process.returncode}")
@@ -76,7 +78,11 @@ def capture(executable, directory, scene, language):
                         previous = image
                         stable_since = time.monotonic()
             time.sleep(0.1)
-        raise RuntimeError(f"{scene}: window did not settle")
+        # Preserve the display and window tree if the runner cannot capture a settled frame.
+        save(ImageGrab.grab(xdisplay=env["DISPLAY"]), OUTPUT / "diagnostics" / f"{scene}.png")
+        subprocess.run(["xwininfo", "-root", "-tree"], check=False)
+        detail = "no visible window" if image is None else f"last frame extrema: {image.getextrema()}"
+        raise RuntimeError(f"{scene}: window did not settle ({detail})")
     finally:
         process.terminate()
         process.wait(timeout=10)

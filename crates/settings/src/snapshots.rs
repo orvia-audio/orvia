@@ -15,6 +15,7 @@ fn render_window() {
         _ => panic!("unsupported snapshot language"),
     };
     let dir = PathBuf::from(std::env::var_os("ORVIA_SNAPSHOT_DIR").expect("missing fixture path"));
+    eprintln!("Creating snapshot window for {scene}");
     Application::new().with_assets(icons::Icons).run(move |cx| {
         let height = if scene == "mixer-full" { 900. } else { 610. };
         let bounds = Bounds::centered(None, size(px(830.), px(height)), cx);
@@ -39,6 +40,7 @@ fn render_window() {
         )
         .expect("open the snapshot window");
         cx.activate(true);
+        eprintln!("Snapshot window opened");
     });
 }
 

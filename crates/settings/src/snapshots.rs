@@ -178,7 +178,7 @@ fn populate(panel: &mut Panel, scene: &str, language: Language) {
                 "adjust-room" => AdjustmentScreen::Room,
                 "adjust-measuring" => AdjustmentScreen::Phrase(1, ReadingCue::Measuring),
                 "adjust-read" => AdjustmentScreen::Phrase(1, ReadingCue::Read),
-                "adjust-recording" => AdjustmentScreen::Phrase(2, ReadingCue::Recording),
+                "adjust-recording" => AdjustmentScreen::Phrase(2, ReadingCue::Read),
                 "adjust-analyzing" => AdjustmentScreen::Analyzing,
                 "adjust-opening" => AdjustmentScreen::Preview(None),
                 "adjust-preview" => AdjustmentScreen::Preview(Some(ReadingCue::Read)),

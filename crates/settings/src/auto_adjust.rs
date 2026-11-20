@@ -20,7 +20,6 @@ pub(super) enum Stage {
         reader: reading::Reader,
     },
     Analyzing(Receiver<Result<Recommendation, SampleError>>),
-    PreviewReady(Recommendation),
     Auditioning {
         result: Recommendation,
         trial: Trial,
@@ -161,14 +160,16 @@ impl Stage {
                 mut reader,
             } => {
                 let Some(mut recording) = recording else {
+                    let mic = Recording::start_microphone(settings.input.as_deref())
+                        .map_err(|e| e.to_string())?;
                     return Ok(Self::Phrase {
                         room,
                         first,
-                        recording: None,
+                        recording: Some(mic),
                         reader,
                     });
                 };
-                if !reader.listen(&mut recording, l, cx)? {
+                if !reader.listen(&mut recording, l)? {
                     return Ok(Self::Phrase {
                         room,
                         first,
@@ -195,7 +196,17 @@ impl Stage {
                 Ok(Self::Analyzing(rx))
             }
             Self::Analyzing(ref rx) => match rx.try_recv() {
-                Ok(Ok(result)) => Ok(Self::PreviewReady(result)),
+                Ok(Ok(result)) => {
+                    let trial = Trial::start(&panel.dir, settings, result.limit_db)
+                        .map_err(|e| e.to_string())?;
+                    Ok(Self::Auditioning {
+                        result,
+                        trial,
+                        recording: None,
+                        reader: Default::default(),
+                        ending: None,
+                    })
+                }
                 Ok(Err(e)) => Err(sample_error(e, l)),
                 Err(TryRecvError::Empty) => Ok(self),
                 Err(TryRecvError::Disconnected) => Err(l
@@ -205,7 +216,6 @@ impl Stage {
                     )
                     .into()),
             },
-            Self::PreviewReady(_) => Ok(self),
             Self::Auditioning {
                 result,
                 mut trial,
@@ -235,7 +245,7 @@ impl Stage {
                                     since: Instant::now(),
                                 });
                             }
-                        } else if reader.listen(&mut microphone, l, cx)? {
+                        } else if reader.listen(&mut microphone, l)? {
                             ending = Some(Instant::now());
                         }
                         Some(Box::new((microphone, receiver)))
@@ -356,45 +366,6 @@ impl Panel {
             source: id,
             stage,
         });
-    }
-
-    pub(super) fn ready_to_read(&self) -> bool {
-        self.test.adjust.as_ref().is_some_and(|adjust| {
-            matches!(
-                &adjust.stage,
-                Stage::Phrase {
-                    recording: None,
-                    ..
-                } | Stage::PreviewReady(_)
-            )
-        })
-    }
-
-    pub(super) fn begin_reading(&mut self) {
-        let Some(adjust) = &mut self.test.adjust else {
-            return;
-        };
-        match &mut adjust.stage {
-            Stage::Phrase { recording, .. } if recording.is_none() => {
-                match Recording::start_microphone(self.prefs.input.as_deref()) {
-                    Ok(mic) => *recording = Some(mic),
-                    Err(e) => adjust.stage = Stage::Failed(e.to_string()),
-                }
-            }
-            Stage::PreviewReady(result) => {
-                adjust.stage = match Trial::start(&self.dir, &adjust.settings, result.limit_db) {
-                    Ok(trial) => Stage::Auditioning {
-                        result: *result,
-                        trial,
-                        recording: None,
-                        reader: Default::default(),
-                        ending: None,
-                    },
-                    Err(e) => Stage::Failed(e.to_string()),
-                };
-            }
-            _ => {}
-        }
     }
 
     pub(super) fn poll_adjustment(&mut self, cx: &mut Context<Self>) {

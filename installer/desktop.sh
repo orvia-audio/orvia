@@ -8,7 +8,7 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p dist
 cargo build --workspace --locked --release --message-format=json-render-diagnostics > "$work/build.json"
 cargo-about generate --locked --target "$host" -o "$work/dependencies" installer/notices.hbs
-cat LICENSE installer/DeepFilterNet-NOTICE.txt assets/tabler/LICENSE assets/speech/LICENSE "$work/dependencies" > "$work/THIRD-PARTY-NOTICES.txt"
+cat LICENSE installer/DeepFilterNet-NOTICE.txt assets/tabler/LICENSE "$work/dependencies" > "$work/THIRD-PARTY-NOTICES.txt"
 
 case "$host" in
     *-apple-darwin)

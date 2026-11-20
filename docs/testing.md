@@ -1,6 +1,6 @@
 # Build and verify Orvia
 
-Use Rust 1.93.1 and CMake for the bundled CPU speech recognizer. Build both executables with `cargo build --workspace --locked` and launch `target/debug/orvia` (`orvia.exe` on Windows). The mixer starts the engine beside it.
+Use Rust 1.93.1. Build both executables with `cargo build --workspace --locked` and launch `target/debug/orvia` (`orvia.exe` on Windows). The mixer starts the engine beside it.
 
 | Target | Build requirements | Package |
 | --- | --- | --- |
@@ -12,13 +12,13 @@ Find native packages in `dist/`. The macOS app is ad-hoc signed. If Gatekeeper b
 
 ## Audio routing checks
 
-Under **Mixer → DeepFilterNet3**, choose **Auto adjust**. Stay quiet for the room sample. Press **Start reading** when ready and count aloud from one to five at your usual distance. Repeat for a second measurement. Orvia recognizes the numbers in order locally in English or Japanese and waits through pauses. For the final reading it temporarily auditions the suggested limit, records the receiving endpoint, restores the saved limit and plays what the virtual microphone received. Choose **Apply** to keep the suggestion.
+Under **Mixer → DeepFilterNet3**, choose **Auto adjust**. Stay quiet for the room sample. When the numbers appear, say a few words at your usual distance. Each take ends after the sound returns near room level for 1.5 seconds. Repeat at the next prompt. For the final reading it temporarily auditions the suggested limit, records the receiving endpoint, restores the saved limit and plays what the virtual microphone received. Choose **Apply** to keep the suggestion.
 
 The suggestion aims for 9 dB of room noise reduction while keeping the first 150 ms of each phrase within 6 dB of the original in active 50 ms windows. The audition recording stays in memory for this session.
 
 The headphone monitor listens to the receiving side of the selected virtual cable. If matching is ambiguous, set **Devices → Virtual microphone recording endpoint**.
 
-Open **Mic test**, choose the same virtual microphone as your receiving app, and select your headphones. Click **Record** and count from one to five to finish automatically, or stop manually when testing free speech. Click the same button to play the recording. Choose **Retake** to replace it.
+Open **Mic test**, choose the same virtual microphone as your receiving app, and select your headphones. Click **Record** and start speaking when the numbers appear. You can stop speaking at any number or use your own words. Click the same button to play the recording. Choose **Retake** to replace it.
 
 To test an older installation, run the newer mixer with `--mic-test`. This opens the recorder and shows the running engine version. The latest take is saved as `mic-test/recording.wav` in Orvia's user data directory. To compare across updates, copy that file before retaking.
 

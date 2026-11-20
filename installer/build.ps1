@@ -42,7 +42,6 @@ try {
     Run cargo-about @('generate','--locked','-o',"$work/dependencies.txt","$PSScriptRoot/notices.hbs")
     $notices = @("Orvia $version", (Get-Content LICENSE -Raw),
         (Get-Content "$PSScriptRoot/DeepFilterNet-NOTICE.txt" -Raw -Encoding UTF8),
-        'Whisper multilingual tiny model', (Get-Content "$root/assets/speech/LICENSE" -Raw -Encoding UTF8),
         'Tabler Icons', (Get-Content "$root/assets/tabler/LICENSE" -Raw -Encoding UTF8),
         'Microsoft Visual C++ Runtime, Copyright Microsoft Corporation. Distributed under the Visual Studio redistribution terms.',
         (Get-Content "$work/dependencies.txt" -Raw -Encoding UTF8))

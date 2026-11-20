@@ -1,127 +1,52 @@
-//! Local recognition of the spoken count during a microphone check.
-use super::*;
-use crate::transcription::transcribe;
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+//! End a microphone check when the waveform settles after an utterance.
+use std::time::{Duration, Instant};
 
-/// Last number in the spoken microphone check.
-pub(super) const LAST_NUMBER: usize = 5;
+use orvia_core::Language;
+use orvia_engine::mic_test::Recording;
 
-fn japanese(l: Language) -> bool {
-    l.text("en", "ja") == "ja"
-}
+const BASELINE_BLOCKS: usize = 15;
+const ONSET_BLOCKS: usize = 4;
+const RELEASE_BLOCKS: usize = 75;
 
-/// Recognize whole tokens, including a group of consecutive digits or Japanese number words.
-/// An overlapping transcription can repeat earlier numbers before it advances the count.
-fn advance(text: &str, ja: bool, mut progress: usize) -> usize {
-    let words: [&[&str]; LAST_NUMBER] = if ja {
-        [
-            &["いち", "イチ", "一", "１", "1"],
-            &["に", "ニ", "二", "２", "2"],
-            &["さん", "サン", "三", "３", "3"],
-            &["よん", "ヨン", "し", "シ", "四", "４", "4"],
-            &["ご", "ゴ", "五", "５", "5"],
-        ]
-    } else {
-        [
-            &["one", "1"],
-            &["two", "2"],
-            &["three", "3"],
-            &["four", "4"],
-            &["five", "5"],
-        ]
-    };
-    for mut token in text.to_lowercase().split(|c: char| !c.is_alphanumeric()) {
-        let mut first = 0;
-        let mut last = 0;
-        while !token.is_empty() {
-            let Some((number, rest)) = words.iter().enumerate().find_map(|(index, forms)| {
-                forms
-                    .iter()
-                    .find_map(|form| token.strip_prefix(form).map(|rest| (index + 1, rest)))
-            }) else {
-                break;
-            };
-            if first == 0 {
-                first = number;
-            } else if number != last + 1 {
-                break;
-            }
-            last = number;
-            token = rest;
-        }
-        if token.is_empty() && first <= progress + 1 {
-            progress = progress.max(last);
-        }
-    }
-    progress
-}
-
+/// The recording cue follows a 300 ms room sample. Once speech starts, wait for
+/// 1.5 seconds near the measured noise floor before completing the take.
 #[derive(Default)]
 pub(super) struct Reader {
-    progress: usize,
-    recognized: std::ops::Range<usize>,
-    decoding: std::ops::Range<usize>,
-    pending: Option<Receiver<Result<String, String>>>,
     checked: usize,
-    last_sound: usize,
-    submitted: usize,
-    last_attempt: Option<Instant>,
     last_data: Option<Instant>,
-    final_decode: bool,
+    baseline: [f32; BASELINE_BLOCKS],
+    measured: usize,
+    floor: f32,
+    onset: usize,
+    quiet: usize,
+    resuming: usize,
+    speaking: bool,
 }
 
 impl Reader {
-    /// Highest consecutively recognized number in this take, or zero before speech.
-    pub(super) fn progress(&self) -> usize {
-        self.progress
+    /// Whether the microphone has measured the room and the user can start speaking.
+    pub(super) fn ready(&self) -> bool {
+        self.measured == BASELINE_BLOCKS
     }
 
+    /// Whether this take has contained a sustained rise above the room level.
+    pub(super) fn heard_voice(&self) -> bool {
+        self.speaking
+    }
+
+    /// Process newly captured audio and report completion or a stalled device.
     pub(super) fn listen(
         &mut self,
-        recording: &mut orvia_engine::mic_test::Recording,
+        recording: &mut Recording,
         language: Language,
-        cx: &mut Context<Panel>,
     ) -> Result<bool, String> {
         let rate = recording.rate();
         let frames = recording.collect().map_err(|e| e.to_string())?;
-        self.poll(frames, rate, language, cx)
-    }
-
-    /// Only recognized words advance the guide. A pause triggers a decoding attempt.
-    pub(super) fn poll(
-        &mut self,
-        frames: &[[f32; 2]],
-        rate: u32,
-        language: Language,
-        cx: &mut Context<Panel>,
-    ) -> Result<bool, String> {
-        let ja = japanese(language);
-        if let Some(rx) = &self.pending {
-            match rx.try_recv() {
-                Ok(result) => {
-                    let text = result?;
-                    if !text.is_empty() {
-                        let progress = advance(&text, ja, self.progress);
-                        if progress > self.progress {
-                            self.progress = progress;
-                            self.recognized = self.decoding.clone();
-                        }
-                    }
-                    self.pending = None;
-                }
-                Err(TryRecvError::Disconnected) => return Err("Speech recognition stopped".into()),
-                Err(TryRecvError::Empty) => {}
-            }
-        }
-        if self.progress == LAST_NUMBER {
-            return Ok(true);
-        }
         let step = (rate / 50) as usize;
         let now = Instant::now();
-        if self.checked + step <= frames.len() {
+        if frames.len() - self.checked >= step {
             self.last_data = Some(now);
-        }
-        if now.duration_since(*self.last_data.get_or_insert(now)) > Duration::from_secs(4) {
+        } else if now.duration_since(*self.last_data.get_or_insert(now)) > Duration::from_secs(4) {
             return Err(language
                 .text(
                     "Microphone disconnected or stalled.",
@@ -129,104 +54,108 @@ impl Reader {
                 )
                 .into());
         }
-        while self.checked + step <= frames.len() {
-            let block = &frames[self.checked..self.checked + step];
+        Ok(self.process(frames, step))
+    }
+
+    fn process(&mut self, frames: &[[f32; 2]], step: usize) -> bool {
+        // Arming takes a UI tick so previously buffered audio cannot finish a take before the cue appears.
+        let armed = self.ready();
+        for block in frames[self.checked..].chunks_exact(step) {
             self.checked += step;
-            if block.iter().map(|f| f[0] * f[0] + f[1] * f[1]).sum::<f32>() > 2e-8 * step as f32 {
-                self.last_sound = self.checked;
+            // Use the louder channel so a microphone plugged into either side is audible.
+            let mut power = [0.0_f32; 2];
+            for frame in block {
+                for ch in 0..2 {
+                    power[ch] += frame[ch] * frame[ch];
+                }
+            }
+            if self.observe(power[0].max(power[1]) / step as f32, armed) {
+                return true;
             }
         }
-        let pause = frames.len().saturating_sub(self.last_sound) >= (rate / 3) as usize;
-        if self.pending.is_some()
-            || (self.last_sound <= self.submitted && (!pause || self.final_decode))
-            || self.last_sound < (rate / 3) as usize
-        {
-            return Ok(false);
-        }
-        let interval = if pause { 0.5 } else { 2.5 };
-        if self
-            .last_attempt
-            .is_some_and(|t| t.elapsed().as_secs_f32() < interval)
-            || (!pause && frames.len() < rate as usize * 3)
-        {
-            return Ok(false);
-        }
-        let end = frames.len().min(self.last_sound + rate as usize / 2);
-        self.decoding = end.saturating_sub(rate as usize * 16)..end;
-        let mut mono = Vec::new();
-        // Keep the previously recognized numbers as context after a long pause.
-        if !self.recognized.is_empty() && self.recognized.end <= self.decoding.start {
-            let prefix = &frames[self.recognized.clone()];
-            append_mono(
-                &mut mono,
-                &prefix[prefix.len().saturating_sub(rate as usize * 5)..],
-                rate,
-            );
-        }
-        append_mono(&mut mono, &frames[self.decoding.clone()], rate);
-        self.final_decode = pause;
-        self.submitted = self.last_sound;
-        self.last_attempt = Some(Instant::now());
-        let (tx, rx) = mpsc::channel();
-        self.pending = Some(rx);
-        cx.background_executor()
-            .spawn(async move {
-                let _ = tx.send(transcribe(mono, ja));
-            })
-            .detach();
-        Ok(false)
+        false
     }
-}
 
-/// Average stereo source frames into the 16 kHz mono samples expected by Whisper.
-fn append_mono(mono: &mut Vec<f32>, input: &[[f32; 2]], rate: u32) {
-    let rate = rate as usize;
-    let count = input.len() * 16_000 / rate;
-    mono.reserve(count);
-    for n in 0..count {
-        let first = n * rate / 16_000;
-        let last = ((n + 1) * rate / 16_000).max(first + 1);
-        let part = &input[first..last];
-        mono.push(part.iter().map(|s| (s[0] + s[1]) * 0.5).sum::<f32>() / part.len() as f32);
+    /// Observe mean-square power in one 20 ms block.
+    fn observe(&mut self, power: f32, armed: bool) -> bool {
+        if !self.ready() {
+            self.baseline[self.measured] = power;
+            self.measured += 1;
+            if self.ready() {
+                self.baseline.sort_unstable_by(f32::total_cmp);
+                // Use the upper part of the room sample to allow ordinary noise fluctuations.
+                self.floor = self.baseline[BASELINE_BLOCKS * 4 / 5];
+            }
+        } else if armed && !self.speaking {
+            if power > (self.floor * 6.3).max(1e-8) {
+                self.onset += 1;
+                self.speaking = self.onset >= ONSET_BLOCKS;
+            } else {
+                self.onset = 0;
+                self.floor += 0.04 * (power - self.floor);
+            }
+        } else if self.speaking {
+            if power <= (self.floor * 4.0).max(4e-9) {
+                self.quiet += 1;
+                self.resuming = 0;
+            } else {
+                // A single click during the trailing silence should not restart the timer.
+                self.resuming += 1;
+                if self.resuming >= 3 {
+                    self.quiet = 0;
+                }
+            }
+        }
+        self.quiet >= RELEASE_BLOCKS
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn both_languages_accept_spoken_and_printed_numbers() {
-        for text in [
-            "いち、に、さん、よん、ご",
-            "いちにさんしご",
-            "１二三４五",
-            "1, 2, 3, 4, 5",
-        ] {
-            assert_eq!(advance(text, true, 0), LAST_NUMBER, "{text}");
-        }
-        assert_eq!(
-            advance("One, TWO, three, four, FIVE.", false, 0),
-            LAST_NUMBER
-        );
-        assert_eq!(advance("12345", false, 3), LAST_NUMBER);
+
+    fn play(reader: &mut Reader, power: f32, blocks: usize) -> bool {
+        (0..blocks).any(|_| reader.observe(power, reader.ready()))
     }
 
     #[test]
-    fn pauses_repetitions_and_out_of_order_numbers_do_not_finish_early() {
-        let four = advance("one two three four", false, 0);
-        assert_eq!(four, 4);
-        assert_eq!(advance("", false, four), four);
-        assert_eq!(advance("4 3 4 4", false, four), four);
-        assert_eq!(advance("one two four five", false, 0), 2);
-        assert_eq!(advance("Three, four, five.", false, 2), LAST_NUMBER);
-        assert_eq!(advance("五", true, 0), 0);
-        assert_eq!(advance("四 五", true, 3), LAST_NUMBER);
+    fn room_sound_and_short_clicks_do_not_start_the_take() {
+        let mut reader = Reader::default();
+        assert!(!play(&mut reader, 1e-6, 600));
+        assert!(reader.ready());
+        assert!(!play(&mut reader, 0.02, 2));
+        assert!(!play(&mut reader, 1.2e-6, 100));
+        assert!(!reader.heard_voice());
     }
 
     #[test]
-    fn embedded_numbers_and_unrelated_words_do_not_advance() {
-        assert_eq!(advance("15 45th fifty-fivefold", false, 4), 4);
-        assert_eq!(advance("ごはん 五十 15", true, 4), 4);
-        assert_eq!(advance("にわ", true, 1), 1);
+    fn a_quiet_utterance_can_finish_without_reading_the_full_count() {
+        let mut reader = Reader::default();
+        assert!(!play(&mut reader, 1e-8, BASELINE_BLOCKS));
+        assert!(!play(&mut reader, 1e-6, 10));
+        assert!(reader.heard_voice());
+        assert!(!play(&mut reader, 1e-8, RELEASE_BLOCKS - 1));
+        assert!(play(&mut reader, 1e-8, 1));
+    }
+
+    #[test]
+    fn a_click_during_trailing_silence_does_not_postpone_the_end() {
+        let mut reader = Reader::default();
+        play(&mut reader, 1e-6, BASELINE_BLOCKS);
+        play(&mut reader, 1e-3, 12);
+        assert!(!play(&mut reader, 1e-6, 60));
+        assert!(!play(&mut reader, 0.04, 1));
+        assert!(play(&mut reader, 1e-6, 15));
+    }
+
+    #[test]
+    fn a_short_pause_preserves_the_take_and_the_ending_is_relative_to_the_room() {
+        let mut reader = Reader::default();
+        assert!(!play(&mut reader, 1e-4, BASELINE_BLOCKS));
+        assert!(!play(&mut reader, 1e-2, 10));
+        assert!(!play(&mut reader, 1e-4, 50));
+        assert!(!play(&mut reader, 1e-2, 10));
+        assert!(!play(&mut reader, 1.5e-4, RELEASE_BLOCKS - 1));
+        assert!(play(&mut reader, 1.5e-4, 1));
     }
 }

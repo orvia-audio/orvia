@@ -43,27 +43,28 @@ fn note(s: impl Into<SharedString>) -> gpui::Div {
     div().text_sm().text_color(rgb(MUTED)).child(s.into())
 }
 
-/// Show the complete count at a fixed position and mark numbers heard in this take.
-fn counting_prompt(l: Language, progress: usize) -> gpui::Div {
-    stack()
-        .gap_1()
-        .child(note(l.text(
-            "Count aloud from 1 to 5",
-            "1から5まで声に出して数えてください",
-        )))
+/// Reveal the optional count only after the recording endpoint is ready for speech.
+fn speech_prompt(l: Language, reader: &reading::Reader) -> gpui::Div {
+    let body = stack().h(px(88.)).gap_1();
+    if !reader.ready() {
+        return body.child(note(l.text("Measuring room level…", "周囲の音量を測定中…")));
+    }
+    let cue = if reader.heard_voice() {
+        l.text("Recording", "録音中")
+    } else {
+        l.text("Speak now", "話し始めてください")
+    };
+    body.child(heading(cue, "microphone.svg", TERRACOTTA))
         .child(
-            row()
-                .gap_4()
-                .children((1..=reading::LAST_NUMBER).map(|number| {
-                    div()
-                        .text_xl()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .when(number <= progress, |d| {
-                            d.text_color(rgb(TERRACOTTA)).underline()
-                        })
-                        .child(number.to_string())
-                })),
+            div()
+                .text_xl()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child("1　2　3　4　5"),
         )
+        .child(note(l.text(
+            "Count or say a few words. Recording stops when you finish.",
+            "数字でも、ひと言でも。声が途切れると録音が終わります。",
+        )))
 }
 
 impl Panel {
@@ -84,7 +85,7 @@ impl Panel {
             };
         let leading = match &control {
             Control::AutoAdjust => Some("adjustments-horizontal.svg"),
-            Control::BeginReading | Control::Test(TestAction::Record) => Some("microphone.svg"),
+            Control::Test(TestAction::Record) => Some("microphone.svg"),
             Control::Test(TestAction::Play) => Some("player-play.svg"),
             Control::Test(TestAction::FinishRecording | TestAction::StopPlayback) => {
                 Some("player-stop.svg")
@@ -106,8 +107,7 @@ impl Panel {
             _ => None,
         };
         let wide = trigger.is_some();
-        let primary = matches!(control, Control::BeginReading)
-            || matches!(control, Control::Test(action) if action != TestAction::Retake);
+        let primary = matches!(control, Control::Test(action) if action != TestAction::Retake);
         div()
             .id(id.into())
             .flex()
@@ -350,25 +350,17 @@ impl Panel {
                         TERRACOTTA,
                     ))
                     .child(self.picker(Endpoint::TestSpeaker, cx))
-                    .child(counting_prompt(
-                        l,
-                        if recording.is_some() {
-                            self.test.reader.progress()
-                        } else {
-                            0
-                        },
-                    ))
-                    .child(note(match action {
-                        TestAction::FinishRecording => l.text(
-                            "Recording stops after five.",
-                            "5まで数えると録音が止まります。",
-                        ),
-                        TestAction::Record => l.text(
-                            "Press Record to begin.",
-                            "準備ができたら録音を押してください。",
-                        ),
-                        _ => "",
-                    }))
+                    .when(recording.is_some(), |d| {
+                        d.child(speech_prompt(l, &self.test.reader))
+                    })
+                    .when(recording.is_none(), |d| {
+                        d.child(div().h(px(88.)).when(action == TestAction::Record, |d| {
+                            d.child(note(l.text(
+                                "Press Record to begin.",
+                                "準備ができたら録音を押してください。",
+                            )))
+                        }))
+                    })
                     .child(
                         row()
                             .border_t_1()
@@ -396,37 +388,6 @@ impl Panel {
             )
     }
 
-    fn reading_prompt(
-        &self,
-        active: bool,
-        reader: &reading::Reader,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let l = self.prefs.language;
-        let mut body = stack().child(counting_prompt(l, reader.progress()));
-        if active {
-            body = body
-                .child(heading(
-                    l.text("Recording", "録音中"),
-                    "microphone.svg",
-                    TERRACOTTA,
-                ))
-                .child(note(l.text(
-                    "Recording stops after five.",
-                    "5まで数えると録音が止まります。",
-                )));
-        } else {
-            body = body.child(row().child(self.button(
-                "begin-reading",
-                l.text("Start reading", "録音を始める"),
-                true,
-                Control::BeginReading,
-                cx,
-            )));
-        }
-        body
-    }
-
     fn adjustment_page(
         &self,
         adjust: &auto_adjust::AutoAdjust,
@@ -449,37 +410,24 @@ impl Panel {
                         "環境音を測っています。少し静かにしてください",
                     )))
                     .child(note(l.text(
-                        "Next, count twice at your usual pace.",
-                        "このあと、普段の速さで2回数えます。",
-                    )))
-                    .child(counting_prompt(l, 0));
+                        "Speak at your usual distance when the numbers appear.",
+                        "数字が表示されたら、普段の距離で話してください。",
+                    )));
             }
-            Stage::Phrase {
-                first,
-                recording,
-                reader,
-                ..
-            } => {
+            Stage::Phrase { first, reader, .. } => {
                 panel = panel
                     .child(note(format!(
                         "{} {} / 2",
                         l.text("Microphone reading", "マイクで読み上げ"),
                         if first.is_some() { 2 } else { 1 }
                     )))
-                    .child(self.reading_prompt(recording.is_some(), reader, cx));
+                    .child(speech_prompt(l, reader));
             }
             Stage::Analyzing(_) => {
                 panel = panel.child(note(l.text(
                     "Finding a suppression limit…",
                     "声の出だしと環境音を解析中…",
                 )))
-            }
-            Stage::PreviewReady(_) => {
-                panel = panel
-                    .child(note(
-                        l.text("Virtual microphone preview", "仮想マイクのプレビュー"),
-                    ))
-                    .child(self.reading_prompt(false, &Default::default(), cx));
             }
             Stage::Auditioning {
                 recording, reader, ..
@@ -488,9 +436,9 @@ impl Panel {
                     l.text("Virtual microphone preview", "仮想マイクのプレビュー"),
                 ));
                 if recording.is_some() {
-                    panel = panel.child(self.reading_prompt(true, reader, cx));
+                    panel = panel.child(speech_prompt(l, reader));
                 } else {
-                    panel = panel.child(counting_prompt(l, 0)).child(note(l.text(
+                    panel = panel.child(note(l.text(
                         "Opening the recording endpoint…",
                         "仮想マイクの録音側を準備中…",
                     )));

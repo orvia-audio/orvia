@@ -193,7 +193,7 @@ impl Panel {
                     )
                     .into();
             } else {
-                match self.test.reader.listen(recording, self.prefs.language, cx) {
+                match self.test.reader.listen(recording, self.prefs.language) {
                     Ok(true) => self.finish_test_recording(),
                     Ok(false) => {}
                     Err(e) => {

@@ -114,20 +114,16 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     def playing():
         return any(s["sink"] == headphones for s in pulse_devices("sink-inputs"))
 
-    def synthesize_count(words):
-        path = Path(tmp, "count.wav")
-        run("espeak-ng", "-v", "en-us", "-s", "148", "-w", str(path), words)
-        with wave.open(str(path)) as sound:
-            assert sound.getsampwidth() == 2 and sound.getnchannels() == 1
-            return sound.getframerate(), array.array("h", sound.readframes(sound.getnframes()))
+    speech_path = Path(tmp, "utterance.wav")
+    run("espeak-ng", "-v", "en-us", "-s", "148", "-w", str(speech_path), "One, two.")
+    with wave.open(str(speech_path)) as sound:
+        assert sound.getsampwidth() == 2 and sound.getnchannels() == 1
+        speech_rate = sound.getframerate()
+        utterance = array.array("h", sound.readframes(sound.getnframes()))
 
-    speech_rate, first_numbers = synthesize_count("One, two.")
-    tail_rate, last_numbers = synthesize_count("Three, four, five.")
-    assert speech_rate == tail_rate
-
-    def read_count(sink, samples=first_numbers + last_numbers):
-        # Lower the voice to exercise normalization and keep the cable-only marker distinct.
-        pcm = array.array("h", (s // 32 for s in samples))
+    def speak(sink):
+        # Use a quiet utterance and keep the cable-only marker distinct.
+        pcm = array.array("h", (s // 32 for s in utterance))
         subprocess.run(["pacat", "-d", sink, "--latency-msec=20", "--raw", "--format=s16le",
                         "--channels=1", f"--rate={speech_rate}"], env=env, input=pcm.tobytes(), check=True)
     test_panel = start("orvia", "--mic-test")
@@ -149,11 +145,10 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     # Retake is a separate control. It returns focus to the primary button.
     run("xdotool", "key", "--delay", "250", "Tab", "Return")
     wait_for(recording, "Retake did not start a new recording")
-    read_count("orvia_output", first_numbers)
     time.sleep(11)
-    assert recording() and take.read_bytes() == first, "A pause after two must not end the take"
-    read_count("orvia_output", last_numbers)
-    wait_for(lambda: take.stat().st_size > len(first), "Counting to five did not finish the retake", timeout=45)
+    assert recording() and take.read_bytes() == first, "Silence before speech must not end a take"
+    speak("orvia_output")
+    wait_for(lambda: take.stat().st_size > len(first), "A short utterance did not finish after silence", timeout=15)
     second = take.read_bytes()
     run("xdotool", "key", "Return")
     wait_for(playing, "The primary button did not play the automatically stopped retake")
@@ -216,25 +211,17 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     wait_for(lambda: mic_count() >= 2, "Auto adjust did not start room capture")
     wait_for(lambda: mic_count() == 1, "Room capture did not finish")
     for phrase_number in range(2):
-        time.sleep(0.6)
-        run("xdotool", "key", "Return")
-        wait_for(lambda: mic_count() >= 2, "The reading button did not open the microphone")
-        read_count("test_input")
-        wait_for(lambda: mic_count() == 1, "The count was not recognized", timeout=45)
-    # Wait for analysis. The reading button only becomes active when the suggestion is ready.
-    def start_preview():
-        if recording():
-            return True
-        run("xdotool", "key", "Return")
-        time.sleep(0.4)
-        return recording()
-    wait_for(start_preview, "The suggested mix was not recorded on the virtual microphone", timeout=45)
+        wait_for(lambda: mic_count() >= 2, "The next voice prompt did not open the microphone")
+        time.sleep(0.9)  # Let the 300 ms room sample finish and the cue render.
+        speak("test_input")
+        wait_for(lambda: mic_count() == 1, "The microphone did not finish after silence", timeout=15)
+    wait_for(recording, "The suggested mix was not recorded on the virtual microphone", timeout=45)
     trial = state / "suppression-audition.json"
     assert trial.is_file()
     assert json.loads((state / "settings.json").read_text())["deep_filter_limit_db"] == 12
     play_pcm("orvia_output", marker)
     def hear_preview():
-        read_count("test_input")
+        speak("test_input")
         wait_for(playing, "The virtual microphone take did not play automatically", timeout=45)
         wait_for(lambda: not playing(), "The preview did not finish", timeout=45)
     preview = record_headphones(hear_preview)

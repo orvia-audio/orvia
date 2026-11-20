@@ -56,7 +56,6 @@ enum Control {
     Test(TestAction),
     AutoAdjust,
     ApplyAdjustment,
-    BeginReading,
     RestartEngine,
     DismissError,
     Slide(Slider, u16),
@@ -167,7 +166,6 @@ impl Panel {
                             .is_ok_and(|age| age < Duration::from_secs(2))
                     });
                 let prefs = Settings::load(&poll_dir.join("settings.json")).ok();
-                let mut reading_focus = None;
                 if this
                     .update(cx, |p, cx| {
                         p.status = status.or_else(|| {
@@ -182,11 +180,7 @@ impl Panel {
                             p.prefs = prefs;
                         }
                         if p.page == Page::MicTest {
-                            let ready = p.ready_to_read();
                             p.poll_mic_test(cx);
-                            if !ready && p.ready_to_read() {
-                                reading_focus = Some(p.test_primary_focus.clone());
-                            }
                         }
                         if !p.test_only && p.prefs.check_updates_automatically && p.updates.due() {
                             p.check_for_updates(cx);
@@ -201,9 +195,6 @@ impl Panel {
                     .is_err()
                 {
                     break;
-                }
-                if let Some(focus) = reading_focus {
-                    let _ = handle.update(cx, |_, w, _| w.focus(&focus));
                 }
                 Timer::after(Duration::from_millis(250)).await;
             }
@@ -318,7 +309,6 @@ impl Panel {
                 self.test.speaker = id;
                 self.choosing = None;
             }
-            Control::BeginReading => self.begin_reading(),
             Control::AutoAdjust => self.start_adjustment(),
             Control::ApplyAdjustment => self.apply_adjustment(cx),
             Control::Test(action) => self.run_test_action(action),
@@ -412,7 +402,6 @@ mod engine_log;
 mod icons;
 mod microphone_test;
 mod reading;
-mod transcription;
 mod view;
 
 mod updates;

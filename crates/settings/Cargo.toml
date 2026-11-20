@@ -8,7 +8,6 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-whisper-rs = { version = "0.16", default-features = false }
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 rust-embed = { version = "8", features = ["debug-embed"] }
 orvia-core = { path = "../core" }

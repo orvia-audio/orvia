@@ -16,7 +16,7 @@ mod events;
 mod state;
 
 pub use audio::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, SignalHistory};
-pub use events::{ENGINE_LOG, EngineEvent, LogEntry};
+pub use events::{ENGINE_LOG, ENGINE_LOG_TEXT, EngineEvent, LogEntry};
 pub use state::{
     AUDITION_FILE, Audition, EngineStatus, Language, Settings, data_dir, read_json, write_json,
 };

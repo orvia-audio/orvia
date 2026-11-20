@@ -41,7 +41,6 @@ enum Page {
     MicTest,
     Devices,
     Preferences,
-    Log,
 }
 
 #[derive(Clone)]
@@ -57,6 +56,7 @@ enum Control {
     AutoAdjust,
     ApplyAdjustment,
     RestartEngine,
+    OpenLog,
     DismissError,
     DismissUpdate,
     Slide(Slider, u16),
@@ -105,7 +105,6 @@ struct Panel {
     logo: std::sync::Arc<gpui::Image>,
     choosing: Option<Endpoint>,
     status: Option<EngineStatus>,
-    log: engine_log::LogView,
     error: String,
     updates: updates::Updates,
     show_update_feedback: bool,
@@ -177,7 +176,6 @@ impl Panel {
                                     .is_ok_and(|age| age < Duration::from_secs(2))
                             })
                         });
-                        let language = p.prefs.language;
                         if let Some(prefs) = prefs {
                             p.prefs = prefs;
                         }
@@ -187,12 +185,7 @@ impl Panel {
                         if !p.test_only && p.prefs.check_updates_automatically && p.updates.due() {
                             p.check_for_updates(cx);
                         }
-                        if p.page != Page::Log
-                            || p.log.refresh(&poll_dir)
-                            || p.prefs.language != language
-                        {
-                            cx.notify();
-                        }
+                        cx.notify();
                     })
                     .is_err()
                 {
@@ -244,7 +237,6 @@ impl Panel {
             )),
             choosing: None,
             status: None,
-            log: Default::default(),
             error: String::new(),
             installed,
             restarting: false,
@@ -284,9 +276,6 @@ impl Panel {
                 }
                 self.show_update_feedback = false;
                 self.page = page;
-                if page == Page::Log {
-                    self.log.refresh(&self.dir);
-                }
                 self.choosing = None;
             }
             Control::Monitor if self.prefs.monitor.is_none() => {
@@ -360,6 +349,30 @@ impl Panel {
                 self.check_for_updates(cx);
             }
             Control::CheckUpdate => {}
+            Control::OpenLog => {
+                let path = self.dir.join(orvia_core::ENGINE_LOG_TEXT);
+                match fs::File::open(&path) {
+                    Ok(_) => {
+                        self.error.clear();
+                        cx.open_with_system(&path);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                        self.error = self
+                            .prefs
+                            .language
+                            .text("No engine log yet", "エンジンログはまだありません")
+                            .into();
+                    }
+                    Err(e) => {
+                        self.error = format!(
+                            "{} · {e}",
+                            self.prefs
+                                .language
+                                .text("Cannot open the log file", "ログファイルを開けません")
+                        );
+                    }
+                }
+            }
             Control::Releases => cx.open_url(RELEASES),
             change => {
                 let path = self.dir.join("settings.json");
@@ -420,7 +433,6 @@ impl Panel {
 
 mod auto_adjust;
 mod engine_control;
-mod engine_log;
 mod icons;
 mod microphone_test;
 mod reading;

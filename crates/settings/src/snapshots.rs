@@ -1,7 +1,7 @@
 //! Deterministic sessions for the Linux screenshot runner in tests/ui.
 use super::*;
 use crate::view::{AdjustmentScreen, ReadingCue};
-use orvia_core::{EngineEvent, LogEntry, SignalHistory, calibration::Recommendation};
+use orvia_core::{SignalHistory, calibration::Recommendation};
 use orvia_engine::mic_test::Clip;
 
 /// Open the production panel without starting an engine, update check, or microphone stream.
@@ -130,23 +130,6 @@ fn populate(panel: &mut Panel, scene: &str, language: Language) {
             panel.show_update_feedback = true;
             panel.updates.start();
             Page::Preferences
-        }
-        "log" => {
-            panel.log.entries = vec![
-                LogEntry {
-                    timestamp: "10:24:00".into(),
-                    event: EngineEvent::Started(panel.installed.to_string()),
-                },
-                LogEntry {
-                    timestamp: "10:24:01".into(),
-                    event: EngineEvent::Streaming("Studio microphone".into()),
-                },
-                LogEntry {
-                    timestamp: "10:25:00".into(),
-                    event: EngineEvent::Reconnecting,
-                },
-            ];
-            Page::Log
         }
         "mic" | "mic-standalone" => Page::MicTest,
         "mic-recorded" | "mic-playing" | "adjust-ready" => {

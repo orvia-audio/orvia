@@ -1,8 +1,11 @@
-//! Persisted audio engine events shared with the live log viewer.
+//! Structured and plain-text diagnostics for the resident audio engine.
 use serde::{Deserialize, Serialize};
 
 /// Filename of the per-user event history, written by the resident engine.
 pub const ENGINE_LOG: &str = "engine-log.json";
+
+/// Filename of the UTF-8 event history that Preferences opens in the system text viewer.
+pub const ENGINE_LOG_TEXT: &str = "engine-log.txt";
 
 /// One change in engine state. Entries contain device labels and diagnostics.
 #[derive(Clone, Debug, Deserialize, Serialize)]

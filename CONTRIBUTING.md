@@ -23,6 +23,10 @@ xvfb-run -a -s "-screen 0 1280x1024x24 -dpi 96" dbus-run-session -- /usr/bin/pyt
 
 A mismatch saves the actual image, the previous image and a highlighted diff under `target/ui-snapshots/`. CI uploads them as `ui-snapshot-differences`. For an intentional change, append `--update` and review the changed PNGs in [the baseline directory](tests/ui/snapshots). Add a fixture and a capture case when adding a screen.
 
+## Workflow dependencies
+
+After editing an action reference, run `gh actions-lock` and commit the generated lockfile with the workflow. Run `gh actions-lock --verify` to check the pins.
+
 ## Versions
 
 Use `X.Y.Z-snapshot.N` for distributed development builds and tag stable releases as `vX.Y.Z`. Update the workspace version and lockfile together. Increment `CFBundleVersion` in the macOS Info.plist for each distributed build. Within a Windows Installer series, snapshots use their sequence number as the third numeric field and stable uses 65535. Advance the series for the next release.

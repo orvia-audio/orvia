@@ -21,7 +21,7 @@ jobs:
     env:
       RUSTDOCFLAGS: -D warnings
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Select the Rust toolchain
         run: |
           rustup toolchain install 1.93.1 --profile minimal --component clippy,rustfmt
@@ -61,7 +61,7 @@ jobs:
         run: |
           call "%ProgramFiles%\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           powershell -NoProfile -File installer\build.ps1
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: Orvia-${{ steps.distribution.outputs.version }}-windows-x64
           path: |
@@ -78,7 +78,7 @@ jobs:
           powershell -NoProfile -File driver\build.ps1 -TestSign
           if errorlevel 1 exit /b 1
           powershell -NoProfile -File installer\build.ps1 -WithTestDriver
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: Orvia-${{ steps.distribution.outputs.version }}-windows-x64-test
           path: |

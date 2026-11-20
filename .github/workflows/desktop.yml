@@ -26,12 +26,12 @@ jobs:
       MACOSX_DEPLOYMENT_TARGET: "13.0"
       CARGO_INCREMENTAL: "0"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7.0.1
       - name: Select Rust
         run: |
           rustup toolchain install 1.93.1 --profile minimal --component clippy
           rustup override set 1.93.1
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v2.9.3
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -46,7 +46,7 @@ jobs:
         run: xvfb-run -a -s "-screen 0 1280x1024x24 -dpi 96" dbus-run-session -- /usr/bin/python3 tests/ui/snapshots.py
       - name: Upload changed UI snapshots
         if: failure() && runner.os == 'Linux'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ui-snapshot-differences
           path: target/ui-snapshots/
@@ -89,7 +89,7 @@ jobs:
           done
           jq -e '.version and (.message | contains("Choose a virtual output"))' "$state/status.json"
           touch "$state/close-window" "$state/stop-engine-$(cat "$state/engine.lock")"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7.0.2
         with:
           name: Orvia-${{ runner.os }}-${{ runner.arch }}
           path: dist/Orvia-*

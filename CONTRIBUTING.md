@@ -15,6 +15,8 @@ The Linux build resolves `xattr 0.2.3` through GPUI's `zed-async-tar` dependency
 
 ## UI snapshots
 
+Use the [snapshot reviewer](https://gh.s7a.dev/orvia/review/) to step through screens, pin comments and compare two commits. Review progress and comments stay in your browser. Copy or download the Markdown report to share feedback.
+
 Ubuntu 24.04 CI renders each mixer screen in English and Japanese at 96 DPI. The fixtures use synthetic devices, a fixed waveform and a silent recording. Install the Linux dependencies from the desktop workflow and run:
 
 ```sh

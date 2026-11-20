@@ -17,7 +17,8 @@ foreach ($case in @(
     @{ Series = '0.6'; Version = '0.1.2' },
     @{ Series = '0.7'; Version = '0.1.3-snapshot.1' },
     @{ Series = '0.7'; Version = '0.1.3-snapshot.2' },
-    @{ Series = '0.7'; Version = '0.1.3-snapshot.3' }
+    @{ Series = '0.7'; Version = '0.1.3-snapshot.3' },
+    @{ Series = '0.7'; Version = '0.1.3-snapshot.4' }
 )) {
     $current = [version](& "$PSScriptRoot/product-version.ps1" @case)
     if ($current -le $previous) { throw "Upgrade ordering failed for $($case.Version)" }

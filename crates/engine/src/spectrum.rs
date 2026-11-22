@@ -160,7 +160,7 @@ impl Analyzer {
             ..=(Spectrum::MAX_HZ / BIN_HZ).ceil() as usize
         {
             let [left, center, right] = [self.power[k - 1], self.power[k], self.power[k + 1]];
-            if center <= strongest || center <= left || center <= right {
+            if center <= strongest || center < left || center <= right {
                 continue;
             }
             // Interpolate the peak in log power to resolve tones between FFT bins.
@@ -170,10 +170,10 @@ impl Analyzer {
             } else {
                 0.
             };
-            let hz = (k as f32 + offset) * BIN_HZ;
+            let hz = ((k as f32 + offset) * BIN_HZ).round();
             if (Spectrum::MIN_HZ..=Spectrum::MAX_HZ).contains(&hz) {
                 strongest = center;
-                peak_hz = Some(hz.round() as u16);
+                peak_hz = Some(hz as u16);
             }
         }
         Some(Spectrum { bands, peak_hz })
@@ -213,6 +213,21 @@ mod tests {
         for x in [0., 0.8] {
             let s = analyzer.measure(&vec![[x; 2]; WINDOW]).unwrap();
             assert!(s.peak_hz.is_none() && s.bands.iter().all(|&b| b == 0));
+        }
+    }
+
+    #[test]
+    fn detects_tones_at_both_display_limits_and_between_bins() {
+        let mut analyzer = Analyzer::new();
+        for hz in [Spectrum::MIN_HZ, 150.5 * BIN_HZ, Spectrum::MAX_HZ] {
+            let frames: Vec<_> = (0..WINDOW)
+                .map(|i| [(TAU * hz * i as f32 / SAMPLE_RATE as f32).sin(); 2])
+                .collect();
+            let readout = analyzer.measure(&frames).unwrap().peak_hz;
+            assert!(
+                readout.is_some_and(|peak| peak.abs_diff(hz.round() as u16) <= 1),
+                "{hz} Hz: {readout:?}"
+            );
         }
     }
 

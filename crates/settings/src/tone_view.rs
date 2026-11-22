@@ -39,7 +39,7 @@ impl Panel {
                 .child(heading(
                     l.text(
                         "Record the room, then read a few numbers aloud.",
-                        "周囲の音を録ってから、数字を読み上げます。",
+                        "周囲の音を録ったあと、表示された数字を読み上げてください。",
                     ),
                     "microphone.svg",
                     TERRACOTTA,

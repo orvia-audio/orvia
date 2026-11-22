@@ -1,7 +1,7 @@
 //! Guided suppression measurements and auditions on the virtual microphone receiver.
 use super::*;
 use orvia_core::{
-    AUDITION_FILE, Audition,
+    AUDITION_FILE, Audition, AuditionTarget,
     calibration::{Recommendation, SampleError},
     write_json,
 };
@@ -40,13 +40,18 @@ pub(super) enum Stage {
 /// Removing the request restores the live limit. Engine expiry also covers a mixer crash.
 pub(super) struct Trial {
     path: PathBuf,
-    issued: SystemTime,
-    since: Instant,
+    pub(super) issued: SystemTime,
+    pub(super) since: Instant,
     last_refresh: Instant,
+    target: AuditionTarget,
 }
 
 impl Trial {
-    fn start(dir: &Path, settings: &Settings, limit_db: u16) -> io::Result<Self> {
+    pub(super) fn start(
+        dir: &Path,
+        settings: &Settings,
+        target: AuditionTarget,
+    ) -> io::Result<Self> {
         let path = dir.join(AUDITION_FILE);
         let issued = SystemTime::now();
         write_json(
@@ -55,7 +60,7 @@ impl Trial {
                 baseline: settings.clone(),
                 started: issued,
                 refreshed: issued,
-                limit_db,
+                target,
             },
         )?;
         Ok(Self {
@@ -63,9 +68,10 @@ impl Trial {
             issued,
             since: Instant::now(),
             last_refresh: Instant::now(),
+            target,
         })
     }
-    fn keep_alive(&mut self, settings: &Settings, limit_db: u16) -> Result<(), String> {
+    pub(super) fn keep_alive(&mut self, settings: &Settings) -> Result<(), String> {
         if self.last_refresh.elapsed() >= Duration::from_secs(3) {
             write_json(
                 &self.path,
@@ -73,7 +79,7 @@ impl Trial {
                     baseline: settings.clone(),
                     started: self.issued,
                     refreshed: SystemTime::now(),
-                    limit_db,
+                    target: self.target,
                 },
             )
             .map_err(|e| e.to_string())?;
@@ -197,8 +203,14 @@ impl Stage {
             }
             Self::Analyzing(ref rx) => match rx.try_recv() {
                 Ok(Ok(result)) => {
-                    let trial = Trial::start(&panel.dir, settings, result.limit_db)
-                        .map_err(|e| e.to_string())?;
+                    let trial = Trial::start(
+                        &panel.dir,
+                        settings,
+                        AuditionTarget::Suppression {
+                            limit_db: result.limit_db,
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
                     Ok(Self::Auditioning {
                         result,
                         trial,
@@ -223,7 +235,7 @@ impl Stage {
                 mut reader,
                 mut ending,
             } => {
-                trial.keep_alive(settings, result.limit_db)?;
+                trial.keep_alive(settings)?;
                 let acknowledged = panel
                     .status
                     .as_ref()

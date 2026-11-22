@@ -70,6 +70,10 @@ pub struct Settings {
     pub deep_filter_limit_db: u16,
     /// Linear gain as a percentage, limited to 200 at processing time.
     pub gain_percent: u16,
+    /// Stereo high-pass cutoff in Hz. Zero bypasses the filter.
+    pub low_cut_hz: u16,
+    /// Stereo-linked compressor ratio, from unity (bypass) to 4:1.
+    pub compressor_ratio: u16,
 }
 
 impl Default for Settings {
@@ -87,6 +91,8 @@ impl Default for Settings {
             noise_method: Default::default(),
             deep_filter_limit_db: Self::UNLIMITED_ATTENUATION_DB,
             gain_percent: 100,
+            low_cut_hz: 0,
+            compressor_ratio: 1,
         }
     }
 }
@@ -94,7 +100,33 @@ impl Default for Settings {
 /// File shared by the mixer and engine for a single bounded live audition.
 pub const AUDITION_FILE: &str = "suppression-audition.json";
 
-/// Temporary live suppression settings. The engine checks the expiry even if the mixer exits.
+/// Controls temporarily overridden during a guided recording.
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum AuditionTarget {
+    /// Audition a DeepFilterNet3 attenuation limit.
+    Suppression {
+        /// Maximum attenuation in dB.
+        limit_db: u16,
+    },
+    /// Measure the receiver with neutral tone controls.
+    ToneSetup {
+        /// Temporary tone settings.
+        tone: crate::Tone,
+    },
+}
+
+impl AuditionTarget {
+    /// Apply the override to an in-memory copy of the persistent mix.
+    pub fn apply(self, settings: &mut Settings) {
+        match self {
+            Self::Suppression { limit_db } => settings.deep_filter_limit_db = limit_db,
+            Self::ToneSetup { tone } => settings.set_tone(tone),
+        }
+    }
+}
+
+/// Temporary live settings. The engine checks the expiry even if the mixer exits.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Audition {
     /// Timestamp identifying this request in the engine acknowledgement.
@@ -103,15 +135,26 @@ pub struct Audition {
     pub refreshed: SystemTime,
     /// Persistent route and settings at the time of the original recording.
     pub baseline: Settings,
-    /// Suggested limit to hear on the receiving endpoint.
-    pub limit_db: u16,
+    /// Controls to use on the receiving endpoint.
+    #[serde(flatten)]
+    pub target: AuditionTarget,
 }
 
 impl Audition {
     /// Return whether this request still belongs to the current mix and recording window.
     pub fn active(&self, settings: &Settings, now: std::time::SystemTime) -> bool {
-        self.baseline.same_audition(settings)
-            && self.limit_db <= Settings::UNLIMITED_ATTENUATION_DB
+        let applicable = match self.target {
+            AuditionTarget::Suppression { limit_db } => {
+                self.baseline.same_audition(settings)
+                    && limit_db <= Settings::UNLIMITED_ATTENUATION_DB
+            }
+            AuditionTarget::ToneSetup { tone } => {
+                self.baseline.same_mix(settings)
+                    && tone == crate::Tone::default()
+                    && settings.gain_percent > 0
+            }
+        };
+        applicable
             && self.refreshed >= self.started
             && now
                 .duration_since(self.refreshed)
@@ -132,7 +175,7 @@ pub struct EngineStatus {
     /// A device diagnostic for the monitor, independent of the primary route.
     #[serde(default)]
     pub monitor_error: Option<String>,
-    /// Start time of the temporary suppression audition acknowledged on this route.
+    /// Start time of the temporary processing override acknowledged on this route.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audition: Option<SystemTime>,
     /// Observation time used by the UI to detect a stalled engine.
@@ -207,13 +250,37 @@ impl Settings {
 
     /// Whether the same microphone recording and suppression audition remain applicable.
     pub fn same_audition(&self, other: &Self) -> bool {
+        self.same_mix(other)
+            && self.active_noise_method() == Some(crate::NoiseMethod::DeepFilterNet3)
+    }
+
+    /// Whether a recording still represents the current audio route and processing.
+    pub fn same_mix(&self, other: &Self) -> bool {
         self.same_signal_path(other)
             && self.receiver == other.receiver
             && self.mixing == other.mixing
-            && self.gain_percent == other.gain_percent
-            && self.deep_filter_limit_db == other.deep_filter_limit_db
-            && self.active_noise_method() == Some(crate::NoiseMethod::DeepFilterNet3)
-            && other.active_noise_method() == self.active_noise_method()
+            && self.tone() == other.tone()
+            && self.active_noise_method() == other.active_noise_method()
+            && (self.active_noise_method() != Some(crate::NoiseMethod::DeepFilterNet3)
+                || self.deep_filter_limit_db == other.deep_filter_limit_db)
+    }
+
+    /// Read the effective tone settings, including gain saved by earlier releases.
+    pub fn tone(&self) -> crate::Tone {
+        crate::Tone {
+            low_cut_hz: self.low_cut_hz,
+            gain_percent: self.gain_percent,
+            compressor_ratio: self.compressor_ratio,
+        }
+        .bounded()
+    }
+
+    /// Replace the three tone settings together.
+    pub fn set_tone(&mut self, tone: crate::Tone) {
+        let tone = tone.bounded();
+        self.low_cut_hz = tone.low_cut_hz;
+        self.gain_percent = tone.gain_percent;
+        self.compressor_ratio = tone.compressor_ratio;
     }
 
     /// Whether the open audio streams can be reused. Processing controls are
@@ -268,7 +335,7 @@ mod tests {
             started: now,
             refreshed: now,
             baseline: Settings::default(),
-            limit_db: 6,
+            target: AuditionTarget::Suppression { limit_db: 6 },
         };
         let settings = &request.baseline;
         assert!(request.active(settings, now));
@@ -287,6 +354,37 @@ mod tests {
     }
 
     #[test]
+    fn tone_setup_restores_neutral_processing_without_changing_suppression() {
+        let old: Settings =
+            serde_json::from_str(r#"{"gain_percent":73,"suppress_noise":false}"#).unwrap();
+        assert_eq!(
+            old.tone(),
+            crate::Tone {
+                gain_percent: 73,
+                ..Default::default()
+            }
+        );
+        let now = SystemTime::now();
+        let request = Audition {
+            started: now,
+            refreshed: now,
+            baseline: old.clone(),
+            target: AuditionTarget::ToneSetup {
+                tone: crate::Tone::default(),
+            },
+        };
+        let restored: Audition =
+            serde_json::from_slice(&serde_json::to_vec(&request).unwrap()).unwrap();
+        assert!(restored.active(&old, now));
+        let mut live = old.clone();
+        restored.target.apply(&mut live);
+        assert_eq!(live.tone(), crate::Tone::default());
+        assert_eq!(live.active_noise_method(), old.active_noise_method());
+        assert!(!restored.active(&live, now));
+        assert!(!restored.active(&old, now + std::time::Duration::from_secs(14)));
+    }
+
+    #[test]
     fn active_readers_extend_the_audition_while_abandoned_requests_expire() {
         let start = SystemTime::now();
         let now = start + std::time::Duration::from_secs(90);
@@ -294,7 +392,7 @@ mod tests {
             started: start,
             refreshed: now,
             baseline: Settings::default(),
-            limit_db: 9,
+            target: AuditionTarget::Suppression { limit_db: 9 },
         };
         assert!(request.active(&request.baseline, now));
         assert!(!request.active(&request.baseline, now + std::time::Duration::from_secs(14)));

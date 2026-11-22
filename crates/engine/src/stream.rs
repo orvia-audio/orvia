@@ -14,7 +14,7 @@ use std::{
     collections::VecDeque,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed},
     },
     time::{Duration, Instant},
 };
@@ -46,10 +46,18 @@ struct Counters {
     played_ms: AtomicU64,
 }
 
+// Publish a complete block's controls with one lock-free load on the audio thread.
+fn controls(settings: &Settings) -> u64 {
+    let tone = settings.tone();
+    u64::from(tone.low_cut_hz)
+        | u64::from(tone.gain_percent) << 16
+        | u64::from(tone.compressor_ratio) << 32
+        | u64::from(settings.deep_filter_limit_db) << 48
+}
+
 pub(super) struct Route {
-    gain: Arc<AtomicU16>,
-    deep_filter_limit: Arc<AtomicU16>,
-    applied_limit: Arc<AtomicU16>,
+    controls: Arc<AtomicU64>,
+    applied: Arc<AtomicU64>,
     processing: (Mixing, Option<NoiseMethod>),
     replacements: Producer<Processor>,
     retired: Consumer<Processor>,
@@ -92,12 +100,10 @@ impl Route {
         let start = Instant::now();
         let (mut tx, rx) = RingBuffer::<TimedFrame>::new(BLOCK * 10);
         let (mut envelope_tx, incoming_levels) = RingBuffer::new(200);
-        let gain = Arc::new(AtomicU16::new(settings.gain_percent));
-        let live_gain = gain.clone();
-        let deep_filter_limit = Arc::new(AtomicU16::new(settings.deep_filter_limit_db));
-        let live_limit = deep_filter_limit.clone();
-        let applied_limit = Arc::new(AtomicU16::new(u16::MAX));
-        let applied = applied_limit.clone();
+        let controls = Arc::new(AtomicU64::new(controls(settings)));
+        let live = controls.clone();
+        let applied = Arc::new(AtomicU64::new(u64::MAX));
+        let acknowledged = applied.clone();
         let monitor = Monitor::default();
         let mut processor = Processor::new(settings);
         let (replacements, mut next_processor) = RingBuffer::new(1);
@@ -125,11 +131,15 @@ impl Route {
                                 let old = std::mem::replace(&mut processor, next);
                                 let _ = return_processor.push(old);
                             }
-                            processor.set_gain(live_gain.load(Relaxed));
-                            let limit = live_limit.load(Relaxed);
-                            processor.set_deep_filter_limit(limit);
+                            let word = live.load(Relaxed);
+                            processor.set_tone(orvia_core::Tone {
+                                low_cut_hz: word as u16,
+                                gain_percent: (word >> 16) as u16,
+                                compressor_ratio: (word >> 32) as u16,
+                            });
+                            processor.set_deep_filter_limit((word >> 48) as u16);
                             let (peak, levels) = processor.process_with_levels(&mut block);
-                            applied.store(limit, Relaxed);
+                            acknowledged.store(word, Relaxed);
                             let _ = envelope_tx.push((stamp, levels));
                             meter.peak.fetch_max(peak.to_bits(), Relaxed);
                             for frame in block {
@@ -156,9 +166,8 @@ impl Route {
         input_stream.play()?;
         output_stream.play()?;
         Ok(Self {
-            gain,
-            deep_filter_limit,
-            applied_limit,
+            controls,
+            applied,
             processing: (settings.mixing, settings.active_noise_method()),
             replacements,
             retired,
@@ -174,8 +183,8 @@ impl Route {
         })
     }
 
-    pub(super) fn applied_limit(&self) -> u16 {
-        self.applied_limit.load(Relaxed)
+    pub(super) fn controls_applied(&self, settings: &Settings) -> bool {
+        self.applied.load(Relaxed) == controls(settings)
     }
 
     pub(super) fn healthy(&self) -> bool {
@@ -186,9 +195,7 @@ impl Route {
     }
 
     pub(super) fn update_controls(&mut self, settings: &Settings) {
-        self.gain.store(settings.gain_percent, Relaxed);
-        self.deep_filter_limit
-            .store(settings.deep_filter_limit_db, Relaxed);
+        self.controls.store(controls(settings), Relaxed);
         let _ = self.retired.pop();
         let requested = (settings.mixing, settings.active_noise_method());
         if self.processing != requested

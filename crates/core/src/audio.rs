@@ -105,6 +105,7 @@ enum Filter {
 pub struct Processor {
     settings: crate::Settings,
     filters: Vec<Filter>,
+    tone: crate::tone::ToneProcessor,
     delayed_levels: std::collections::VecDeque<(f32, f32)>,
 }
 
@@ -152,6 +153,7 @@ impl Processor {
         };
         Self {
             settings: settings.clone(),
+            tone: crate::tone::ToneProcessor::new(settings.tone()),
             filters,
             delayed_levels: vec![(0., 0.); delay_blocks].into(),
         }
@@ -167,7 +169,16 @@ impl Processor {
 
     /// Change linear output gain without clearing filter history. 100 means unity.
     pub fn set_gain(&mut self, percent: u16) {
-        self.settings.gain_percent = percent.min(200);
+        self.set_tone(crate::Tone {
+            gain_percent: percent,
+            ..self.settings.tone()
+        });
+    }
+
+    /// Update output processing at a block boundary while preserving noise filter history.
+    pub fn set_tone(&mut self, tone: crate::Tone) {
+        self.settings.set_tone(tone);
+        self.tone.configure(tone);
     }
 
     /// Ramp DeepFilterNet3 to a new attenuation limit over 20 ms while preserving
@@ -240,12 +251,7 @@ impl Processor {
         } else {
             (input_levels, input_levels)
         };
-        let gain = f32::from(self.settings.gain_percent.min(200)) / 100.;
-        let mut peak = 0_f32;
-        for sample in frames.iter_mut().flatten() {
-            *sample = (*sample * gain).clamp(-1., 1.);
-            peak = peak.max(sample.abs());
-        }
+        let peak = self.tone.process(frames);
         (
             peak,
             BlockLevels {
@@ -386,6 +392,7 @@ mod tests {
         });
         for gain in [0, 25, 100, 200] {
             p.set_gain(gain);
+            p.process(&mut [[0.25, -0.25]; BLOCK]); // Allow one block for the gain ramp.
             let (peak, b) = p.process_with_levels(&mut [[0.25, -0.25]; BLOCK]);
             assert_eq!(peak, 0.25 * f32::from(gain) / 100.);
             assert_eq!(b.before_power, 0.0625);

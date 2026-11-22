@@ -13,6 +13,7 @@ cpal = "0.18.2"
 anyhow = "1"
 fs2 = "0.4"
 rtrb = "0.4.1"
+realfft = "3.5.1"
 hound = "3.5"
 tempfile = "3"
 time = { version = "0.3", features = ["local-offset"] }

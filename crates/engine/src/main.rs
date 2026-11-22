@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod log;
+mod spectrum;
 mod stream;
 #[cfg(not(target_os = "macos"))]
 mod tray;
@@ -48,6 +49,14 @@ fn main() -> Result<()> {
 
 fn stop_request(dir: &Path) -> std::path::PathBuf {
     dir.join(format!("stop-engine-{}", std::process::id()))
+}
+
+fn recently_observed(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < Duration::from_secs(5))
 }
 
 fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> bool) -> Result<()> {
@@ -160,17 +169,19 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
             last_monitor = monitor;
         }
         // Persist diagnostics only while a settings window is observing the engine.
-        let observed = fs::metadata(dir.join("observe"))
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|a| a < Duration::from_secs(5));
+        let observed = recently_observed(&dir.join("observe"));
+        let spectrum = running.as_mut().and_then(|route| {
+            route
+                .spectrum
+                .poll(observed && recently_observed(&dir.join(orvia_core::spectrum::OBSERVER_FILE)))
+        });
         if observed {
             let (peak, missing_frames, dropped_frames) = running
                 .as_ref()
                 .map(stream::Route::metrics)
                 .unwrap_or_default();
             let status = EngineStatus {
+                spectrum,
                 signal: running
                     .as_ref()
                     .map(stream::Route::envelopes)

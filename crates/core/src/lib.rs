@@ -13,6 +13,7 @@
 mod audio;
 pub mod calibration;
 mod events;
+pub mod spectrum;
 mod state;
 pub mod tone;
 pub use tone::Tone;

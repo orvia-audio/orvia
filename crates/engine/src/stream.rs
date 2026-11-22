@@ -62,6 +62,7 @@ pub(super) struct Route {
     replacements: Producer<Processor>,
     retired: Consumer<Processor>,
     incoming_levels: Consumer<(u64, BlockLevels)>,
+    pub(super) spectrum: crate::spectrum::Observation,
     levels: VecDeque<(u64, BlockLevels)>,
     monitor: Monitor,
     output: Device,
@@ -100,6 +101,7 @@ impl Route {
         let start = Instant::now();
         let (mut tx, rx) = RingBuffer::<TimedFrame>::new(BLOCK * 10);
         let (mut envelope_tx, incoming_levels) = RingBuffer::new(200);
+        let (mut spectrum_tap, spectrum) = crate::spectrum::Observation::new();
         let controls = Arc::new(AtomicU64::new(controls(settings)));
         let live = controls.clone();
         let applied = Arc::new(AtomicU64::new(u64::MAX));
@@ -139,6 +141,7 @@ impl Route {
                             });
                             processor.set_deep_filter_limit((word >> 48) as u16);
                             let (peak, levels) = processor.process_with_levels(&mut block);
+                            spectrum_tap.capture(&block);
                             acknowledged.store(word, Relaxed);
                             let _ = envelope_tx.push((stamp, levels));
                             meter.peak.fetch_max(peak.to_bits(), Relaxed);
@@ -172,6 +175,7 @@ impl Route {
             replacements,
             retired,
             incoming_levels,
+            spectrum,
             levels: VecDeque::with_capacity(200),
             monitor,
             output,

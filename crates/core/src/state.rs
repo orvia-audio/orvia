@@ -169,6 +169,9 @@ pub struct EngineStatus {
     /// Rolling filter envelopes for the most recent two seconds.
     #[serde(default)]
     pub signal: crate::SignalHistory,
+    /// Frequency bands of the processed output when the spectrum view is open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spectrum: Option<crate::spectrum::Spectrum>,
     /// Whether the optional monitoring stream is delivering audio.
     #[serde(default)]
     pub monitoring: bool,

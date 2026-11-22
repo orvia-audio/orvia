@@ -55,6 +55,7 @@ enum Control {
     Test(TestAction),
     AutoAdjust,
     ApplyAdjustment,
+    Tone(tone_setup::Action),
     RestartEngine,
     OpenLog,
     DismissError,
@@ -69,6 +70,8 @@ enum Control {
 enum Slider {
     Gain,
     Suppression,
+    LowCut,
+    Compression,
 }
 
 /// Geometry and keyboard focus of a measured control in the scrolling page.
@@ -92,7 +95,7 @@ struct Panel {
     picker_scroll: gpui::ScrollHandle,
     dir: PathBuf,
     root: FocusHandle,
-    slider_anchors: [ControlAnchor; 2],
+    slider_anchors: [ControlAnchor; 4],
     dragging_slider: Option<Slider>,
     prefs: Settings,
     inputs: Vec<(String, String)>,
@@ -100,6 +103,9 @@ struct Panel {
     monitors: Vec<(String, String)>,
     receivers: Vec<(String, String)>,
     test: microphone_test::MicTest,
+    tone_setup: Option<tone_setup::Setup>,
+    #[cfg(test)]
+    tone_snapshot: Option<tone_setup::Screen<'static>>,
     test_primary_focus: FocusHandle,
     page: Page,
     logo: std::sync::Arc<gpui::Image>,
@@ -179,6 +185,7 @@ impl Panel {
                         if let Some(prefs) = prefs {
                             p.prefs = prefs;
                         }
+                        p.poll_tone_setup(cx);
                         if p.page == Page::MicTest {
                             p.poll_mic_test(cx);
                         }
@@ -229,6 +236,9 @@ impl Panel {
             receivers: Vec::new(),
             monitors: Vec::new(),
             test: Default::default(),
+            tone_setup: None,
+            #[cfg(test)]
+            tone_snapshot: None,
             test_primary_focus: cx.focus_handle().tab_stop(true),
             page: Page::Mixer,
             logo: std::sync::Arc::new(gpui::Image::from_bytes(
@@ -265,6 +275,7 @@ impl Panel {
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
         match control {
             Control::Page(page) => {
+                self.tone_setup = None;
                 if self.page != page || self.test.adjust.is_some() {
                     if self.page == Page::MicTest {
                         self.finish_test_recording();
@@ -316,6 +327,7 @@ impl Panel {
                 self.test.speaker = id;
                 self.choosing = None;
             }
+            Control::Tone(action) => self.tone_action(action, cx),
             Control::AutoAdjust => self.start_adjustment(),
             Control::ApplyAdjustment => self.apply_adjustment(cx),
             Control::Test(action) => self.run_test_action(action),
@@ -410,6 +422,10 @@ impl Panel {
                         }
                     }
                     Control::Slide(Slider::Gain, percent) => settings.gain_percent = percent,
+                    Control::Slide(Slider::LowCut, hz) => settings.low_cut_hz = hz,
+                    Control::Slide(Slider::Compression, step) => {
+                        settings.compressor_ratio = step + 1
+                    }
                     Control::Slide(Slider::Suppression, db) => settings.deep_filter_limit_db = db,
                     _ => unreachable!(),
                 })
@@ -436,6 +452,7 @@ mod engine_control;
 mod icons;
 mod microphone_test;
 mod reading;
+mod tone_setup;
 mod view;
 
 mod updates;

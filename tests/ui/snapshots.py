@@ -25,7 +25,8 @@ SCENES = (
     "mic", "mic-offline", "mic-error", "mic-standalone", "mic-recording", "mic-recorded",
     "mic-playing", "adjust-room", "adjust-measuring", "adjust-read", "adjust-recording",
     "adjust-analyzing", "adjust-opening", "adjust-preview", "adjust-restoring", "adjust-ready",
-    "adjust-failed",
+    "adjust-failed", "tone-setup", "tone-opening", "tone-room", "tone-measuring",
+    "tone-read", "tone-analyzing", "tone-ready", "tone-playing", "tone-failed",
 )
 
 

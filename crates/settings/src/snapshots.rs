@@ -92,6 +92,30 @@ fn populate(panel: &mut Panel, scene: &str, language: Language) {
             panel.prefs.suppress_noise = false;
             Page::Mixer
         }
+        name if name.starts_with("tone-") => {
+            use tone_setup::Screen;
+            let tone = orvia_core::Tone {
+                low_cut_hz: 65,
+                gain_percent: 135,
+                compressor_ratio: 2,
+            };
+            panel.tone_snapshot = Some(match name {
+                "tone-setup" => Screen::Intro,
+                "tone-opening" => Screen::Opening,
+                "tone-room" => Screen::Room,
+                "tone-measuring" => Screen::Reading(ReadingCue::Measuring),
+                "tone-read" => Screen::Reading(ReadingCue::Read),
+                "tone-analyzing" => Screen::Analyzing,
+                "tone-ready" => Screen::Ready(tone, None),
+                "tone-playing" => Screen::Ready(tone, Some(1)),
+                "tone-failed" => Screen::Failed(language.text(
+                    "The mix changed. Record again.",
+                    "ミックス設定が変わりました。録り直してください。",
+                )),
+                _ => panic!("unknown tone setup scene {name}"),
+            });
+            Page::Mixer
+        }
         "devices" => Page::Devices,
         "devices-picker" => {
             panel.choosing = Some(Endpoint::Input);

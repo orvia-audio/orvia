@@ -2,6 +2,10 @@
 use super::*;
 use crate::icons::glyph;
 
+#[path = "tone_view.rs"]
+mod tone_view;
+use tone_view::tone_labels;
+
 #[path = "mixer.rs"]
 mod mixer;
 #[path = "picker.rs"]
@@ -128,7 +132,11 @@ impl Panel {
                 _ => false,
             };
         let leading = match &control {
-            Control::AutoAdjust => Some("adjustments-horizontal.svg"),
+            Control::AutoAdjust | Control::Tone(tone_setup::Action::Open) => {
+                Some("adjustments-horizontal.svg")
+            }
+            Control::Tone(tone_setup::Action::Apply) => Some("check.svg"),
+            Control::Tone(tone_setup::Action::Play(_)) => Some("player-play.svg"),
             Control::ApplyAdjustment => Some("check.svg"),
             Control::Test(TestAction::Record) => Some("microphone.svg"),
             Control::Test(TestAction::Play) => Some("player-play.svg"),
@@ -153,7 +161,10 @@ impl Panel {
         };
         let wide = trigger.is_some();
         let primary = matches!(control, Control::Test(action) if action != TestAction::Retake);
-        let apply = matches!(control, Control::ApplyAdjustment);
+        let apply = matches!(
+            control,
+            Control::ApplyAdjustment | Control::Tone(tone_setup::Action::Apply)
+        );
         div()
             .id(id.into())
             .flex()
@@ -774,8 +785,17 @@ impl Render for Panel {
         } else {
             None
         };
+        let tone_screen = self.tone_setup.as_ref().map(tone_setup::Setup::screen);
+        #[cfg(test)]
+        let tone_screen = self.tone_snapshot.or(tone_screen);
         let (title, content) = match self.page {
-            Page::Mixer => (l.text("Mixer", "ミキサー"), self.mixer(cx)),
+            Page::Mixer => match tone_screen {
+                Some(screen) => (
+                    l.text("Tone setup", "音質調整の自動設定"),
+                    self.tone_page(screen, cx),
+                ),
+                None => (l.text("Mixer", "ミキサー"), self.mixer(cx)),
+            },
             Page::MicTest => (l.text("Mic test", "マイクテスト"), self.mic_test_page(cx)),
             Page::Devices => (l.text("Devices", "デバイス"), self.devices(cx)),
             Page::Preferences => (l.text("Preferences", "設定"), self.preferences(cx)),

@@ -80,6 +80,8 @@ impl Slider {
     fn max(self) -> u16 {
         match self {
             Self::Gain => 200,
+            Self::LowCut => 150,
+            Self::Compression => 3,
             Self::Suppression => Settings::UNLIMITED_ATTENUATION_DB,
         }
     }
@@ -87,6 +89,8 @@ impl Slider {
     fn value(self, prefs: &Settings) -> u16 {
         match self {
             Self::Gain => prefs.gain_percent,
+            Self::LowCut => prefs.low_cut_hz,
+            Self::Compression => prefs.compressor_ratio.saturating_sub(1),
             Self::Suppression => prefs.deep_filter_limit_db,
         }
         .min(self.max())
@@ -145,6 +149,8 @@ impl Panel {
         div()
             .id(match slider {
                 Slider::Gain => "gain-slider",
+                Slider::LowCut => "low-cut-slider",
+                Slider::Compression => "compression-slider",
                 Slider::Suppression => "suppression-slider",
             })
             .track_focus(&anchor.focus)
@@ -294,34 +300,47 @@ impl Panel {
                             .child(format!("{}  {output}", l.text("Output", "出力"))),
                     ),
             );
+        let tone = self.prefs.tone();
+        let mut controls = row().items_start();
+        for ((label, value), slider) in tone_labels(l, tone).into_iter().zip([
+            Slider::LowCut,
+            Slider::Gain,
+            Slider::Compression,
+        ]) {
+            controls = controls.child(
+                stack()
+                    .gap_0()
+                    .flex_1()
+                    .min_w(px(148.))
+                    .child(
+                        row()
+                            .justify_between()
+                            .text_sm()
+                            .child(label)
+                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(value)),
+                    )
+                    .child(self.slider(slider, cx)),
+            );
+        }
         let signal = card()
-            .gap_1()
+            .gap_2()
             .child(
                 row()
                     .justify_between()
                     .child(heading(
-                        l.text("Output gain", "出力ゲイン"),
-                        "volume.svg",
+                        l.text("Tone", "音質調整"),
+                        "adjustments-horizontal.svg",
                         TERRACOTTA,
                     ))
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(format!("{}%", self.prefs.gain_percent)),
-                    ),
+                    .child(self.button(
+                        "tone-setup",
+                        l.text("Auto setup", "自動設定"),
+                        false,
+                        Control::Tone(tone_setup::Action::Open),
+                        cx,
+                    )),
             )
-            .child(self.slider(Slider::Gain, cx))
-            .child(
-                div()
-                    .px_2()
-                    .flex()
-                    .justify_between()
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .child("0%")
-                    .child("100%")
-                    .child("200%"),
-            );
+            .child(controls);
         stack()
             .gap_2()
             .child(summary)

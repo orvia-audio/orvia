@@ -237,6 +237,14 @@ impl Recording {
         Ok(&self.frames)
     }
 
+    /// Discard analyzed frames from the beginning of a take, keeping the active input stream open.
+    /// Returns the number removed. Samples still in the device queue are unaffected.
+    pub fn discard_prefix(&mut self, count: usize) -> usize {
+        let count = count.min(self.frames.len());
+        self.frames.drain(..count);
+        count
+    }
+
     /// Sample rate of the incoming PCM frames.
     pub fn rate(&self) -> u32 {
         self.rate

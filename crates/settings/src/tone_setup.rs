@@ -182,10 +182,9 @@ impl Setup {
                 }
             }
             Stage::Reading(_, recording, reader) => {
-                if recording.duration() > Duration::from_secs(120) {
-                    return Err(l.text("No end of speech detected. Record again and pause after reading.", "読み終わりを確認できませんでした。録り直し、読み終えたら少し間を空けてください。").into());
-                }
-                if reader.listen(recording, l)? {
+                if !reader.listen(recording, l)? {
+                    reader.trim_waiting(recording);
+                } else {
                     let Stage::Reading(room, recording, _) =
                         std::mem::replace(&mut self.stage, Stage::Opening)
                     else {

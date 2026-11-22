@@ -207,9 +207,9 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
     let levels: Vec<_> = voice.chunks_exact(BLOCK).map(power).collect();
     let peak_power = levels.iter().copied().fold(0., f64::max);
     // The reading includes quiet lead-in and trailing silence from the endpoint detector.
-    let mut sorted = levels.clone();
-    sorted.sort_unstable_by(f64::total_cmp);
-    let speech_floor = (sorted[sorted.len() / 10] * 2.)
+    let mut quiet: Vec<_> = levels.iter().rev().take(30).copied().collect();
+    quiet.sort_unstable_by(f64::total_cmp);
+    let speech_floor = (quiet[quiet.len() / 4] * 2.)
         .max(peak_power * 0.001)
         .max(1e-8);
     let active: Vec<_> = levels

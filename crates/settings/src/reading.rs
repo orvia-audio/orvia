@@ -52,6 +52,15 @@ impl Reader {
         Ok(self.process(frames, step))
     }
 
+    /// Keep a quiet lead-in for tone analysis while the reader waits for the user to start.
+    /// Once an onset is possible, retain the whole phrase until trailing silence.
+    pub(super) fn trim_waiting(&mut self, recording: &mut Recording) {
+        let second = recording.rate() as usize;
+        if !self.speaking && self.onset == 0 && self.checked > second * 2 {
+            self.checked -= recording.discard_prefix(self.checked - second);
+        }
+    }
+
     fn process(&mut self, frames: &[[f32; 2]], step: usize) -> bool {
         // Arming takes a UI tick so previously buffered audio cannot finish a take before the cue appears.
         let armed = self.ready();

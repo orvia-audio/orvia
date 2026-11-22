@@ -250,6 +250,49 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     assert json.loads((state / "settings.json").read_text())["deep_filter_limit_db"] == 12
     (state / "close-window").touch()
     assert mixer.wait(timeout=10) == 0
+    # Tone setup listens to the cable with the current noise choice, including bypass.
+    # Only that endpoint contains the 30 Hz rumble. The physical input supplies the reading.
+    set_controls(suppress_noise=False, low_cut_hz=110, gain_percent=75, compressor_ratio=3)
+    settings_path = state / "settings.json"
+    original = json.loads(settings_path.read_text())
+    mixer = start("orvia")
+    wait_for(window_visible, "Mixer did not reopen for tone setup", timeout=45)
+    window = run("xdotool", "search", "--onlyvisible", "--name", "^Orvia$").splitlines()[0]
+    run("xdotool", "windowsize", window, "830", "610", "windowfocus", "--sync", window)
+
+    def click(x, y):
+        run("xdotool", "mousemove", "--window", window, str(x), str(y), "click", "1")
+
+    time.sleep(1)
+    click(746, 432)  # Auto setup in the tone card
+    time.sleep(0.3)
+    click(262, 213)  # Start recording
+    wait_for(recording, "Tone setup did not capture the virtual microphone")
+    assert json.loads(trial.read_text())["tone"] == {
+        "gain_percent": 100, "low_cut_hz": 0, "compressor_ratio": 1,
+    }
+    rumble = array.array("h", (int(1600 * math.sin(2 * math.pi * 30 * i / 48000))
+                               for i in range(48000)))
+    play_pcm("orvia_output", rumble)
+    click(274, 178)  # Next · Read aloud
+    time.sleep(1.2)
+    speak("test_input")
+    wait_for(playing, "Tone setup did not play its recommendation", timeout=30)
+    assert not trial.exists() and not recording()
+    assert json.loads(settings_path.read_text()) == original
+    wait_for(lambda: not playing(), "Tone preview did not finish", timeout=30)
+    click(251, 292)  # Current
+    wait_for(playing, "Could not play the original tone settings")
+    click(263, 344)  # Apply settings
+    wait_for(lambda: json.loads(settings_path.read_text()) != original, "Could not apply the tone settings")
+    saved = json.loads(settings_path.read_text())
+    assert 0 < saved["low_cut_hz"] < 110 and saved["gain_percent"] > 75, saved
+    assert saved["compressor_ratio"] == 1
+    assert all(saved[k] == v for k, v in original.items()
+               if k not in ("low_cut_hz", "gain_percent", "compressor_ratio"))
+    assert take.read_bytes() == second
+    (state / "close-window").touch()
+    assert mixer.wait(timeout=10) == 0
     assert engine.poll() is None
     (state / f"stop-engine-{engine.pid}").touch()
     assert engine.wait(timeout=10) == 0

@@ -10,6 +10,7 @@ Orvia is a desktop microphone mixer for Windows, macOS, and Linux. Reduce backgr
 - **Mixing.** Keep stereo channels separate or mix them to mono.
 - **Tone setup.** Record room noise and a short reading to tune low cut, gain, and compression. Compare both settings on the same take.
 - **Noise suppression.** Process speech locally with DeepFilterNet3, RNNoise, or WebRTC.
+- **Spectrum analyzer.** Find the strongest frequency in the processed mix and inspect individual bands from 20 Hz to 20 kHz.
 - **Monitoring.** Hear what apps receive from your virtual microphone and watch input and filtered levels in real time.
 
 https://github.com/user-attachments/assets/f70d9515-6fc0-45b6-9218-495529a97bc9

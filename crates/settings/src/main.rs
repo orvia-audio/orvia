@@ -46,6 +46,7 @@ enum Page {
 #[derive(Clone)]
 enum Control {
     Page(Page),
+    ShowSpectrum(bool),
     Language(Language),
     Monitor,
     Choose(Endpoint),
@@ -90,6 +91,9 @@ impl ControlAnchor {
 }
 
 struct Panel {
+    show_spectrum: bool,
+    spectrum_anchor: ControlAnchor,
+    spectrum_band: Option<usize>,
     picker_anchors: [ControlAnchor; 6],
     picker_cursor: usize,
     picker_scroll: gpui::ScrollHandle,
@@ -160,7 +164,8 @@ impl Panel {
                         w.activate_window();
                     });
                 }
-                if heartbeat.elapsed() >= Duration::from_secs(2) {
+                let refresh = heartbeat.elapsed() >= Duration::from_secs(2);
+                if refresh {
                     // An empty rewrite can leave the previous modification time on Windows.
                     let _ = fs::write(poll_dir.join("observe"), b"1");
                     heartbeat = Instant::now();
@@ -175,6 +180,14 @@ impl Panel {
                 let prefs = Settings::load(&poll_dir.join("settings.json")).ok();
                 if this
                     .update(cx, |p, cx| {
+                        if refresh
+                            && p.page == Page::Mixer
+                            && p.tone_setup.is_none()
+                            && p.show_spectrum
+                        {
+                            let _ =
+                                fs::write(poll_dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
+                        }
                         p.status = status.or_else(|| {
                             p.status.take().filter(|s| {
                                 s.observed
@@ -222,6 +235,9 @@ impl Panel {
     fn empty(dir: PathBuf, installed: Version, test_only: bool, cx: &Context<Self>) -> Self {
         Self {
             updates: Default::default(),
+            show_spectrum: false,
+            spectrum_anchor: ControlAnchor::new(cx),
+            spectrum_band: None,
             show_update_feedback: false,
             dir,
             root: cx.focus_handle(),
@@ -274,6 +290,13 @@ impl Panel {
 
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
         match control {
+            Control::ShowSpectrum(on) => {
+                self.show_spectrum = on;
+                self.spectrum_band = None;
+                if on {
+                    let _ = fs::write(self.dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
+                }
+            }
             Control::Page(page) => {
                 self.tone_setup = None;
                 if self.page != page || self.test.adjust.is_some() {

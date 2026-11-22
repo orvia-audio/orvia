@@ -73,8 +73,18 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         recorder = start("parec", "-d", "orvia_microphone", "--latency-msec=20", "--raw", "--format=s16le",
                          "--channels=1", "--rate=48000", stdout=output)
         time.sleep(0.5)
-        subprocess.run(["pacat", "-d", "test_input", "--latency-msec=20", "--raw", "--format=s16le",
-                        "--channels=1", "--rate=48000"], env=env, input=samples.tobytes(), check=True)
+        tone = Path(tmp, "tone.raw")
+        tone.write_bytes(samples.tobytes())
+        (state / "observe").touch()
+        (state / "observe-spectrum").touch()
+        with tone.open("rb") as source:
+            player = start("pacat", "-d", "test_input", "--latency-msec=20", "--raw", "--format=s16le",
+                           "--channels=1", "--rate=48000", stdin=source)
+            def measured_tone():
+                hz = (json.loads(status.read_text()).get("spectrum") or {}).get("peak_hz")
+                return hz is not None and abs(hz - 440) <= 1
+            wait_for(measured_tone, "Output spectrum did not identify the 440 Hz test tone", timeout=4)
+            assert player.wait(timeout=5) == 0
         time.sleep(0.5)
         recorder.send_signal(signal.SIGINT)
         recorder.wait(timeout=5)
@@ -225,9 +235,9 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     def mic_count():
         return sum(s["source"] == physical for s in pulse_devices("source-outputs"))
 
-    # Four sidebar controls, four suppression choices, then Auto adjust.
+    # Four sidebar controls, two chart tabs, four suppression choices, then Auto adjust.
     time.sleep(1)
-    run("xdotool", "key", "--delay", "100", *["Tab"]*9, "Return")
+    run("xdotool", "key", "--delay", "100", *["Tab"]*11, "Return")
     wait_for(lambda: mic_count() >= 2, "Auto adjust did not start room capture")
     wait_for(lambda: mic_count() == 1, "Room capture did not finish")
     for phrase_number in range(2):

@@ -10,6 +10,8 @@ use tone_view::tone_labels;
 mod mixer;
 #[path = "picker.rs"]
 mod picker;
+#[path = "spectrum.rs"]
+mod spectrum;
 
 const INK: u32 = 0x242a2b;
 const MUTED: u32 = 0x575f61;

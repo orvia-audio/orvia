@@ -210,7 +210,7 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
     let mut sorted = levels.clone();
     sorted.sort_unstable_by(f64::total_cmp);
     let speech_floor = (sorted[sorted.len() / 10] * 2.)
-        .max(peak_power * 0.012)
+        .max(peak_power * 0.001)
         .max(1e-8);
     let active: Vec<_> = levels
         .iter()
@@ -251,7 +251,11 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
         .collect();
     speech.sort_unstable_by(f64::total_cmp);
     // Aim for ordinary speech near -20 dBFS RMS, with at least 1 dB of headroom.
-    let gain = (0.1 / speech[speech.len() / 2].sqrt().max(1e-6)).clamp(0.01, 2.);
+    let median_power = speech[speech.len() / 2];
+    let gain = (0.1 / median_power.sqrt().max(1e-6)).clamp(0.01, 2.);
+    // Allow loud syllables 8 dB above ordinary speech. Below the compressor knee,
+    // gain alone should preserve the speaker's dynamics.
+    let loud_power_limit = (median_power * gain * gain * 10_f64.powf(0.8)).max(0.25_f64.powi(2));
     let mut tone = Tone {
         low_cut_hz: hz,
         gain_percent: (gain * 100.).round() as u16,
@@ -264,12 +268,16 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
             ..tone
         });
         let mut peak = 0_f32;
+        let mut output_powers = Vec::with_capacity(levels.len());
         for block in voice.chunks(BLOCK) {
             let mut buffer = [[0.; 2]; BLOCK];
             buffer[..block.len()].copy_from_slice(block);
             peak = peak.max(preview.process(&mut buffer[..block.len()]));
+            output_powers.push(power(&buffer[..block.len()]));
         }
-        if peak <= 0.89 {
+        let mut voiced: Vec<_> = active.iter().map(|&i| output_powers[i]).collect();
+        voiced.sort_unstable_by(f64::total_cmp);
+        if peak <= 0.89 && (voiced[voiced.len() * 9 / 10] <= loud_power_limit || ratio == 4) {
             return Ok(tone);
         }
     }
@@ -329,6 +337,23 @@ mod tests {
             recommend(&noise, &vec![[1.; 2]; BLOCK * 100]),
             Err(SampleError::Clipped)
         );
+    }
+
+    #[test]
+    fn levels_loud_syllables_even_when_they_do_not_clip() {
+        let mut speech = phrase(200.);
+        for (i, frame) in speech
+            .iter_mut()
+            .enumerate()
+            .skip(BLOCK * 55)
+            .take(BLOCK * 22)
+        {
+            *frame = [sine(200., 0.48, i); 2];
+        }
+        // At the suggested gain the loud syllable stays below -1 dBFS even without compression.
+        let tone = recommend(&vec![[0.; 2]; BLOCK * 60], &speech).unwrap();
+        assert!(0.48 * f32::from(tone.gain_percent) / 100. < 0.89);
+        assert!(tone.compressor_ratio > 1);
     }
 
     #[test]

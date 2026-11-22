@@ -19,7 +19,7 @@ type Comparison = (Tone, [Clip; 2]);
 enum Stage {
     Intro,
     Opening,
-    Room(Recording),
+    Room(Recording, Instant),
     Reading(Clip, Recording, reading::Reader),
     Analyzing(Receiver<Result<Comparison, SampleError>>),
     Ready(Comparison),
@@ -52,7 +52,8 @@ impl Setup {
         match &self.stage {
             Stage::Intro => Screen::Intro,
             Stage::Opening => Screen::Opening,
-            Stage::Room(_) => Screen::Room,
+            Stage::Room(r, _) if r.duration() < Duration::from_millis(500) => Screen::Opening,
+            Stage::Room(..) => Screen::Room,
             Stage::Reading(_, _, reader) => Screen::Reading(reader.into()),
             Stage::Analyzing(_) => Screen::Analyzing,
             Stage::Ready((tone, _)) => Screen::Ready(*tone, self.playback.as_ref().map(|p| p.0)),
@@ -102,10 +103,10 @@ impl Setup {
     }
 
     fn start_reading(&mut self) -> Result<(), String> {
-        if !matches!(&self.stage, Stage::Room(r) if r.duration() >= Duration::from_millis(500)) {
+        if !matches!(&self.stage, Stage::Room(r, _) if r.duration() >= Duration::from_millis(500)) {
             return Ok(());
         }
-        if let Stage::Room(recording) = std::mem::replace(&mut self.stage, Stage::Opening) {
+        if let Stage::Room(recording, _) = std::mem::replace(&mut self.stage, Stage::Opening) {
             let room = recording.finish().map_err(|e| e.to_string())?;
             let reading = Recording::start(&self.receiver).map_err(|e| e.to_string())?;
             self.stage = Stage::Reading(room, reading, Default::default());
@@ -162,16 +163,15 @@ impl Setup {
         }
         match &mut self.stage {
             Stage::Opening => {
-                self.stage = Stage::Room(Recording::start(&self.receiver).map_err(audio_error)?);
+                self.stage = Stage::Room(
+                    Recording::start(&self.receiver).map_err(audio_error)?,
+                    Instant::now(),
+                );
             }
-            Stage::Room(r) => {
+            Stage::Room(r, since) => {
                 r.collect().map_err(audio_error)?;
-                if r.duration() > Duration::from_secs(90)
-                    || (r.duration().is_zero()
-                        && self
-                            .trial
-                            .as_ref()
-                            .is_some_and(|t| t.since.elapsed() > Duration::from_secs(7)))
+                if since.elapsed() > Duration::from_secs(90)
+                    || since.elapsed().saturating_sub(r.duration()) > Duration::from_secs(4)
                 {
                     return Err(l
                         .text(

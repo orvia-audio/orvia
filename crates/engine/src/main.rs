@@ -138,11 +138,11 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                         .ok()
                         .filter(|r| r.active(&s, SystemTime::now()));
                     if let Some(r) = &request {
-                        s.deep_filter_limit_db = r.limit_db;
+                        r.target.apply(&mut s);
                     }
                     route.update_controls(&s);
                     audition = request
-                        .filter(|r| route.applied_limit() == r.limit_db)
+                        .filter(|_| route.controls_applied(&s))
                         .map(|r| r.started);
                 }
             }

@@ -41,6 +41,11 @@ const words = {
 // Unknown screens from other revisions remain reviewable under their filenames.
 const names = {
   mixer: ["Mixer", "ミキサー"], "mixer-full": ["Mixer · Full view", "ミキサー · 全体"],
+  "tone-setup": ["Tone setup", "音質調整 · 自動設定"], "tone-opening": ["Tone setup · Opening", "音質調整 · 準備"],
+  "tone-room": ["Tone setup · Room", "音質調整 · 環境音"], "tone-read": ["Tone setup · Reading", "音質調整 · 読み上げ"],
+  "tone-measuring": ["Tone setup · Measuring", "音質調整 · 入力測定"], "tone-analyzing": ["Tone setup · Analysis", "音質調整 · 解析"],
+  "tone-ready": ["Tone setup · Result", "音質調整 · 結果"], "tone-playing": ["Tone setup · Playback", "音質調整 · 試聴"],
+  "tone-failed": ["Tone setup · Error", "音質調整 · エラー"],
   "mixer-bypass": ["Mixer · Suppression off", "ミキサー · 抑制オフ"],
   devices: ["Devices", "デバイス"], "devices-picker": ["Devices · Device list", "デバイス · 選択リスト"],
   mic: ["Mic test", "マイクテスト"], "mic-recording": ["Mic test · Recording", "マイクテスト · 録音中"],

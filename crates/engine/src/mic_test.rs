@@ -237,6 +237,14 @@ impl Recording {
         Ok(&self.frames)
     }
 
+    /// Discard analyzed frames from the beginning of a take, keeping the active input stream open.
+    /// Returns the number removed. Samples still in the device queue are unaffected.
+    pub fn discard_prefix(&mut self, count: usize) -> usize {
+        let count = count.min(self.frames.len());
+        self.frames.drain(..count);
+        count
+    }
+
     /// Sample rate of the incoming PCM frames.
     pub fn rate(&self) -> u32 {
         self.rate
@@ -316,6 +324,51 @@ impl Clip {
         let room = self.model_frames();
         let [first, second] = phrases.map(Self::model_frames);
         calibration::recommend(&room, [&first, &second], mixing)
+    }
+
+    /// Build current and recommended headphone previews from the same neutral receiver recording.
+    /// The room segment precedes the reading so low-frequency noise remains audible in the comparison.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sample error for incomplete, clipped, or indistinct speech.
+    pub fn tone_previews(
+        &self,
+        voice: &Self,
+        current: orvia_core::Tone,
+    ) -> Result<(orvia_core::Tone, [Self; 2]), SampleError> {
+        let room = self.model_frames();
+        let voice = voice.model_frames();
+        // Keep the strongest room sound near the start of each preview even when the user waits before reading.
+        let room_window = 2 * SAMPLE_RATE as usize;
+        let loudest = room
+            .chunks(orvia_core::BLOCK)
+            .enumerate()
+            .max_by(|(_, a), (_, b)| {
+                let energy =
+                    |block: &[[f32; 2]]| block.iter().flatten().map(|s| s * s).sum::<f32>();
+                energy(a).total_cmp(&energy(b))
+            })
+            .map_or(0, |(i, _)| i * orvia_core::BLOCK);
+        let start = loudest
+            .saturating_sub(room_window / 2)
+            .min(room.len().saturating_sub(room_window));
+        let room = &room[start..(start + room_window).min(room.len())];
+        let recommended = orvia_core::tone::recommend(room, &voice)?;
+        let clips = [current, recommended].map(|tone| {
+            let mut processor = orvia_core::tone::ToneProcessor::new(tone);
+            let mut frames = room.to_vec();
+            frames.extend(std::iter::repeat_n([0.; 2], SAMPLE_RATE as usize / 4));
+            frames.extend_from_slice(&voice);
+            for block in frames.chunks_mut(orvia_core::BLOCK) {
+                processor.process(block);
+            }
+            Self {
+                frames: frames.into(),
+                rate: SAMPLE_RATE,
+            }
+        });
+        Ok((recommended, clips))
     }
 
     fn model_frames(&self) -> std::borrow::Cow<'_, [Frame]> {
@@ -535,6 +588,44 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tone_previews_use_the_same_receiver_take_and_the_live_processor() {
+        let room = Clip {
+            rate: SAMPLE_RATE,
+            frames: vec![[0.; 2]; orvia_core::BLOCK * 75].into(),
+        };
+        let voice = Clip {
+            rate: SAMPLE_RATE,
+            frames: (0..SAMPLE_RATE as usize)
+                .map(|i| {
+                    let x = if (9000..36000).contains(&i) {
+                        0.05 * (i as f32 * 0.03).sin()
+                    } else {
+                        0.
+                    };
+                    [x, x * 0.6]
+                })
+                .collect(),
+        };
+        let (settings, [before, after]) = room.tone_previews(&voice, Default::default()).unwrap();
+        assert_eq!(
+            &before.frames[before.frames.len() - voice.frames.len()..],
+            voice.frames.as_ref()
+        );
+        let mut reference = before.frames.to_vec();
+        let mut live = orvia_core::Processor::new(&orvia_core::Settings {
+            suppress_noise: false,
+            low_cut_hz: settings.low_cut_hz,
+            gain_percent: settings.gain_percent,
+            compressor_ratio: settings.compressor_ratio,
+            ..Default::default()
+        });
+        for block in reference.chunks_exact_mut(orvia_core::BLOCK) {
+            live.process(block.try_into().unwrap());
+        }
+        assert_eq!(reference.as_slice(), after.frames.as_ref());
+    }
 
     #[test]
     fn retaking_preserves_older_recordings_and_reopens_the_current_take() {

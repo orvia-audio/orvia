@@ -183,7 +183,34 @@ fn filtered(frames: &[[f32; 2]], hz: u16) -> Vec<[f32; 2]> {
     frames.iter().map(|&f| filter.frame(f)).collect()
 }
 
+/// Compare speech energy above the room floor in 100 ms windows. A steady rumble
+/// can continue under the reading, so its removal should not count as lost voice.
+fn preserves_speech(dry: &[f64], wet: &[f64]) -> bool {
+    let tail_power = |levels: &[f64]| {
+        let tail = &levels[levels.len().saturating_sub(30)..];
+        tail.iter().sum::<f64>() / tail.len() as f64
+    };
+    let dry_floor = tail_power(dry);
+    let wet_floor = tail_power(wet);
+    let strongest = dry.iter().copied().fold(0., f64::max);
+    let mut losses = Vec::new();
+    for (before, after) in dry.chunks(10).zip(wet.chunks(10)) {
+        let count = before.len() as f64;
+        let before = before.iter().sum::<f64>() / count - dry_floor;
+        if before <= dry_floor.max(strongest * 0.025).max(1e-8) {
+            continue;
+        }
+        let after = after.iter().sum::<f64>() / count - wet_floor;
+        losses.push(10. * (before / after.max(1e-15)).log10());
+    }
+    losses.sort_unstable_by(f64::total_cmp);
+    losses
+        .get(losses.len() * 9 / 10)
+        .is_some_and(|loss| *loss <= 1.)
+}
+
 /// Recommend tone controls from separate virtual-mic noise and speech takes at 48 kHz.
+/// The reading should end with at least 300 ms of room sound.
 /// Chooses the lowest effective cutoff that preserves speech, then estimates gain and peak control.
 ///
 /// # Errors
@@ -227,15 +254,11 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
         for cutoff in [50, 65, 80, 100, 125, 150] {
             let reduction = 10. * (noise / power(&filtered(room, cutoff)).max(1e-15)).log10();
             let candidate = filtered(voice, cutoff);
-            let mut losses: Vec<_> = active
-                .iter()
-                .map(|&i| {
-                    10. * (levels[i] / power(&candidate[i * BLOCK..(i + 1) * BLOCK]).max(1e-15))
-                        .log10()
-                })
-                .collect();
-            losses.sort_unstable_by(f64::total_cmp);
-            if losses[losses.len() * 9 / 10] <= 1. && reduction >= 3. && reduction > best + 0.5 {
+            let filtered_levels: Vec<_> = candidate.chunks_exact(BLOCK).map(power).collect();
+            if reduction >= 3.
+                && reduction > best + 0.5
+                && preserves_speech(&levels, &filtered_levels)
+            {
                 hz = cutoff;
                 best = reduction;
                 if reduction >= 6. {
@@ -322,6 +345,19 @@ mod tests {
         assert!((135..=155).contains(&tone.gain_percent));
         assert_eq!(tone.compressor_ratio, 1);
         assert_eq!(recommend(&rumble, &phrase(52.)).unwrap().low_cut_hz, 0);
+    }
+
+    #[test]
+    fn distinguishes_steady_rumble_under_the_reading_from_the_voice() {
+        let rumble = room(30.);
+        let mut voice = phrase(180.);
+        for (i, frame) in voice.iter_mut().enumerate() {
+            for sample in frame {
+                *sample += sine(30., 0.07, i);
+            }
+        }
+        let tone = recommend(&rumble, &voice).unwrap();
+        assert!((50..=100).contains(&tone.low_cut_hz), "{tone:?}");
     }
 
     #[test]

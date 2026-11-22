@@ -301,25 +301,28 @@ impl Panel {
                     ),
             );
         let tone = self.prefs.tone();
-        let mut controls = row().items_start();
+        let mut controls = stack().gap_1();
         for ((label, value), slider) in tone_labels(l, tone).into_iter().zip([
             Slider::LowCut,
             Slider::Gain,
             Slider::Compression,
         ]) {
             controls = controls.child(
-                stack()
-                    .gap_0()
-                    .flex_1()
-                    .min_w(px(148.))
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_sm()
+                    .child(div().w(px(110.)).flex_shrink_0().child(label))
+                    .child(div().flex_1().min_w_0().child(self.slider(slider, cx)))
                     .child(
-                        row()
-                            .justify_between()
-                            .text_sm()
-                            .child(label)
-                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(value)),
-                    )
-                    .child(self.slider(slider, cx)),
+                        div()
+                            .w(px(55.))
+                            .flex_shrink_0()
+                            .text_right()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(value),
+                    ),
             );
         }
         let signal = card()

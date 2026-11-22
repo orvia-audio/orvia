@@ -266,7 +266,7 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     time.sleep(1)
     click(746, 432)  # Auto setup in the tone card
     time.sleep(0.3)
-    click(262, 213)  # Start recording
+    click(262, 141)  # Start recording
     wait_for(recording, "Tone setup did not capture the virtual microphone")
     assert json.loads(trial.read_text())["tone"] == {
         "gain_percent": 100, "low_cut_hz": 0, "compressor_ratio": 1,
@@ -274,7 +274,7 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     rumble = array.array("h", (int(1600 * math.sin(2 * math.pi * 30 * i / 48000))
                                for i in range(48000)))
     play_pcm("orvia_output", rumble)
-    click(274, 178)  # Next · Read aloud
+    click(274, 178)  # Continue to reading
     time.sleep(1.2)
     speak("test_input")
     wait_for(playing, "Tone setup did not play its recommendation", timeout=30)

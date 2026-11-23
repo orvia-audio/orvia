@@ -2,46 +2,45 @@
 
 use orvia_core::{SAMPLE_RATE, spectrum::Spectrum};
 use realfft::{RealFftPlanner, RealToComplex, num_complex::Complex32};
-use rtrb::{Consumer, Producer, RingBuffer};
+use rtrb::{Consumer, Producer, PushError, RingBuffer};
 use std::{
     f32::consts::TAU,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering::Relaxed},
-    },
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 const WINDOW: usize = 8192;
 const BIN_HZ: f32 = SAMPLE_RATE as f32 / WINDOW as f32;
+const LAST_PEAK_BIN: usize = (Spectrum::MAX_HZ / BIN_HZ).ceil() as usize;
 type Frame = [f32; 2];
 
 /// One bounded copy per audio block while a measurement is in progress.
 pub(super) struct Tap {
-    samples: Producer<Frame>,
-    request: Arc<AtomicBool>,
-    remaining: usize,
+    requests: Consumer<Vec<Frame>>,
+    complete: Producer<Vec<Frame>>,
+    filling: Option<Vec<Frame>>,
 }
 
 impl Tap {
     pub(super) fn capture(&mut self, block: &[Frame]) {
-        if self.remaining == 0 {
-            if !self.request.load(Relaxed) {
-                return;
-            }
-            self.request.store(false, Relaxed);
-            self.remaining = WINDOW;
+        let Some(mut window) = self.filling.take().or_else(|| self.requests.pop().ok()) else {
+            return;
+        };
+        let count = block.len().min(WINDOW - window.len());
+        // The control thread reserves the whole window before handing it to the callback.
+        window.extend_from_slice(&block[..count]);
+        if window.len() < WINDOW {
+            self.filling = Some(window);
+        } else if let Err(PushError::Full(window)) = self.complete.push(window) {
+            self.filling = Some(window);
         }
-        let count = block.len().min(self.remaining);
-        // The reader only requests another window after consuming all WINDOW frames.
-        let (copied, _) = self.samples.push_partial_slice(&block[..count]);
-        self.remaining -= copied.len();
     }
 }
 
+/// Exchanges one capture window with the processing thread while the spectrum is visible.
 pub(super) struct Observation {
-    samples: Consumer<Frame>,
-    request: Arc<AtomicBool>,
+    requests: Producer<Vec<Frame>>,
+    complete: Consumer<Vec<Frame>>,
     requested_at: Option<Instant>,
     analyzer: Option<Analyzer>,
     latest: Option<(Instant, Spectrum)>,
@@ -49,17 +48,17 @@ pub(super) struct Observation {
 
 impl Observation {
     pub(super) fn new() -> (Tap, Self) {
-        let (writer, samples) = RingBuffer::new(WINDOW);
-        let request = Arc::new(AtomicBool::new(false));
+        let (requests, incoming) = RingBuffer::new(1);
+        let (completed, complete) = RingBuffer::new(1);
         (
             Tap {
-                samples: writer,
-                request: request.clone(),
-                remaining: 0,
+                requests: incoming,
+                complete: completed,
+                filling: None,
             },
             Self {
-                samples,
-                request,
+                requests,
+                complete,
                 requested_at: None,
                 analyzer: None,
                 latest: None,
@@ -70,19 +69,17 @@ impl Observation {
     /// Discard stale windows after a stall or after the user leaves the spectrum.
     pub(super) fn poll(&mut self, visible: bool) -> Option<Spectrum> {
         const FRESH: Duration = Duration::from_millis(650);
-        if let Some(start) = self.requested_at
-            && let Ok(chunk) = self.samples.read_chunk(WINDOW)
+        let completed = self.complete.pop().ok();
+        if let Some(window) = completed.as_deref()
+            && let Some(start) = self.requested_at.take()
+            && visible
+            && start.elapsed() <= FRESH
         {
-            self.requested_at = None;
-            if visible && start.elapsed() <= FRESH {
-                let (first, second) = chunk.as_slices();
-                self.latest = self
-                    .analyzer
-                    .get_or_insert_with(Analyzer::new)
-                    .measure(first.iter().chain(second))
-                    .map(|s| (start, s));
-            }
-            chunk.commit_all();
+            self.latest = self
+                .analyzer
+                .get_or_insert_with(Analyzer::new)
+                .measure(window)
+                .map(|s| (start, s));
         }
         if !visible {
             self.latest = None;
@@ -90,8 +87,12 @@ impl Observation {
             return None;
         }
         if self.requested_at.is_none() {
-            self.requested_at = Some(Instant::now());
-            self.request.store(true, Relaxed);
+            // Only this thread allocates, recycles and releases the capture window.
+            let mut window = completed.unwrap_or_else(|| Vec::with_capacity(WINDOW));
+            window.clear();
+            if self.requests.push(window).is_ok() {
+                self.requested_at = Some(Instant::now());
+            }
         }
         self.latest
             .as_ref()
@@ -127,27 +128,26 @@ impl Analyzer {
             input: plan.make_input_vec(),
             bins: plan.make_output_vec(),
             scratch: plan.make_scratch_vec(),
-            power: vec![0.; WINDOW / 2 + 1],
+            // Peak interpolation reads the bin above the highest displayed frequency.
+            power: vec![0.; LAST_PEAK_BIN + 2],
             plan,
         }
     }
 
-    fn measure<'a>(&mut self, frames: impl Iterator<Item = &'a Frame> + Clone) -> Option<Spectrum> {
+    fn measure(&mut self, frames: &[Frame]) -> Option<Spectrum> {
         self.power.fill(0.);
-        let channels = if frames.clone().all(|[l, r]| l == r) {
+        let channels = if frames.iter().all(|[l, r]| l == r) {
             1
         } else {
             2
         };
         let mut measured = false;
         for channel in 0..channels {
-            if frames.clone().all(|frame| frame[channel] == 0.) {
+            if frames.iter().all(|frame| frame[channel] == 0.) {
                 continue;
             }
             measured = true;
-            for ((sample, frame), weight) in
-                self.input.iter_mut().zip(frames.clone()).zip(&self.hann)
-            {
+            for ((sample, frame), weight) in self.input.iter_mut().zip(frames).zip(&self.hann) {
                 *sample = frame[channel] * weight;
             }
             self.plan
@@ -179,9 +179,7 @@ impl Analyzer {
         }
         let mut strongest = 10_f32.powf(-f32::from(Spectrum::RANGE_DB) / 10.);
         let mut peak_hz = None;
-        for k in (Spectrum::MIN_HZ / BIN_HZ).floor() as usize
-            ..=(Spectrum::MAX_HZ / BIN_HZ).ceil() as usize
-        {
+        for k in (Spectrum::MIN_HZ / BIN_HZ).floor() as usize..=LAST_PEAK_BIN {
             let [left, center, right] = [self.power[k - 1], self.power[k], self.power[k + 1]];
             if center <= strongest || center < left || center <= right {
                 continue;
@@ -223,7 +221,7 @@ mod tests {
                     [left * x, right * x]
                 })
                 .collect();
-            let s = analyzer.measure(frames.iter()).unwrap();
+            let s = analyzer.measure(&frames).unwrap();
             assert!(s.peak_hz.unwrap().abs_diff(hz as u16) <= 1);
             let band = ((hz / Spectrum::MIN_HZ).log10() / 3. * Spectrum::BANDS as f32) as usize;
             assert!((72..=74).contains(&s.bands[band]), "{hz} Hz: {:?}", s.bands);
@@ -234,7 +232,7 @@ mod tests {
     fn silence_and_dc_have_no_audible_peak() {
         let mut analyzer = Analyzer::new();
         for x in [0., 0.8] {
-            let s = analyzer.measure(vec![[x; 2]; WINDOW].iter()).unwrap();
+            let s = analyzer.measure(&vec![[x; 2]; WINDOW]).unwrap();
             assert!(s.peak_hz.is_none() && s.bands.iter().all(|&b| b == 0));
         }
     }
@@ -246,7 +244,7 @@ mod tests {
             let frames: Vec<_> = (0..WINDOW)
                 .map(|i| [(TAU * hz * i as f32 / SAMPLE_RATE as f32).sin(); 2])
                 .collect();
-            let readout = analyzer.measure(frames.iter()).unwrap().peak_hz;
+            let readout = analyzer.measure(&frames).unwrap().peak_hz;
             assert!(
                 readout.is_some_and(|peak| peak.abs_diff(hz.round() as u16) <= 1),
                 "{hz} Hz: {readout:?}"
@@ -255,11 +253,39 @@ mod tests {
     }
 
     #[test]
+    fn capture_reuses_a_contiguous_window_and_releases_it_after_hiding() {
+        let (mut tap, mut observation) = Observation::new();
+        let frames: Vec<_> = (0..WINDOW + BLOCK)
+            .map(|i| [i as f32, -(i as f32)])
+            .collect();
+        assert!(observation.poll(true).is_none());
+        for block in frames.chunks(BLOCK) {
+            tap.capture(block);
+        }
+        let captured = observation.complete.peek().unwrap();
+        assert_eq!(captured, &frames[..WINDOW]);
+        let storage = captured.as_ptr();
+        assert!(observation.poll(true).is_some());
+
+        tap.capture(&frames[..BLOCK]);
+        assert_eq!(tap.filling.as_ref().unwrap().as_ptr(), storage);
+        assert!(observation.poll(false).is_none());
+        tap.capture(&frames[BLOCK..WINDOW]);
+        assert!(observation.poll(false).is_none());
+
+        tap.capture(&frames[..BLOCK]);
+        assert!(tap.filling.is_none());
+        assert!(observation.complete.peek().is_err());
+        assert!(observation.requested_at.is_none());
+    }
+
+    #[test]
     fn idle_tap_and_partial_windows_do_not_publish_a_spectrum() {
         let (mut tap, mut observation) = Observation::new();
         let block = [[0.; 2]; BLOCK];
         tap.capture(&block);
-        assert_eq!(observation.samples.slots(), 0);
+        assert!(tap.filling.is_none());
+        assert_eq!(observation.complete.slots(), 0);
         assert!(observation.poll(true).is_none());
         for _ in 0..WINDOW / BLOCK {
             tap.capture(&block);

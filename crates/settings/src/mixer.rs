@@ -1,6 +1,6 @@
 //! Mixer controls and switchable signal displays.
 use super::*;
-use gpui::{MouseButton, Pixels, canvas, fill, point};
+use gpui::{MouseButton, canvas, fill, point};
 
 const INPUT_COLOR: u32 = 0xb2d3dd;
 const OUTPUT_COLOR: u32 = 0xffaa82;
@@ -97,27 +97,6 @@ fn legend(label: &'static str, color: u32) -> gpui::Div {
         .child(label)
 }
 
-impl Slider {
-    fn max(self) -> u16 {
-        match self {
-            Self::Gain => 200,
-            Self::LowCut => 150,
-            Self::Compression => 3,
-            Self::Suppression => Settings::UNLIMITED_ATTENUATION_DB,
-        }
-    }
-
-    fn value(self, prefs: &Settings) -> u16 {
-        match self {
-            Self::Gain => prefs.gain_percent,
-            Self::LowCut => prefs.low_cut_hz,
-            Self::Compression => prefs.compressor_ratio.saturating_sub(1),
-            Self::Suppression => prefs.deep_filter_limit_db,
-        }
-        .min(self.max())
-    }
-}
-
 impl Panel {
     /// Compare the current mixer display, including its visible traces and rounded meter labels.
     pub(crate) fn mixer_status_changed(
@@ -162,21 +141,10 @@ impl Panel {
                 && attenuation_label(old_db) != attenuation_label(new_db))
     }
 
-    pub(super) fn slide_at(&mut self, slider: Slider, x: Pixels, cx: &mut Context<Self>) {
-        let bounds = self.slider_anchors[slider as usize].bounds.get();
-        if bounds.size.width > px(0.) {
-            let ratio = ((x - bounds.origin.x) / bounds.size.width).clamp(0., 1.);
-            let value = (ratio * f32::from(slider.max())).round() as u16;
-            if value != slider.value(&self.prefs) {
-                self.activate(Control::Slide(slider, value), cx);
-            }
-        }
-    }
-
     fn slider(&self, slider: Slider, cx: &mut Context<Self>) -> impl IntoElement {
         let anchor = &self.slider_anchors[slider as usize];
         let measured = anchor.bounds.clone();
-        let fraction = f32::from(slider.value(&self.prefs)) / f32::from(slider.max());
+        let fraction = f32::from(self.slider_value(slider)) / f32::from(slider.max());
         let track = canvas(
             move |bounds, _, _| measured.set(bounds),
             move |bounds, _, window, _| {
@@ -228,12 +196,11 @@ impl Panel {
                 MouseButton::Left,
                 cx.listener(move |p, event: &gpui::MouseDownEvent, window, cx| {
                     window.focus(&p.slider_anchors[slider as usize].focus);
-                    p.dragging_slider = Some(slider);
-                    p.slide_at(slider, event.position.x, cx);
+                    p.start_slider(slider, event.position.x, cx);
                 }),
             )
             .on_key_down(cx.listener(move |p, event: &gpui::KeyDownEvent, _, cx| {
-                let value = slider.value(&p.prefs);
+                let value = p.slider_value(slider);
                 let step = if event.keystroke.modifiers.shift {
                     10
                 } else {
@@ -393,7 +360,11 @@ impl Panel {
                             ))),
                     )
             };
-        let tone = self.prefs.tone();
+        let tone = orvia_core::Tone {
+            low_cut_hz: self.slider_value(Slider::LowCut),
+            gain_percent: self.slider_value(Slider::Gain),
+            compressor_ratio: self.slider_value(Slider::Compression) + 1,
+        };
         let mut controls = stack().gap_1();
         for ((label, value), slider) in tone_labels(l, tone).into_iter().zip([
             Slider::LowCut,
@@ -454,7 +425,7 @@ impl Panel {
                             .child(methods),
                     )
                     .when(selected == Some(NoiseMethod::DeepFilterNet3), |card| {
-                        let db = self.prefs.deep_filter_limit_db;
+                        let db = self.slider_value(Slider::Suppression);
                         let limit = if db >= Settings::UNLIMITED_ATTENUATION_DB {
                             l.text("Unlimited", "上限なし").to_owned()
                         } else {

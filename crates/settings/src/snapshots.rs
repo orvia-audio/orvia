@@ -30,8 +30,13 @@ fn render_window() {
             },
             |window, cx| {
                 cx.new(|cx| {
-                    let mut panel =
-                        Panel::empty(dir, Version::new(1, 0, 0), scene == "mic-standalone", cx);
+                    let mut panel = Panel::empty(
+                        dir,
+                        Version::new(1, 0, 0),
+                        scene == "mic-standalone",
+                        window,
+                        cx,
+                    );
                     window.focus(&panel.root);
                     populate(&mut panel, &scene, language);
                     panel

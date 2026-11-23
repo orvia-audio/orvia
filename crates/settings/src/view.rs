@@ -807,30 +807,17 @@ impl Render for Panel {
             .track_focus(&self.root)
             .key_context("Settings")
             .on_mouse_move(cx.listener(|p, event: &gpui::MouseMoveEvent, _, cx| {
-                if let Some(slider) = p.dragging_slider {
+                if p.dragging_slider.is_some() {
                     if event.pressed_button == Some(gpui::MouseButton::Left) {
-                        p.slide_at(slider, event.position.x, cx);
+                        p.move_slider(event.position.x, cx);
                     } else {
-                        p.dragging_slider = None;
+                        p.finish_slider();
+                        cx.notify();
                     }
                 }
             }))
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|p, event: &gpui::MouseUpEvent, _, cx| {
-                    if let Some(slider) = p.dragging_slider.take() {
-                        p.slide_at(slider, event.position.x, cx);
-                    }
-                }),
-            )
-            .on_mouse_up_out(
-                gpui::MouseButton::Left,
-                cx.listener(|p, event: &gpui::MouseUpEvent, _, cx| {
-                    if let Some(slider) = p.dragging_slider.take() {
-                        p.slide_at(slider, event.position.x, cx);
-                    }
-                }),
-            )
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(Self::release_slider))
+            .on_mouse_up_out(gpui::MouseButton::Left, cx.listener(Self::release_slider))
             .on_key_down(cx.listener(Self::picker_key))
             .on_action(cx.listener(|p, _: &NextControl, w, cx| {
                 p.choosing = None;

@@ -8,6 +8,7 @@ use gpui::{
 use microphone_test::TestAction;
 use orvia_core::{EngineStatus, Language, Mixing, NoiseMethod, Settings, data_dir, read_json};
 use semver::Version;
+use slider::{Slider, SliderDrag};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -67,14 +68,6 @@ enum Control {
     Releases,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Slider {
-    Gain,
-    Suppression,
-    LowCut,
-    Compression,
-}
-
 /// Geometry and keyboard focus of a measured control in the scrolling page.
 struct ControlAnchor {
     bounds: std::rc::Rc<std::cell::Cell<Bounds<gpui::Pixels>>>,
@@ -100,7 +93,7 @@ struct Panel {
     dir: PathBuf,
     root: FocusHandle,
     slider_anchors: [ControlAnchor; 4],
-    dragging_slider: Option<Slider>,
+    dragging_slider: Option<SliderDrag>,
     prefs: Settings,
     inputs: Vec<(String, String)>,
     outputs: Vec<(String, String)>,
@@ -296,7 +289,7 @@ impl Panel {
             }
         })
         .detach();
-        let mut panel = Self::empty(dir, installed, test_only, cx);
+        let mut panel = Self::empty(dir, installed, test_only, window, cx);
         window.focus(&panel.root);
         panel.updates = updates::Updates::load(&panel.dir);
         panel.prefs = prefs;
@@ -348,7 +341,15 @@ impl Panel {
     }
 
     /// Construct the window state before attaching audio devices and background tasks.
-    fn empty(dir: PathBuf, installed: Version, test_only: bool, cx: &Context<Self>) -> Self {
+    fn empty(
+        dir: PathBuf,
+        installed: Version,
+        test_only: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let slider_anchors = std::array::from_fn(|_| ControlAnchor::new(cx));
+        Self::observe_slider_focus(&slider_anchors, window, cx);
         Self {
             updates: Default::default(),
             show_spectrum: false,
@@ -357,7 +358,7 @@ impl Panel {
             show_update_feedback: false,
             dir,
             root: cx.focus_handle(),
-            slider_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
+            slider_anchors,
             picker_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
             picker_cursor: 0,
             picker_scroll: gpui::ScrollHandle::new(),
@@ -405,6 +406,7 @@ impl Panel {
     }
 
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
+        self.finish_slider();
         match control {
             Control::ShowSpectrum(on) => {
                 self.show_spectrum = on;
@@ -565,29 +567,32 @@ impl Panel {
                             settings.noise_method = method;
                         }
                     }
-                    Control::Slide(Slider::Gain, percent) => settings.gain_percent = percent,
-                    Control::Slide(Slider::LowCut, hz) => settings.low_cut_hz = hz,
-                    Control::Slide(Slider::Compression, step) => {
-                        settings.compressor_ratio = step + 1
-                    }
-                    Control::Slide(Slider::Suppression, db) => settings.deep_filter_limit_db = db,
+                    Control::Slide(slider, value) => slider.set(settings, value),
                     _ => unreachable!(),
-                })
-                .map(|saved| self.prefs = saved);
-                self.error = result
-                    .err()
-                    .map(|e| {
-                        format!(
-                            "{} · {e}",
-                            self.prefs
-                                .language
-                                .text("Cannot save settings", "設定を保存できません")
-                        )
-                    })
-                    .unwrap_or_default();
+                });
+                self.settings_saved(result);
             }
         }
         cx.notify();
+    }
+
+    fn settings_saved(&mut self, result: io::Result<Settings>) -> bool {
+        match result {
+            Ok(saved) => {
+                self.prefs = saved;
+                self.error.clear();
+                true
+            }
+            Err(error) => {
+                self.error = format!(
+                    "{} · {error}",
+                    self.prefs
+                        .language
+                        .text("Cannot save settings", "設定を保存できません")
+                );
+                false
+            }
+        }
     }
 }
 
@@ -596,6 +601,7 @@ mod engine_control;
 mod icons;
 mod microphone_test;
 mod reading;
+mod slider;
 mod tone_setup;
 mod view;
 

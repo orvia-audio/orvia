@@ -153,7 +153,26 @@ impl Panel {
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
             let mut heartbeat = Instant::now() - Duration::from_secs(3);
+            let mut last_poll = heartbeat;
             loop {
+                // A newly started recording or live graph picks up on the next 250 ms tick.
+                // Static pages only need an occasional settings and engine liveness check.
+                if last_poll.elapsed() < Duration::from_secs(1) {
+                    let Ok(live) = this.read_with(cx, |p, _| {
+                        p.polling_audio()
+                            || (p.page == Page::Mixer
+                                && p.status
+                                    .as_ref()
+                                    .is_some_and(|s| s.message.starts_with("Streaming")))
+                    }) else {
+                        break;
+                    };
+                    if !live {
+                        Timer::after(Duration::from_millis(250)).await;
+                        continue;
+                    }
+                }
+                last_poll = Instant::now();
                 if !test_only && fs::remove_file(poll_dir.join("close-window")).is_ok() {
                     let _ = handle.update(cx, |_, w, _| w.remove_window());
                     break;
@@ -188,24 +207,35 @@ impl Panel {
                             let _ =
                                 fs::write(poll_dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
                         }
-                        p.status = status.or_else(|| {
-                            p.status.take().filter(|s| {
+                        let retain = status.is_none()
+                            && p.status.as_ref().is_some_and(|s| {
                                 s.observed
                                     .elapsed()
                                     .is_ok_and(|age| age < Duration::from_secs(2))
-                            })
-                        });
-                        if let Some(prefs) = prefs {
-                            p.prefs = prefs;
+                            });
+                        let mut redraw = false;
+                        if !retain {
+                            redraw = p.status_changed(status.as_ref());
+                            p.status = status;
                         }
+                        if let Some(prefs) = prefs
+                            && p.prefs != prefs
+                        {
+                            p.prefs = prefs;
+                            redraw = true;
+                        }
+                        redraw |= p.polling_audio();
                         p.poll_tone_setup(cx);
                         if p.page == Page::MicTest {
                             p.poll_mic_test(cx);
                         }
                         if !p.test_only && p.prefs.check_updates_automatically && p.updates.due() {
                             p.check_for_updates(cx);
+                            redraw = true;
                         }
-                        cx.notify();
+                        if redraw {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -220,15 +250,41 @@ impl Panel {
         panel.updates = updates::Updates::load(&panel.dir);
         panel.prefs = prefs;
         panel.error = error;
-        panel.inputs = orvia_engine::inputs().unwrap_or_default();
-        panel.outputs = orvia_engine::outputs().unwrap_or_default();
-        panel.receivers = orvia_engine::mic_test::sources().unwrap_or_default();
-        panel.monitors = orvia_engine::monitors().unwrap_or_default();
         if test_only {
             panel.page = Page::MicTest;
             panel.open_mic_test();
+        } else {
+            panel.monitors = orvia_engine::monitors().unwrap_or_default();
         }
         panel
+    }
+
+    fn polling_audio(&self) -> bool {
+        self.tone_setup.is_some() || self.test.busy() || self.test.adjust.is_some()
+    }
+
+    /// Compare the diagnostics drawn on this page. Heartbeats update liveness without
+    /// repainting a static page or redrawing an unchanged signal.
+    fn status_changed(&self, next: Option<&EngineStatus>) -> bool {
+        let (Some(old), Some(new)) = (&self.status, next) else {
+            return self.status.is_some() != next.is_some();
+        };
+        match self.page {
+            Page::Devices => false,
+            Page::Preferences => old.version != new.version,
+            Page::MicTest => old.message != new.message || old.version != new.version,
+            Page::Mixer => {
+                old.message != new.message
+                    || old.version != new.version
+                    || old.monitor_error != new.monitor_error
+                    || old.monitoring != new.monitoring
+                    || if self.show_spectrum {
+                        old.spectrum != new.spectrum
+                    } else {
+                        old.signal != new.signal || old.peak != new.peak
+                    }
+            }
+        }
     }
 
     /// Construct the window state before attaching audio devices and background tasks.
@@ -306,6 +362,10 @@ impl Panel {
                     }
                     if page == Page::MicTest {
                         self.open_mic_test();
+                    } else if page == Page::Devices {
+                        self.inputs = orvia_engine::inputs().unwrap_or_default();
+                        self.outputs = orvia_engine::outputs().unwrap_or_default();
+                        self.receivers = orvia_engine::mic_test::sources().unwrap_or_default();
                     }
                 }
                 self.show_update_feedback = false;

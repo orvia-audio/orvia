@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 pub const OBSERVER_FILE: &str = "observe-spectrum";
 
 /// The spectrum of the processed stereo mix before device rate conversion.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct Spectrum {
     /// Peak level in each logarithmic band, in 1 dB steps above −80 dBFS.
     /// Each band uses the louder channel. A value of zero is the display floor.

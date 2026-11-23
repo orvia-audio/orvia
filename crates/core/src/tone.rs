@@ -111,6 +111,7 @@ impl ToneProcessor {
         self.settings = settings;
     }
     /// Apply one block of at most 480 normalized stereo frames and return the final peak.
+    /// A settled compressor passes through blocks at or below its threshold.
     pub fn process(&mut self, frames: &mut [[f32; 2]]) -> f32 {
         self.process_block::<true>(frames)
     }
@@ -119,7 +120,6 @@ impl ToneProcessor {
         &mut self,
         frames: &mut [[f32; 2]],
     ) -> f32 {
-        let count = frames.len().max(1) as f32;
         let gain = f32::from(self.settings.gain_percent) / 100.;
         if self.previous_filter.is_none()
             && self.settings.compressor_ratio == 1
@@ -153,7 +153,63 @@ impl ToneProcessor {
             }
             return peak;
         }
+        let peak = self.prepare_compressor_input(frames, gain);
+        let threshold = 0.25;
+        // An earlier loud block may still be releasing even after the input falls below threshold.
+        if peak <= threshold && self.reduction == 1. {
+            return if OUTPUT_PEAK { peak } else { 0. };
+        }
+        let target = if self.settings.compressor_ratio > 1 && peak > threshold {
+            (peak / threshold).powf(1. / f32::from(self.settings.compressor_ratio) - 1.)
+        } else {
+            1.
+        };
+        // A block peak drives both channels. Release takes about 150 ms at the engine block size.
+        let step = if target < self.reduction {
+            0.0138
+        } else {
+            0.000139
+        };
+        let mut output = 0_f32;
+        let previous_reduction = self.reduction;
+        let count = frames.len().max(1) as f32;
+        for (i, sample) in frames.iter_mut().enumerate() {
+            if self.settings.compressor_ratio == 1 {
+                self.reduction =
+                    previous_reduction + (1. - previous_reduction) * (i + 1) as f32 / count;
+            } else {
+                self.reduction += step * (target - self.reduction);
+            }
+            for s in sample {
+                *s = (*s * self.reduction).clamp(-1., 1.);
+                if OUTPUT_PEAK {
+                    output = output.max(s.abs());
+                }
+            }
+        }
+        if (1. - self.reduction).abs() < 0.0003 && target == 1. {
+            self.reduction = 1.;
+        }
+        output
+    }
+
+    /// Apply low-cut and gain transitions and measure the peak that drives both channels.
+    fn prepare_compressor_input(&mut self, frames: &mut [[f32; 2]], gain: f32) -> f32 {
+        if self.previous_filter.is_none()
+            && self.settings.low_cut_hz == 0
+            && self.gain == 1.
+            && gain == 1.
+        {
+            let mut left = 0_f32;
+            let mut right = 0_f32;
+            for &[l, r] in frames.iter() {
+                left = left.max(l.abs());
+                right = right.max(r.abs());
+            }
+            return left.max(right);
+        }
         let mut peak = 0_f32;
+        let count = frames.len().max(1) as f32;
         for (i, frame) in frames.iter_mut().enumerate() {
             let mix = (i + 1) as f32 / count;
             let dry = *frame;
@@ -174,38 +230,7 @@ impl ToneProcessor {
         self.highpass.settle();
         self.previous_filter = None;
         self.gain = gain;
-        let threshold = 0.25;
-        let target = if self.settings.compressor_ratio > 1 && peak > threshold {
-            (peak / threshold).powf(1. / f32::from(self.settings.compressor_ratio) - 1.)
-        } else {
-            1.
-        };
-        // A block peak drives both channels. Release takes about 150 ms at the engine block size.
-        let step = if target < self.reduction {
-            0.0138
-        } else {
-            0.000139
-        };
-        let mut output = 0_f32;
-        let previous_reduction = self.reduction;
-        for (i, sample) in frames.iter_mut().enumerate() {
-            if self.settings.compressor_ratio == 1 {
-                self.reduction =
-                    previous_reduction + (1. - previous_reduction) * (i + 1) as f32 / count;
-            } else {
-                self.reduction += step * (target - self.reduction);
-            }
-            for s in sample {
-                *s = (*s * self.reduction).clamp(-1., 1.);
-                if OUTPUT_PEAK {
-                    output = output.max(s.abs());
-                }
-            }
-        }
-        if (1. - self.reduction).abs() < 0.0003 && target == 1. {
-            self.reduction = 1.;
-        }
-        output
+        peak
     }
 }
 
@@ -365,6 +390,37 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_blocks_pass_through_only_after_compressor_release() {
+        let mut processor = ToneProcessor::new(Tone {
+            compressor_ratio: 2,
+            ..Tone::default()
+        });
+        let quiet = [[-0.0, -0.25]; BLOCK];
+        let mut block = quiet;
+        assert_eq!(processor.process(&mut block), 0.25);
+        assert_eq!(
+            block.map(|f| f.map(f32::to_bits)),
+            quiet.map(|f| f.map(f32::to_bits))
+        );
+
+        let mut loud = [[0.125, 1.0]; BLOCK];
+        processor.process_block::<false>(&mut loud);
+        assert!(loud[BLOCK - 1][0] < 0.125);
+        block = quiet;
+        assert!(processor.process(&mut block) < 0.25);
+        assert!(block[BLOCK - 1][1].abs() > block[0][1].abs());
+
+        for _ in 0..160 {
+            block = quiet;
+            processor.process_block::<false>(&mut block);
+        }
+        assert_eq!(
+            block.map(|f| f.map(f32::to_bits)),
+            quiet.map(|f| f.map(f32::to_bits))
+        );
+    }
 
     #[test]
     fn silent_high_pass_feedback_settles_without_changing_pcm_on_resume() {

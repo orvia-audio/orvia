@@ -4,7 +4,7 @@ use std::{hint::black_box, time::Instant};
 
 fn main() {
     let case = std::env::args().nth(1).expect(
-        "choose bypass, mono-input, mirrored-input, stereo-input, quiet-low-cut, or calibration",
+        "choose bypass, mono-input, mirrored-input, stereo-input, quiet-low-cut, quiet-compressor, or calibration",
     );
     let mono = case == "mono-input";
     let mirrored = mono || case == "mirrored-input";
@@ -33,22 +33,27 @@ fn main() {
     }
     assert!(matches!(
         case.as_str(),
-        "bypass" | "mono-input" | "mirrored-input" | "stereo-input" | "quiet-low-cut"
+        "bypass"
+            | "mono-input"
+            | "mirrored-input"
+            | "stereo-input"
+            | "quiet-low-cut"
+            | "quiet-compressor"
     ));
+    let suppress_noise = matches!(
+        case.as_str(),
+        "mono-input" | "mirrored-input" | "stereo-input"
+    );
     let settings = Settings {
-        suppress_noise: !matches!(case.as_str(), "bypass" | "quiet-low-cut"),
+        suppress_noise,
         low_cut_hz: if case == "quiet-low-cut" { 80 } else { 0 },
+        compressor_ratio: if case == "quiet-compressor" { 2 } else { 1 },
         ..Settings::default()
     };
     let mut processor = Processor::for_input(&settings, if mono { 1 } else { 2 });
     let mut times = Vec::new();
-    for frames in samples.chunks_exact(BLOCK).cycle().take(
-        if matches!(case.as_str(), "bypass" | "quiet-low-cut") {
-            80_000
-        } else {
-            1600
-        },
-    ) {
+    let iterations = if suppress_noise { 1600 } else { 80_000 };
+    for frames in samples.chunks_exact(BLOCK).cycle().take(iterations) {
         let mut block = *<&[[f32; 2]; BLOCK]>::try_from(frames).unwrap();
         if case == "quiet-low-cut" && !times.is_empty() {
             block.fill([0.; 2]);

@@ -75,14 +75,15 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         time.sleep(0.5)
         tone = Path(tmp, "tone.raw")
         tone.write_bytes(samples.tobytes())
-        (state / "observe").touch()
         (state / "observe-spectrum").touch()
+        (state / "observe").unlink(missing_ok=True)
         with tone.open("rb") as source:
             player = start("pacat", "-d", "test_input", "--latency-msec=20", "--raw", "--format=s16le",
                            "--channels=1", "--rate=48000", stdin=source)
             def measured_tone():
-                hz = (json.loads(status.read_text()).get("spectrum") or {}).get("peak_hz")
-                return hz is not None and abs(hz - 440) <= 1
+                report = json.loads(status.read_text())
+                hz = (report.get("spectrum") or {}).get("peak_hz")
+                return not report["signal"]["peaks"] and hz is not None and abs(hz - 440) <= 1
             wait_for(measured_tone, "Output spectrum did not identify the 440 Hz test tone", timeout=4)
             assert player.wait(timeout=5) == 0
         time.sleep(0.5)
@@ -101,7 +102,7 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         raise AssertionError(f"440 Hz amplitude {amplitude:.0f} in {len(captured)} samples; engine {snapshot}")
     # Summary observers receive fresh route health without collecting waveform samples.
     (state / "observe-summary").touch()
-    (state / "observe").unlink(missing_ok=True)
+    (state / "observe-spectrum").unlink(missing_ok=True)
     def summary_only():
         if not status.exists():
             return False

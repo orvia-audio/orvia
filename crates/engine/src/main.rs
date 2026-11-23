@@ -84,7 +84,9 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
         }
         let now = Instant::now();
         let metering = recently_observed(&mixer_path);
-        let observed = metering || recently_observed(&summary_path);
+        let spectrum_requested = recently_observed(&spectrum_path);
+        let live = metering || spectrum_requested;
+        let observed = live || recently_observed(&summary_path);
         let settings = Settings::load(&settings_path);
         if menu(settings.as_ref().ok().map(|s| s.language)) {
             break;
@@ -178,11 +180,9 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
             last_monitor = monitor;
         }
         // Persist diagnostics only while a settings window is observing the engine.
-        let spectrum = running.as_mut().and_then(|route| {
-            route
-                .spectrum
-                .poll(metering && recently_observed(&spectrum_path))
-        });
+        let spectrum = running
+            .as_mut()
+            .and_then(|route| route.spectrum.poll(spectrum_requested));
         let changed = published.as_ref().is_none_or(|last| {
             last.message != message
                 || last.audition != audition
@@ -191,7 +191,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
         });
         if observed
             && (changed
-                || (metering && running.is_some())
+                || (live && running.is_some())
                 || last_publish.elapsed() >= Duration::from_secs(1))
         {
             let (peak, missing_frames, dropped_frames) = running

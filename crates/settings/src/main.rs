@@ -184,25 +184,34 @@ impl Panel {
                         w.activate_window();
                     });
                 }
-                let Ok(observer) = this.read_with(cx, |p, _| {
-                    if p.live_mixer()
-                        || p.status
-                            .as_ref()
-                            .is_none_or(|s| s.version != env!("CARGO_PKG_VERSION"))
-                    {
+                let Ok((observer, legacy_spectrum)) = this.read_with(cx, |p, _| {
+                    let spectrum = p.live_mixer() && p.show_spectrum;
+                    let legacy = p
+                        .status
+                        .as_ref()
+                        .is_none_or(|s| s.version != env!("CARGO_PKG_VERSION"));
+                    let observer = if legacy {
+                        "observe"
+                    } else if spectrum {
+                        orvia_core::spectrum::OBSERVER_FILE
+                    } else if p.live_mixer() {
                         "observe"
                     } else {
                         orvia_core::SUMMARY_OBSERVER
-                    }
+                    };
+                    (observer, spectrum && legacy)
                 }) else {
                     break;
                 };
-                let refresh = last_observer != Some(observer)
+                let refresh = last_observer != Some((observer, legacy_spectrum))
                     || heartbeat.elapsed() >= Duration::from_secs(2);
                 if refresh {
-                    // An empty rewrite can leave the previous modification time on Windows.
+                    // Older engines require both heartbeats to publish a spectrum.
                     let _ = fs::write(poll_dir.join(observer), b"1");
-                    last_observer = Some(observer);
+                    if legacy_spectrum {
+                        let _ = fs::write(poll_dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
+                    }
+                    last_observer = Some((observer, legacy_spectrum));
                     heartbeat = Instant::now();
                 }
                 let status = read_json::<EngineStatus>(&poll_dir.join("status.json"))
@@ -215,14 +224,6 @@ impl Panel {
                 let prefs = Settings::load(&poll_dir.join("settings.json")).ok();
                 if this
                     .update(cx, |p, cx| {
-                        if refresh
-                            && p.page == Page::Mixer
-                            && p.tone_setup.is_none()
-                            && p.show_spectrum
-                        {
-                            let _ =
-                                fs::write(poll_dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
-                        }
                         let retain = status.is_none()
                             && p.status.as_ref().is_some_and(|s| {
                                 s.observed

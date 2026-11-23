@@ -103,6 +103,7 @@ impl Observation {
 struct Analyzer {
     plan: Arc<dyn RealToComplex<f32>>,
     hann: Vec<f32>,
+    bands: [(std::ops::Range<usize>, f32); Spectrum::BANDS],
     input: Vec<f32>,
     bins: Vec<Complex32>,
     scratch: Vec<Complex32>,
@@ -113,6 +114,13 @@ impl Analyzer {
     fn new() -> Self {
         let plan = RealFftPlanner::new().plan_fft_forward(WINDOW);
         Self {
+            bands: std::array::from_fn(|band| {
+                let bin_at =
+                    |index| Spectrum::frequency_at(index / Spectrum::BANDS as f32) / BIN_HZ;
+                let start = bin_at(band as f32).ceil() as usize;
+                let end = bin_at((band + 1) as f32).ceil() as usize;
+                (start..end, bin_at(band as f32 + 0.5))
+            }),
             hann: (0..WINDOW)
                 .map(|i| 0.5 - 0.5 * (TAU * i as f32 / WINDOW as f32).cos())
                 .collect(),
@@ -131,7 +139,12 @@ impl Analyzer {
         } else {
             2
         };
+        let mut measured = false;
         for channel in 0..channels {
+            if frames.clone().all(|frame| frame[channel] == 0.) {
+                continue;
+            }
+            measured = true;
             for ((sample, frame), weight) in
                 self.input.iter_mut().zip(frames.clone()).zip(&self.hann)
             {
@@ -146,16 +159,18 @@ impl Analyzer {
                 *power = power.max(bin.norm_sqr() * scale);
             }
         }
+        if !measured {
+            return Some(Spectrum {
+                bands: vec![0; Spectrum::BANDS],
+                peak_hz: None,
+            });
+        }
         let mut bands = Vec::with_capacity(Spectrum::BANDS);
-        for band in 0..Spectrum::BANDS {
-            let bin_at = |i| Spectrum::frequency_at(i / Spectrum::BANDS as f32) / BIN_HZ;
-            let mid = bin_at(band as f32 + 0.5);
-            let k = mid as usize;
+        for (bins, mid) in &self.bands {
+            let k = *mid as usize;
             // Low-frequency bands can be narrower than an FFT bin.
             let center = self.power[k] + mid.fract() * (self.power[k + 1] - self.power[k]);
-            let start = bin_at(band as f32).ceil() as usize;
-            let end = bin_at((band + 1) as f32).ceil() as usize;
-            let max = self.power[start..end]
+            let max = self.power[bins.clone()]
                 .iter()
                 .copied()
                 .fold(center, f32::max);

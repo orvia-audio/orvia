@@ -8,7 +8,7 @@ sonora-common-audio = { path = "vendor/sonora-common-audio" }
 
 [workspace.package]
 edition = "2024"
-version = "0.1.6-snapshot.5"
+version = "0.1.6-snapshot.6"
 license = "MIT"
 repository = "https://github.com/sya-ri/orvia"
 rust-version = "1.93"

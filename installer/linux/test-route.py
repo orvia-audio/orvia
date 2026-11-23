@@ -100,6 +100,32 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         snapshot = json.loads(status.read_text()) if status.exists() else {}
         snapshot.pop("signal", None)
         raise AssertionError(f"440 Hz amplitude {amplitude:.0f} in {len(captured)} samples; engine {snapshot}")
+    # Equal spectrum frames need a heartbeat. Counter changes still publish immediately.
+    spectrum_lease = state / "observe-spectrum"
+    spectrum_lease.touch()
+    def quiet_spectrum():
+        if not status.exists():
+            return False
+        report = json.loads(status.read_text())
+        spectrum = report.get("spectrum")
+        return spectrum is not None and not any(spectrum["bands"])
+    wait_for(quiet_spectrum, "The spectrum did not settle after the tone", timeout=4)
+    previous_report = None
+    previous_time = 0
+    seen = 0
+    deadline = time.monotonic() + 2.6
+    spectrum_lease.touch()
+    while time.monotonic() < deadline:
+        report = json.loads(status.read_text())
+        stamp = report.pop("observed")
+        published = stamp["secs_since_epoch"] + stamp["nanos_since_epoch"] / 1e9
+        if published != previous_time:
+            if report == previous_report:
+                assert published - previous_time >= 0.9, "Repeated an unchanged live report before its heartbeat"
+            previous_report, previous_time = report, published
+            seen += 1
+        time.sleep(0.04)
+    assert seen >= 2, "The live spectrum lost its health heartbeat"
     # Summary observers receive fresh route health without collecting waveform samples.
     (state / "observe-summary").touch()
     (state / "observe-spectrum").unlink(missing_ok=True)

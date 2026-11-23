@@ -16,13 +16,13 @@ use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     io::BufWriter,
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     time::Duration,
 };
+
+mod playback;
+pub use playback::{Playback, SavedClip};
+use playback::{checked_reader, latest_path};
 
 /// Capacity of the queue between the device callback and the recorder.
 const QUEUE_DURATION: Duration = Duration::from_secs(10);
@@ -291,10 +291,13 @@ where
     device.build_input_stream(
         stream_config(format),
         move |data: &[T], _| {
-            for frame in data.chunks_exact(channels).take(tx.slots()) {
-                let left = frame[0].to_sample();
-                let right = frame.get(1).map_or(left, |s| s.to_sample());
-                let _ = tx.push([left, right]);
+            let frames = data.chunks_exact(channels);
+            let count = tx.slots().min(frames.len());
+            if let Ok(chunk) = tx.write_chunk_uninit(count) {
+                chunk.fill_from_iter(frames.map(|frame| {
+                    let left = frame[0].to_sample();
+                    [left, frame.get(1).map_or(left, |s| s.to_sample())]
+                }));
             }
         },
         error,
@@ -410,22 +413,7 @@ impl Clip {
     ///
     /// Returns an error if the saved recording cannot be located or decoded.
     pub fn load_latest(dir: &Path) -> Result<Option<Self>> {
-        let current = dir.join(RECORDING_FILE);
-        if current.try_exists()? {
-            return Self::load(&current).map(Some);
-        }
-        let mut previous = Vec::new();
-        for name in ["before.wav", "after.wav"] {
-            let path = dir.join(name);
-            if path.try_exists()? {
-                previous.push((path.metadata()?.modified()?, path));
-            }
-        }
-        previous
-            .into_iter()
-            .max_by_key(|(time, _)| *time)
-            .map(|(_, path)| Self::load(&path))
-            .transpose()
+        latest_path(dir)?.map(|path| Self::load(&path)).transpose()
     }
 
     /// Atomically save a stereo float WAV. A failed retake preserves the previous file.
@@ -447,7 +435,12 @@ impl Clip {
             writer.write_sample(*sample)?;
         }
         writer.finalize()?;
-        tmp.persist(path)?;
+        // The standard rename can replace a take that another window is playing on Windows.
+        let staging = tmp.into_temp_path().keep()?;
+        if let Err(error) = std::fs::rename(&staging, path) {
+            let _ = std::fs::remove_file(staging);
+            return Err(error.into());
+        }
         Ok(())
     }
 
@@ -457,17 +450,8 @@ impl Clip {
     ///
     /// Returns an error for unreadable, malformed, truncated or unsupported recordings.
     pub fn load(path: &Path) -> Result<Self> {
-        let mut reader = hound::WavReader::open(path)?;
+        let mut reader = checked_reader(path)?;
         let spec = reader.spec();
-        ensure!(
-            spec.channels == 2
-                && spec.sample_format == hound::SampleFormat::Float
-                && spec.bits_per_sample == 32
-                && (8_000..=48_000).contains(&spec.sample_rate)
-                && reader.duration() > 0
-                && u64::from(reader.duration()) * 8 <= path.metadata()?.len(),
-            "Unsupported microphone test WAV"
-        );
         let mut frames = Vec::new();
         frames.try_reserve_exact(reader.duration() as usize)?;
         let mut samples = reader.samples::<f32>();
@@ -491,106 +475,7 @@ impl Clip {
     ///
     /// Returns an error if the selected device is virtual, unavailable or incompatible.
     pub fn play(&self, id: Option<&str>) -> Result<Playback> {
-        let host = host()?;
-        let device = match id {
-            Some(id) => host.device_by_id(&id.parse()?),
-            None => host.default_output_device(),
-        }
-        .context("Playback device unavailable")?;
-        ensure!(
-            !is_virtual_cable(&device),
-            "Choose physical headphones or speakers"
-        );
-        let format = config(&device, Port::Headphones)?;
-        let mut cursor = Cursor {
-            frames: self.frames.clone(),
-            phase: 0,
-            input_rate: self.rate,
-            output_rate: format.sample_rate(),
-            channels: usize::from(format.channels()),
-        };
-        let done = Arc::new(AtomicBool::new(false));
-        let finished = done.clone();
-        let (error, errors) = errors();
-        let cfg = stream_config(&format);
-        let stream = match format.sample_format() {
-            SampleFormat::F32 => device.build_output_stream(
-                cfg,
-                move |out: &mut [f32], _| cursor.fill(out, &finished),
-                error,
-                None,
-            ),
-            SampleFormat::I16 => device.build_output_stream(
-                cfg,
-                move |out: &mut [i16], _| cursor.fill(out, &finished),
-                error,
-                None,
-            ),
-            other => return Err(anyhow!("Unsupported playback format: {other}")),
-        }?;
-        stream.play()?;
-        Ok(Playback {
-            _stream: stream,
-            done,
-            errors,
-        })
-    }
-}
-
-struct Cursor {
-    frames: Arc<[Frame]>,
-    phase: u64,
-    input_rate: u32,
-    output_rate: u32,
-    channels: usize,
-}
-
-impl Cursor {
-    fn fill<T: SizedSample + FromSample<f32>>(&mut self, out: &mut [T], done: &AtomicBool) {
-        out.fill(T::EQUILIBRIUM);
-        let rate = u64::from(self.output_rate);
-        // Keep the stream alive through the callback that consumes the last sample.
-        if self.phase / rate >= self.frames.len() as u64 {
-            done.store(true, Ordering::Relaxed);
-            return;
-        }
-        for frame in out.chunks_exact_mut(self.channels) {
-            let index = (self.phase / rate) as usize;
-            let Some(left) = self.frames.get(index) else {
-                break;
-            };
-            let right = self.frames.get(index + 1).unwrap_or(left);
-            let fraction = (self.phase % rate) as f32 / self.output_rate as f32;
-            let sample = |ch: usize| left[ch] + (right[ch] - left[ch]) * fraction;
-            if self.channels == 1 {
-                frame[0] = T::from_sample((sample(0) + sample(1)) * 0.5);
-            } else {
-                frame[0] = T::from_sample(sample(0));
-                frame[1] = T::from_sample(sample(1));
-            }
-            self.phase += u64::from(self.input_rate);
-        }
-    }
-}
-
-/// Holds the physical output stream. Dropping it stops the preview.
-pub struct Playback {
-    _stream: Stream,
-    done: Arc<AtomicBool>,
-    errors: mpsc::Receiver<cpal::Error>,
-}
-
-impl Playback {
-    /// Return whether the clip has ended or the playback device failed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the audio backend reports device loss.
-    pub fn finished(&self) -> Result<bool> {
-        if let Ok(error) = self.errors.try_recv() {
-            return Err(error.into());
-        }
-        Ok(self.done.load(Ordering::Relaxed))
+        Playback::from_clip(self, id)
     }
 }
 
@@ -694,29 +579,5 @@ mod tests {
         let loaded = Clip::load_latest(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.duration(), Duration::from_secs(12));
         assert_eq!(loaded.frames, clip.frames);
-    }
-
-    #[test]
-    fn replay_preserves_pauses_across_buffers_and_resamples_both_channels() {
-        let mut cursor = Cursor {
-            frames: Arc::from([[0.5, -0.5], [0., 0.], [0., 0.], [0.5, -0.5]]),
-            phase: 0,
-            input_rate: 24_000,
-            output_rate: 48_000,
-            channels: 2,
-        };
-        let done = AtomicBool::new(false);
-        let mut output = [1.0_f32; 20];
-        for chunk in output.chunks_mut(6) {
-            cursor.fill(chunk, &done);
-        }
-        assert_eq!(
-            output,
-            [
-                0.5, -0.5, 0.25, -0.25, 0., 0., 0., 0., 0., 0., 0.25, -0.25, 0.5, -0.5, 0.5, -0.5,
-                0., 0., 0., 0.
-            ]
-        );
-        assert!(done.load(Ordering::Relaxed));
     }
 }

@@ -176,6 +176,7 @@ impl Stage {
                     });
                 };
                 if !reader.listen(&mut recording, l)? {
+                    reader.trim_waiting(&mut recording);
                     return Ok(Self::Phrase {
                         room,
                         first,
@@ -242,11 +243,12 @@ impl Stage {
                     .is_some_and(|s| s.audition == Some(trial.issued));
                 let recording = match recording {
                     Some(_) if !acknowledged => return Err(changed(l)),
-                    Some(streams) => {
-                        let (mut microphone, mut receiver) = *streams;
+                    Some(mut streams) => {
+                        let (microphone, receiver) = &mut *streams;
                         receiver.collect().map_err(|e| e.to_string())?;
                         if let Some(stop) = ending {
                             if stop.elapsed() >= Duration::from_millis(350) {
+                                let (_, receiver) = *streams;
                                 let clip = receiver.finish().map_err(|e| e.to_string())?;
                                 let issued = trial.issued;
                                 drop(trial);
@@ -257,10 +259,14 @@ impl Stage {
                                     since: Instant::now(),
                                 });
                             }
-                        } else if reader.listen(&mut microphone, l)? {
-                            ending = Some(Instant::now());
+                        } else {
+                            let finished = reader.listen(microphone, l)?;
+                            reader.discard_checked(microphone);
+                            if finished {
+                                ending = Some(Instant::now());
+                            }
                         }
-                        Some(Box::new((microphone, receiver)))
+                        Some(streams)
                     }
                     None if acknowledged => {
                         let receiver = Recording::start(source).map_err(|e| e.to_string())?;
@@ -295,7 +301,7 @@ impl Stage {
                     .as_ref()
                     .is_some_and(|s| s.audition != Some(issued))
                 {
-                    panel.test.clip = Some(clip);
+                    panel.test.clip = Some(microphone_test::Take::Preview(clip));
                     panel.play_test();
                     Ok(Self::Ready(result))
                 } else if since.elapsed() > Duration::from_secs(4) {

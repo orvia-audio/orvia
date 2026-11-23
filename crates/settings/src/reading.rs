@@ -52,6 +52,11 @@ impl Reader {
         Ok(self.process(frames, step))
     }
 
+    /// Keep only the incomplete analysis block when another stream supplies the actual preview.
+    pub(super) fn discard_checked(&mut self, recording: &mut Recording) {
+        self.checked -= recording.discard_prefix(self.checked);
+    }
+
     /// Keep a quiet lead-in for tone analysis while the reader waits for the user to start.
     /// Once an onset is possible, retain the whole phrase until trailing silence.
     pub(super) fn trim_waiting(&mut self, recording: &mut Recording) {

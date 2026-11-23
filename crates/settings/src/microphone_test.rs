@@ -1,6 +1,6 @@
 //! Session-scoped controls for recording and replaying the virtual microphone.
 use super::*;
-use orvia_engine::mic_test::{self, Clip, Playback, Recording};
+use orvia_engine::mic_test::{self, Clip, Playback, Recording, SavedClip};
 
 /// The operation shown on a microphone test button when it was rendered.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,6 +24,28 @@ impl TestAction {
     }
 }
 
+pub(super) enum Take {
+    Saved(SavedClip),
+    Preview(Clip),
+}
+
+impl Take {
+    pub(super) fn duration(&self) -> Duration {
+        match self {
+            Self::Saved(saved) => saved.duration(),
+            Self::Preview(clip) => clip.duration(),
+        }
+    }
+
+    fn play(&self, id: Option<&str>) -> Result<Playback, String> {
+        match self {
+            Self::Saved(saved) => saved.play(id),
+            Self::Preview(clip) => clip.play(id),
+        }
+        .map_err(|e| e.to_string())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct MicTest {
     pub(super) sources: Vec<(String, String)>,
@@ -31,7 +53,7 @@ pub(super) struct MicTest {
     pub(super) speaker: Option<String>,
     pub(super) recording: Option<Recording>,
     pub(super) reader: reading::Reader,
-    pub(super) clip: Option<Clip>,
+    pub(super) clip: Option<Take>,
     pub(super) playback: Option<Playback>,
     pub(super) adjust: Option<super::auto_adjust::AutoAdjust>,
     #[cfg(test)]
@@ -76,8 +98,8 @@ impl Panel {
         }
         self.test.source = mic_test::routed_source(&self.prefs).ok();
         self.test.speaker = self.prefs.monitor.clone();
-        match Clip::load_latest(&self.dir.join("mic-test")) {
-            Ok(clip) => self.test.clip = clip,
+        match SavedClip::latest(&self.dir.join("mic-test")) {
+            Ok(clip) => self.test.clip = clip.map(Take::Saved),
             Err(error) => self.test_error(error),
         }
     }
@@ -126,11 +148,12 @@ impl Panel {
         };
         self.test.recording_route = None;
         let result = recording.finish().and_then(|clip| {
-            clip.save_latest(&self.dir.join("mic-test"))?;
-            Ok(clip)
+            let dir = self.dir.join("mic-test");
+            clip.save_latest(&dir)?;
+            SavedClip::latest(&dir)
         });
         match result {
-            Ok(clip) => self.test.clip = Some(clip),
+            Ok(clip) => self.test.clip = clip.map(Take::Saved),
             Err(e) => self.test_error(e),
         }
     }

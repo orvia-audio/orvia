@@ -31,6 +31,9 @@ tray-icon = { version = "0.26.1", default-features = false }
 cpal = { version = "0.18.2", features = ["pulseaudio"] }
 tray-item = { version = "0.10", features = ["ksni"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+pulseaudio = "0.3.2"
+
 [lints]
 workspace = true
 

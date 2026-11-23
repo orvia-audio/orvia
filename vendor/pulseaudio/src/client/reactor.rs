@@ -4,11 +4,12 @@ use std::{
     pin::Pin,
     sync::{
         Arc, Mutex, Weak,
-        atomic::{self, AtomicU32},
+        atomic::{self, AtomicBool, AtomicU32},
         mpsc::{Receiver, Sender, TryRecvError},
     },
     task::{Context, Poll},
     thread::JoinHandle,
+    time::{Duration, Instant},
 };
 
 use futures::channel::oneshot;
@@ -21,6 +22,7 @@ use super::{ClientError, PlaybackSource, RecordSink};
 type ReplyResult<'a> =
     Result<(&'a mut ReactorState, &'a mut dyn io::BufRead), protocol::PulseError>;
 type ReplyHandler = Box<dyn FnOnce(ReplyResult<'_>) + Send + 'static>;
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct PlaybackStreamState {
     stream_info: protocol::CreatePlaybackStreamReply,
@@ -38,7 +40,7 @@ pub(super) struct RecordStreamState {
 
 #[derive(Default)]
 struct ReactorState {
-    handlers: BTreeMap<u32, ReplyHandler>,
+    handlers: BTreeMap<u32, (Option<Instant>, ReplyHandler)>,
     playback_streams: BTreeMap<u32, PlaybackStreamState>,
     record_streams: BTreeMap<u32, RecordStreamState>,
 }
@@ -47,14 +49,26 @@ struct SharedState {
     protocol_version: u16,
     next_seq: AtomicU32,
     _thread_handle: JoinHandle<super::Result<()>>,
+    waker: Arc<Waker>,
+}
+
+impl Drop for SharedState {
+    fn drop(&mut self) {
+        // Closing the command channel alone does not signal an idle mio poll.
+        self.waker.closed.store(true, atomic::Ordering::Release);
+        let _ = self.waker.poll.wake();
+    }
 }
 
 // We need to wrap this to implement futures::task::ArcWake.
-struct Waker(mio::Waker);
+struct Waker {
+    poll: mio::Waker,
+    closed: AtomicBool,
+}
 
 impl futures::task::ArcWake for Waker {
     fn wake_by_ref(arc_self: &Arc<Self>) {
-        let _ = arc_self.0.wake();
+        let _ = arc_self.poll.wake();
     }
 }
 
@@ -63,7 +77,6 @@ pub(super) struct ReactorHandle {
     state: Weak<Mutex<ReactorState>>,
     shared: Arc<SharedState>,
     outgoing: Sender<(u32, protocol::Command)>,
-    waker: Arc<Waker>,
 }
 
 impl ReactorHandle {
@@ -76,7 +89,7 @@ impl ReactorHandle {
         // Install a handler for the sequence number.
         let (tx, rx) = oneshot::channel();
         let protocol_version = self.shared.protocol_version;
-        self.install_handler(seq, move |res: ReplyResult<'_>| {
+        self.install_handler(seq, Some(CONTROL_TIMEOUT), move |res: ReplyResult<'_>| {
             let _ = match res {
                 Ok((_, buf)) => tx.send(read_tagstruct(buf, protocol_version)),
                 Err(err) => tx.send(Err(ClientError::ServerError(err))),
@@ -95,7 +108,10 @@ impl ReactorHandle {
 
         // Install a handler for the sequence number.
         let (tx, rx) = oneshot::channel();
-        self.install_handler(seq, move |res: ReplyResult<'_>| {
+        // A drain acknowledges playback of the entire buffer, which can be paused.
+        let timeout =
+            (!matches!(cmd, protocol::Command::DrainPlaybackStream(_))).then_some(CONTROL_TIMEOUT);
+        self.install_handler(seq, timeout, move |res: ReplyResult<'_>| {
             let _ = match res {
                 Ok(_) => tx.send(Ok(())),
                 Err(err) => tx.send(Err(ClientError::ServerError(err))),
@@ -141,7 +157,7 @@ impl ReactorHandle {
         };
 
         let (tx, rx) = oneshot::channel();
-        self.install_handler(seq, move |res: ReplyResult<'_>| {
+        self.install_handler(seq, Some(CONTROL_TIMEOUT), move |res: ReplyResult<'_>| {
             let _ = tx.send(handler(res));
         })?;
 
@@ -156,7 +172,7 @@ impl ReactorHandle {
         let seq = self.next_seq();
 
         let (tx, rx) = oneshot::channel();
-        self.install_handler(seq, move |res| {
+        self.install_handler(seq, Some(CONTROL_TIMEOUT), move |res| {
             if let Ok((state, _ack)) = res {
                 state.playback_streams.remove(&channel);
             }
@@ -202,7 +218,7 @@ impl ReactorHandle {
         };
 
         let (tx, rx) = oneshot::channel();
-        self.install_handler(seq, move |res: ReplyResult<'_>| {
+        self.install_handler(seq, Some(CONTROL_TIMEOUT), move |res: ReplyResult<'_>| {
             let _ = tx.send(handler(res));
         })?;
 
@@ -217,7 +233,7 @@ impl ReactorHandle {
         let seq = self.next_seq();
 
         let (tx, rx) = oneshot::channel();
-        self.install_handler(seq, move |res| {
+        self.install_handler(seq, Some(CONTROL_TIMEOUT), move |res| {
             if let Ok((state, _ack)) = res {
                 state.record_streams.remove(&channel);
             }
@@ -233,12 +249,17 @@ impl ReactorHandle {
         self.outgoing
             .send((seq, cmd))
             .map_err(|_| ClientError::Disconnected)?;
-        self.waker.0.wake()?;
+        self.shared.waker.poll.wake()?;
 
         Ok(())
     }
 
-    fn install_handler<F>(&self, seq: u32, handler: F) -> Result<(), ClientError>
+    fn install_handler<F>(
+        &self,
+        seq: u32,
+        timeout: Option<Duration>,
+        handler: F,
+    ) -> Result<(), ClientError>
     where
         F: FnOnce(ReplyResult<'_>) + Send + 'static,
     {
@@ -248,7 +269,10 @@ impl ReactorHandle {
             .lock()
             .unwrap()
             .handlers
-            .insert(seq, Box::new(handler));
+            .insert(
+                seq,
+                (timeout.map(|t| Instant::now() + t), Box::new(handler)),
+            );
 
         Ok(())
     }
@@ -280,7 +304,10 @@ impl Reactor {
         protocol_version: u16,
     ) -> Result<ReactorHandle, ClientError> {
         let poll = mio::Poll::new()?;
-        let waker = Arc::new(Waker(mio::Waker::new(poll.registry(), WAKER)?));
+        let waker = Arc::new(Waker {
+            poll: mio::Waker::new(poll.registry(), WAKER)?,
+            closed: AtomicBool::new(false),
+        });
         poll.registry().register(
             &mut socket,
             SOCKET,
@@ -314,11 +341,11 @@ impl Reactor {
         Ok(ReactorHandle {
             state: Arc::downgrade(&state),
             outgoing: cmd_tx,
-            waker,
             shared: Arc::new(SharedState {
                 protocol_version,
                 next_seq: AtomicU32::new(1024),
                 _thread_handle: reactor_thread,
+                waker,
             }),
         })
     }
@@ -327,7 +354,27 @@ impl Reactor {
         let mut events = mio::Events::with_capacity(1024);
 
         loop {
-            self.poll.poll(&mut events, None)?;
+            // The normal socket/waker wait remains indefinite between control requests.
+            // Dropping the reactor on expiry also releases stream and teardown waiters.
+            let deadline = self
+                .state
+                .lock()
+                .unwrap()
+                .handlers
+                .values()
+                .filter_map(|(deadline, _)| *deadline)
+                .min();
+            let timeout = match deadline {
+                Some(at) => Some(
+                    at.checked_duration_since(Instant::now())
+                        .ok_or(protocol::ProtocolError::Timeout)?,
+                ),
+                None => None,
+            };
+            self.poll.poll(&mut events, timeout)?;
+            if self.waker.closed.load(atomic::Ordering::Acquire) {
+                return Ok(());
+            }
             self.recv()?;
 
             // Handle any requested writes.
@@ -412,7 +459,7 @@ impl Reactor {
 
         log::debug!("SERVER [{}]: {cmd:?}", seq as i32);
         if matches!(cmd, protocol::Command::Reply | protocol::Command::Error(_)) {
-            let Some(handler) = state.handlers.remove(&seq) else {
+            let Some((_, handler)) = state.handlers.remove(&seq) else {
                 log::warn!("no reply handler found for sequence {seq}");
                 return;
             };

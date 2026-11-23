@@ -4742,6 +4742,7 @@ dependencies = [
  "fs2",
  "hound",
  "orvia-core",
+ "pulseaudio",
  "realfft",
  "resvg 0.50.0",
  "rtrb",

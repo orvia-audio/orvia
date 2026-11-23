@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     start("pipewire")
     wait_for(lambda: Path(tmp, "pipewire-0").is_socket(), "PipeWire did not start")
     start("wireplumber")
-    start("pipewire-pulse")
+    pulse_server = start("pipewire-pulse")
     wait_for(lambda: Path(tmp, "pulse/native").is_socket(), "Pulse socket unavailable")
     wait_for(lambda: "orvia_microphone" in run("pactl", "list", "short", "sources"),
              "The packaged source was not loaded")
@@ -372,6 +372,12 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     mic_name = next(d["description"] for d in pulse_devices("sources") if d["name"] == "test_microphone")
     wait_for(lambda: streaming_from(mic_name), "The engine did not follow the new default input")
     assert engine.poll() is None
-    (state / f"stop-engine-{engine.pid}").touch()
-    assert engine.wait(timeout=10) == 0
+    # Keep the established socket open while its server stops answering lookups and teardown.
+    pulse_server.send_signal(signal.SIGSTOP)
+    try:
+        time.sleep(2.5)  # Allow the default-input lookup on the two-second supervisor cadence.
+        (state / f"stop-engine-{engine.pid}").touch()
+        assert engine.wait(timeout=15) == 0
+    finally:
+        pulse_server.send_signal(signal.SIGCONT)
     print(f"Recorded {len(captured)/48000:.2f} seconds, 440 Hz amplitude {amplitude:.0f}.")

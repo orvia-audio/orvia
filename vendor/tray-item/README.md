@@ -4,7 +4,7 @@
 
 Please see the [examples](https://github.com/olback/tray-item-rs/tree/master/examples) as documentation is currently lacking.
 
-Tray Indicator uses icons from gresources on Linux and `.rc`-files on Windows.  
+Tray Indicator uses icons from gresources on Linux and `.rc`-files on Windows.<br>
 These resourses have to be packed into the final binary.
 
 * [x] Linux

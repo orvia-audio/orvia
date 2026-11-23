@@ -47,22 +47,6 @@ impl TrayItemWindows {
         let entries = Arc::new(Mutex::new(Vec::new()));
         let (event_tx, event_rx) = channel::<WindowsTrayEvent>();
 
-        let entries_clone = Arc::clone(&entries);
-        let event_loop = thread::spawn(move || loop {
-            if let Ok(v) = event_rx.recv() {
-                if v.0 == u32::MAX {
-                    break;
-                }
-
-                padlock::mutex_lock(&entries_clone, |ents: &mut Vec<CallBackEntry>| match &ents
-                    [v.0 as usize]
-                {
-                    Some(f) => f(),
-                    None => (),
-                })
-            }
-        });
-
         let (tx, rx) = channel();
 
         let event_tx_clone = event_tx.clone();
@@ -95,6 +79,22 @@ impl TrayItemWindows {
             Ok(i) => i,
             Err(e) => return Err(e),
         };
+
+        // An unavailable notification area can fail initialization repeatedly.
+        // Only start the callback worker once the window is ready.
+        let entries_clone = Arc::clone(&entries);
+        let event_loop = thread::spawn(move || {
+            for event in event_rx {
+                if event.0 == u32::MAX {
+                    break;
+                }
+                padlock::mutex_lock(&entries_clone, |ents: &mut Vec<CallBackEntry>| {
+                    if let Some(f) = &ents[event.0 as usize] {
+                        f();
+                    }
+                });
+            }
+        });
 
         let w = Self {
             entries,

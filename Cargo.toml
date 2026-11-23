@@ -1,12 +1,13 @@
 [workspace]
 members = ["crates/core", "crates/engine", "crates/settings", "vendor/dfn3_rs"]
-exclude = ["vendor/nnnoiseless", "vendor/sonora", "vendor/sonora-ns", "vendor/sonora-common-audio"]
+exclude = ["vendor/nnnoiseless", "vendor/sonora", "vendor/sonora-ns", "vendor/sonora-common-audio", "vendor/pulseaudio"]
 resolver = "3"
 
 [patch.crates-io]
 # CPAL 0.18.2 leaks the string returned by WASAPI's GetId. Use the upstream stable-0.18 fix.
 cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "450afe54bf205ac90cf4219ae9b126d4eb3f5e8b" }
 sonora-common-audio = { path = "vendor/sonora-common-audio" }
+pulseaudio = { path = "vendor/pulseaudio" }
 
 [workspace.package]
 edition = "2024"

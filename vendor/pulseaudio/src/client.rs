@@ -75,6 +75,12 @@ impl Client {
             socket_path.display()
         );
         let socket = std::os::unix::net::UnixStream::connect(socket_path)?;
+        // CPAL gives the worker two seconds to open a host. Release its socket
+        // and thread if the server stops responding during authentication.
+        // The reactor switches to nonblocking I/O after the handshake.
+        let timeout = Some(std::time::Duration::from_secs(2));
+        socket.set_read_timeout(timeout)?;
+        socket.set_write_timeout(timeout)?;
         Self::new_unix(client_name, socket, cookie)
     }
 

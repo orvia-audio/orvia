@@ -1,4 +1,4 @@
-//! Mixer controls and the two-second, pre-gain peak envelope display.
+//! Mixer controls and switchable signal displays.
 use super::*;
 use gpui::{MouseButton, Pixels, canvas, fill, point};
 
@@ -194,8 +194,13 @@ impl Panel {
             .status
             .as_ref()
             .filter(|s| s.message.starts_with("Streaming"));
-        let outdated = live
-            .is_some_and(|s| s.signal.peaks.is_empty() && s.version != env!("CARGO_PKG_VERSION"));
+        let outdated = live.is_some_and(|s| {
+            (if self.show_spectrum {
+                s.spectrum.is_none()
+            } else {
+                s.signal.peaks.is_empty()
+            }) && s.version != env!("CARGO_PKG_VERSION")
+        });
         let levels = live.map(|s| s.signal.peaks.as_slice()).unwrap_or_default();
         let peak = live.map_or(0., |s| s.peak);
         let output = if peak > 0.00001 {
@@ -249,57 +254,94 @@ impl Panel {
             .child(
                 row()
                     .justify_between()
-                    .child(heading(
-                        l.text("Signal history", "信号の推移"),
-                        "wave-sine.svg",
-                        CORAL,
-                    ))
+                    .child(
+                        row()
+                            .gap_1()
+                            .child(glyph("wave-sine.svg", 20., CORAL))
+                            .children(
+                                [
+                                    (false, l.text("Signal history", "信号の推移")),
+                                    (true, l.text("Spectrum", "スペクトル")),
+                                ]
+                                .into_iter()
+                                .map(|(spectrum, label)| {
+                                    let selected = self.show_spectrum == spectrum;
+                                    div()
+                                        .id(if spectrum {
+                                            "show-spectrum"
+                                        } else {
+                                            "show-history"
+                                        })
+                                        .tab_index(0)
+                                        .h(px(24.))
+                                        .px_2()
+                                        .flex()
+                                        .items_center()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(rgb(if selected { 0x747f7e } else { INK }))
+                                        .bg(rgb(if selected { 0x404a4a } else { INK }))
+                                        .text_sm()
+                                        .text_color(rgb(if selected { 0xffffff } else { 0xc6cfcd }))
+                                        .hover(|s| s.bg(rgb(0x3e4747)))
+                                        .focus(|s| s.border_color(rgb(CORAL)))
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(move |p, _, _, cx| {
+                                            p.activate(Control::ShowSpectrum(spectrum), cx)
+                                        }))
+                                        .child(label)
+                                }),
+                            ),
+                    )
                     .child(div().text_sm().text_color(rgb(CORAL)).child(if outdated {
                         l.text("Restart engine in Preferences", "設定でエンジンを再起動")
                     } else {
                         self.state_label()
                     })),
-            )
-            .child(
-                row()
-                    .justify_between()
+            );
+        let summary =
+            if self.show_spectrum {
+                self.spectrum_chart(summary, live.and_then(|s| s.spectrum.as_ref()), cx)
+            } else {
+                summary
                     .child(
                         row()
-                            .child(legend(
-                                if filtered {
-                                    l.text("Before", "抑制前")
-                                } else {
-                                    l.text("Input", "入力")
-                                },
-                                INPUT_COLOR,
-                            ))
-                            .when(filtered, |d| {
-                                d.child(legend(l.text("After", "抑制後"), OUTPUT_COLOR))
-                            }),
+                            .justify_between()
+                            .child(
+                                row()
+                                    .child(legend(
+                                        if filtered {
+                                            l.text("Before", "抑制前")
+                                        } else {
+                                            l.text("Input", "入力")
+                                        },
+                                        INPUT_COLOR,
+                                    ))
+                                    .when(filtered, |d| {
+                                        d.child(legend(l.text("After", "抑制後"), OUTPUT_COLOR))
+                                    }),
+                            )
+                            .child(div().text_xs().text_color(rgb(0xd5dcd9)).child(
+                                l.text("2 s   ·   −60 to 0 dBFS", "2 秒   ·   −60 ～ 0 dBFS"),
+                            )),
                     )
+                    .child(history(levels.to_vec(), filtered))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(0xd5dcd9))
-                            .child(l.text("2 s   ·   −60 to 0 dBFS", "2 秒   ·   −60 ～ 0 dBFS")),
-                    ),
-            )
-            .child(history(levels.to_vec(), filtered))
-            .child(
-                row()
-                    .justify_between()
-                    .child(div().flex_1().when(filtered, |d| {
-                        d.text_sm().child(format!(
-                            "{}  {change}",
-                            l.text("Pre-gain attenuation", "ゲイン適用前の減衰量")
-                        ))
-                    }))
-                    .child(
-                        div()
-                            .text_sm()
-                            .child(format!("{}  {output}", l.text("Output", "出力"))),
-                    ),
-            );
+                        row()
+                            .justify_between()
+                            .child(div().flex_1().when(filtered, |d| {
+                                d.text_sm().child(format!(
+                                    "{}  {change}",
+                                    l.text("Pre-gain attenuation", "ゲイン適用前の減衰量")
+                                ))
+                            }))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .child(format!("{}  {output}", l.text("Output", "出力"))),
+                            ),
+                    )
+            };
         let tone = self.prefs.tone();
         let mut controls = stack().gap_1();
         for ((label, value), slider) in tone_labels(l, tone).into_iter().zip([

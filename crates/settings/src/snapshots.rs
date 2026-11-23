@@ -67,6 +67,7 @@ fn populate(panel: &mut Panel, scene: &str, language: Language) {
     panel.test.source.clone_from(&panel.prefs.receiver);
     panel.test.speaker.clone_from(&panel.prefs.monitor);
     panel.status = Some(EngineStatus {
+        spectrum: None,
         observed: std::time::SystemTime::UNIX_EPOCH,
         version: panel.installed.to_string(),
         message: "Streaming".into(),
@@ -88,6 +89,31 @@ fn populate(panel: &mut Panel, scene: &str, language: Language) {
     });
     panel.page = match scene {
         "mixer" | "mixer-full" => Page::Mixer,
+        "mixer-spectrum" | "mixer-spectrum-silent" | "mixer-spectrum-inspect" => {
+            use orvia_core::spectrum::Spectrum;
+            panel.show_spectrum = true;
+            let silent = scene == "mixer-spectrum-silent";
+            panel.spectrum_band = (scene == "mixer-spectrum-inspect").then_some(32);
+            panel.status.as_mut().unwrap().spectrum = Some(Spectrum {
+                bands: (0..Spectrum::BANDS)
+                    .map(|i| {
+                        if silent {
+                            return 0;
+                        }
+                        [(32, 67_u8), (39, 49), (43, 38), (12, 22)]
+                            .into_iter()
+                            .map(|(bin, level)| {
+                                level.saturating_sub((i.abs_diff(bin) as u8).saturating_mul(6))
+                            })
+                            .max()
+                            .unwrap()
+                            .max(5 + (i % 4) as u8)
+                    })
+                    .collect(),
+                peak_hz: (!silent).then_some(440),
+            });
+            Page::Mixer
+        }
         "mixer-bypass" => {
             panel.prefs.suppress_noise = false;
             Page::Mixer

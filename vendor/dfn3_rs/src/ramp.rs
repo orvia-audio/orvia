@@ -1,5 +1,6 @@
 //! Sample-clocked interpolation; repeated targets do not restart a transition.
 
+#[derive(Clone, Copy)]
 pub(crate) struct Ramp {
     current: f32,
     pub target: f32,
@@ -36,6 +37,11 @@ impl Ramp {
 
     pub fn is_zero(&self) -> bool {
         self.current == 0.0 && self.target == 0.0 && self.remaining == 0
+    }
+
+    /// Constant value for blocks that have no scheduled transition.
+    pub fn settled(&self) -> Option<f32> {
+        (self.remaining == 0).then_some(self.current)
     }
 
     pub fn next(&mut self) -> f32 {

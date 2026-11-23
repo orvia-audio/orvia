@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/core", "crates/engine", "crates/settings"]
+members = ["crates/core", "crates/engine", "crates/settings", "vendor/dfn3_rs"]
 resolver = "3"
 
 [workspace.package]
@@ -19,6 +19,10 @@ unsafe_code = "forbid"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
+
+# Keep the model's feature-detected kernels compact in distribution builds.
+[profile.release.package.dfn3_rs]
+opt-level = 2
 
 [profile.dev]
 debug = 0

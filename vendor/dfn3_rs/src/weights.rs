@@ -84,15 +84,18 @@ impl Data {
 }
 
 pub(crate) fn expand(w: u16) -> f32 {
-    let sign = ((w & 0x8000) as u32) << 16;
-    let exp = (w >> 10) & 31;
-    let mantissa = (w & 1023) as u32;
-    let value = match exp {
-        0 => (mantissa as f32 * (1.0 / 16_777_216.0)).to_bits(),
-        31 => 0x7f80_0000 | (mantissa << 13),
-        _ => ((exp as u32 + 112) << 23) | (mantissa << 13),
+    let magnitude = u32::from(w & 0x7fff);
+    let normal = (magnitude << 13) + (112 << 23);
+    let subnormal = ((magnitude as f32) * (1. / 16_777_216.)).to_bits();
+    let special = (magnitude << 13) | 0x7f80_0000;
+    let value = if magnitude < 1024 {
+        subnormal
+    } else if magnitude >= 0x7c00 {
+        special
+    } else {
+        normal
     };
-    f32::from_bits(sign | value)
+    f32::from_bits(value | (u32::from(w & 0x8000) << 16))
 }
 
 /// Matrix packed as `[n / 16][k][16]`.
@@ -193,5 +196,22 @@ impl Reader {
 
     pub fn finish(self) {
         assert!(self.bytes.is_empty(), "weight blob layout mismatch");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn binary16_expansion_preserves_all_bit_patterns() {
+        for w in 0..=u16::MAX {
+            let exponent = (w >> 10) & 31;
+            let mantissa = u32::from(w & 1023);
+            let reference = match exponent {
+                0 => ((mantissa as f32) * 2_f32.powi(-24)).to_bits(),
+                31 => 0x7f80_0000 | (mantissa << 13),
+                e => (u32::from(e + 112) << 23) | (mantissa << 13),
+            } | (u32::from(w & 0x8000) << 16);
+            assert_eq!(super::expand(w).to_bits(), reference);
+        }
     }
 }

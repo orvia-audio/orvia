@@ -87,6 +87,13 @@ impl Weights {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum RecurrentStage {
+    Encoder,
+    Erb,
+    Df,
+}
+
 pub(crate) struct Network {
     simd: Simd,
     w: Weights,
@@ -205,6 +212,19 @@ impl Network {
         self.c0_head = 0;
     }
 
+    pub fn copy_history_from(&mut self, source: &Self) {
+        self.erb_hist = source.erb_hist;
+        self.spec_hist = source.spec_hist;
+        self.h_enc = source.h_enc;
+        self.h_erb = source.h_erb;
+        self.h_df = source.h_df;
+        self.c0 = source.c0;
+        self.pending = source.pending;
+        self.c0_head = source.c0_head;
+        // The transposed convolutions can read a padding row beyond the previous stage's output.
+        self.tmp2 = source.tmp2;
+    }
+
     fn grouped(
         simd: Simd,
         g: &Grouped,
@@ -243,8 +263,84 @@ impl Network {
         simd.gru_gates(gi, gh, h);
     }
 
+    pub fn can_batch_with(&self, other: &Self) -> bool {
+        // The SNR tensor is a fixed view into the immutable model blob.
+        self.simd.supports_pair() && std::ptr::eq(self.w.lsnr.0, other.w.lsnr.0)
+    }
+
+    pub fn recurrent_pair(&mut self, right: &mut Self, stage: RecurrentStage) {
+        let simd = self.simd;
+        let layers = if matches!(stage, RecurrentStage::Encoder) {
+            1
+        } else {
+            2
+        };
+        for layer in 0..layers {
+            let (w, left_x, left_h) = self.layer(stage, layer);
+            let (_, right_x, right_h) = right.layer(stage, layer);
+            let mut gi = [[0.; 768]; 2];
+            let mut gh = [[0.; 768]; 2];
+            simd.gemm(
+                2,
+                [*left_x, *right_x].as_flattened(),
+                256,
+                &w.w,
+                Some(w.bias_w),
+                false,
+                false,
+                gi.as_flattened_mut(),
+                768,
+            );
+            simd.gemm(
+                2,
+                [*left_h, *right_h].as_flattened(),
+                256,
+                &w.r,
+                Some(w.bias_r),
+                false,
+                false,
+                gh.as_flattened_mut(),
+                768,
+            );
+            simd.gru_gates(&gi[0], &gh[0], left_h);
+            simd.gru_gates(&gi[1], &gh[1], right_h);
+        }
+    }
+
+    fn layer(
+        &mut self,
+        stage: RecurrentStage,
+        layer: usize,
+    ) -> (Gru, &[f32; 256], &mut [f32; 256]) {
+        let (weights, states) = match stage {
+            RecurrentStage::Encoder => return (self.w.enc_gru, &self.v256, &mut self.h_enc),
+            RecurrentStage::Erb => (&self.w.erb_gru, &mut self.h_erb),
+            RecurrentStage::Df => (&self.w.df_gru, &mut self.h_df),
+        };
+        let [first, second] = states;
+        if layer == 0 {
+            (weights[0], &self.v256, first)
+        } else {
+            (weights[1], first, second)
+        }
+    }
+
     /// Runs the encoder on the newest features and returns the local SNR in dB.
     pub fn encode(&mut self, erb: &[f32; NB_ERB], re: &[f32; NB_DF], im: &[f32; NB_DF]) -> f32 {
+        self.encode_features(erb, re, im);
+        let (s, w) = (self.simd, &self.w);
+        Self::gru(
+            s,
+            &w.enc_gru,
+            &self.v256,
+            &mut self.h_enc,
+            &mut self.gi,
+            &mut self.gh,
+        );
+        self.encoded_snr()
+    }
+
+    pub fn encode_features(&mut self, erb: &[f32; NB_ERB], re: &[f32; NB_DF], im: &[f32; NB_DF]) {
         let (s, w) = (self.simd, &self.w);
         self.erb_hist.copy_within(1.., 0);
         self.erb_hist[2][1..=NB_ERB].copy_from_slice(erb);
@@ -356,14 +452,10 @@ impl Network {
             .zip(&self.v512)
             .for_each(|(e, c)| *e += c);
         Self::grouped(s, &w.enc_in, &self.emb, &mut self.v256, 16, false, true);
-        Self::gru(
-            s,
-            &w.enc_gru,
-            &self.v256,
-            &mut self.h_enc,
-            &mut self.gi,
-            &mut self.gh,
-        );
+    }
+
+    pub fn encoded_snr(&mut self) -> f32 {
+        let (s, w) = (self.simd, &self.w);
         Self::grouped(s, &w.enc_out, &self.h_enc, &mut self.emb, 32, false, true);
 
         let (lw, lb) = w.lsnr;
@@ -373,11 +465,22 @@ impl Network {
 
     /// ERB decoder: per-band gains in [0, 1].
     pub fn erb_decode(&mut self, gains: &mut [f32; NB_ERB]) {
+        self.prepare_erb();
         let (s, w) = (self.simd, &self.w);
-        Self::grouped(s, &w.erb_in, &self.emb, &mut self.v256, 16, false, true);
         let [h0, h1] = &mut self.h_erb;
         Self::gru(s, &w.erb_gru[0], &self.v256, h0, &mut self.gi, &mut self.gh);
         Self::gru(s, &w.erb_gru[1], &h0[..], h1, &mut self.gi, &mut self.gh);
+        self.finish_erb(gains);
+    }
+
+    pub fn prepare_erb(&mut self) {
+        let (s, w) = (self.simd, &self.w);
+        Self::grouped(s, &w.erb_in, &self.emb, &mut self.v256, 16, false, true);
+    }
+
+    pub fn finish_erb(&mut self, gains: &mut [f32; NB_ERB]) {
+        let (s, w) = (self.simd, &self.w);
+        let h1 = &self.h_erb[1];
         Self::grouped(s, &w.erb_out, &h1[..], &mut self.v512, 32, false, true);
 
         let pointwise = |p: &Pointwise, rows, tmp: &[f32], out: &mut [f32]| {
@@ -417,11 +520,22 @@ impl Network {
 
     /// DF decoder: complex filter coefficients `[NB_DF][DF_ORDER][re, im]`.
     pub fn df_decode(&mut self, coefs: &mut [f32; NB_DF * DF_ORDER * 2]) {
+        self.prepare_df();
         let (s, w) = (self.simd, &self.w);
-        Self::grouped(s, &w.df_in, &self.emb, &mut self.v256, 32, false, true);
         let [h0, h1] = &mut self.h_df;
         Self::gru(s, &w.df_gru[0], &self.v256, h0, &mut self.gi, &mut self.gh);
         Self::gru(s, &w.df_gru[1], &h0[..], h1, &mut self.gi, &mut self.gh);
+        self.finish_df(coefs);
+    }
+
+    pub fn prepare_df(&mut self) {
+        let (s, w) = (self.simd, &self.w);
+        Self::grouped(s, &w.df_in, &self.emb, &mut self.v256, 32, false, true);
+    }
+
+    pub fn finish_df(&mut self, coefs: &mut [f32; NB_DF * DF_ORDER * 2]) {
+        let (s, w) = (self.simd, &self.w);
+        let h1 = &self.h_df[1];
         self.v256.copy_from_slice(h1);
         Self::grouped(s, &w.df_skip, &self.emb, &mut self.v256, 16, true, false);
 

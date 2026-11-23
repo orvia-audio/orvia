@@ -24,11 +24,12 @@ mod weights;
 pub use weights::{Model, ModelError, WEIGHTS_SIZE};
 
 use dsp::{BINS, Features, HOP, Stft};
-use net::{DF_ORDER, NB_DF, NB_ERB, Network};
+use net::{DF_ORDER, NB_DF, NB_ERB, Network, RecurrentStage};
 use ramp::Ramp;
 use realfft::num_complex::Complex32;
 use std::time::Duration;
 
+/// Input and output sample rate in Hz.
 pub const SAMPLE_RATE: u32 = 48_000;
 /// Samples consumed and produced per call (10 ms).
 pub const FRAME_SIZE: usize = HOP;
@@ -36,10 +37,12 @@ pub const FRAME_SIZE: usize = HOP;
 pub const ALGORITHM_DELAY: usize = dsp::FFT - HOP + 2 * HOP;
 /// Spectra kept for deep filtering: two past, the target, and two lookahead frames.
 const LOOKAHEAD: usize = 2;
+const _: () = assert!(ALGORITHM_DELAY.is_multiple_of(FRAME_SIZE));
 // Drain analysis history, all DF taps and synthesis overlap before sleeping.
 const TAIL_FRAMES: usize = DF_ORDER + 1;
 const RESUME_FADE_SAMPLES: usize = 2 * FRAME_SIZE;
 
+#[derive(Clone, Copy)]
 enum State {
     Running,
     Sleeping,
@@ -109,6 +112,24 @@ impl Denoiser {
         self.attenuation.reset(self.attenuation.target);
         self.recovery.reset(1.0);
         self.state = State::Running;
+    }
+
+    /// Copy the signal history and controls of a stream using the same model.
+    ///
+    /// Call between complete frames to split two previously identical channels.
+    /// The destination reuses its FFT plans, scratch buffers and model weights.
+    pub fn copy_stream_from(&mut self, source: &Self) {
+        self.stft.copy_history_from(&source.stft);
+        self.features.copy_history_from(&source.features);
+        self.net.copy_history_from(&source.net);
+        self.spectra = source.spectra;
+        self.attenuation = source.attenuation;
+        self.recovery = source.recovery;
+        self.dry = source.dry;
+        self.dry_position = source.dry_position;
+        self.state = source.state;
+        self.thresholds = source.thresholds;
+        self.zero_frames = source.zero_frames;
     }
 
     fn reset_model(&mut self) {
@@ -198,22 +219,43 @@ impl Denoiser {
         // Synthesis is linear: a constant mixture matches spectral attenuation.
         // Mixing aligned samples permits a truly sample-clocked transition with
         // one IFFT. The dry ring keeps moving even while the model is asleep.
-        for (&sample, enhanced) in input.iter().zip(output) {
-            let dry = std::mem::replace(&mut self.dry[self.dry_position], sample);
-            self.dry_position = (self.dry_position + 1) % ALGORITHM_DELAY;
-            let strength = self.attenuation.next();
-            let wet = if ready {
-                strength * self.recovery.next()
-            } else {
-                0.0
-            };
-            *enhanced = if wet == 0.0 {
-                dry
-            } else {
-                dry * (1.0 - wet) + *enhanced * wet
-            };
-        }
+        self.mix_dry(input, output, ready);
         lsnr
+    }
+
+    fn mix_dry(&mut self, input: &[f32; FRAME_SIZE], output: &mut [f32; FRAME_SIZE], ready: bool) {
+        let dry = &mut self.dry[self.dry_position..][..FRAME_SIZE];
+        self.dry_position = (self.dry_position + FRAME_SIZE) % ALGORITHM_DELAY;
+        let recovery = if ready {
+            self.recovery.settled()
+        } else {
+            Some(0.0)
+        };
+        if let (Some(strength), Some(recovery)) = (self.attenuation.settled(), recovery) {
+            let wet = strength * recovery;
+            if wet == 0.0 {
+                output.copy_from_slice(dry);
+            } else {
+                for (&dry, enhanced) in dry.iter().zip(output) {
+                    *enhanced = dry * (1.0 - wet) + *enhanced * wet;
+                }
+            }
+        } else {
+            for (&dry, enhanced) in dry.iter().zip(output) {
+                let strength = self.attenuation.next();
+                let wet = if ready {
+                    strength * self.recovery.next()
+                } else {
+                    0.0
+                };
+                *enhanced = if wet == 0.0 {
+                    dry
+                } else {
+                    dry * (1.0 - wet) + *enhanced * wet
+                };
+            }
+        }
+        dry.copy_from_slice(input);
     }
 
     fn process_enhanced(
@@ -221,39 +263,126 @@ impl Denoiser {
         input: &[f32; FRAME_SIZE],
         output: &mut [f32; FRAME_SIZE],
     ) -> f32 {
+        self.analyze(input);
+        let f = &self.features;
+        let lsnr = self.net.encode(&f.erb, &f.re, &f.im);
+        if self.needs_mask(lsnr) {
+            self.net.erb_decode(&mut self.gains);
+        }
+        self.apply_mask(lsnr);
+        if self.needs_deep_filter(lsnr) {
+            self.net.df_decode(&mut self.coefs);
+            self.apply_deep_filter();
+        }
+        self.stft.synthesize(&mut self.enhanced, output);
+        lsnr
+    }
+
+    fn analyze(&mut self, input: &[f32; FRAME_SIZE]) {
         self.spectra.copy_within(1.., 0);
         let newest = &mut self.spectra[DF_ORDER - 1];
         self.stft.analyze(input, newest);
         self.features.compute(newest);
-        let f = &self.features;
-        let lsnr = self.net.encode(&f.erb, &f.re, &f.im);
+    }
 
-        let [min, max_erb, max_df] = self.thresholds;
+    fn needs_mask(&self, snr: f32) -> bool {
+        snr >= self.thresholds[0] && snr <= self.thresholds[1]
+    }
+    fn needs_deep_filter(&self, snr: f32) -> bool {
+        self.needs_mask(snr) && snr <= self.thresholds[2]
+    }
+
+    fn apply_mask(&mut self, lsnr: f32) {
         let target = &self.spectra[DF_ORDER - 1 - LOOKAHEAD];
-        let mask = lsnr >= min && lsnr <= max_erb;
-        let deep_filter = mask && lsnr <= max_df;
-        if mask {
-            self.net.erb_decode(&mut self.gains);
+        if self.needs_mask(lsnr) {
             let mut bins = self.enhanced.iter_mut().zip(target);
-            for (&n, &g) in f.erb_widths.iter().zip(&self.gains) {
+            for (&n, &g) in self.features.erb_widths.iter().zip(&self.gains) {
                 bins.by_ref().take(n).for_each(|(e, &x)| *e = x * g);
             }
-        } else if lsnr < min {
+        } else if lsnr < self.thresholds[0] {
             self.enhanced.fill(Complex32::default());
         } else {
             self.enhanced.copy_from_slice(target);
         }
-        if deep_filter {
-            self.net.df_decode(&mut self.coefs);
-            for (f, e) in self.enhanced[..NB_DF].iter_mut().enumerate() {
-                let c = &self.coefs[f * DF_ORDER * 2..];
-                *e = (0..DF_ORDER).fold(Complex32::default(), |sum, o| {
-                    sum + self.spectra[o][f] * Complex32::new(c[o * 2], c[o * 2 + 1])
-                });
+    }
+
+    fn apply_deep_filter(&mut self) {
+        for (f, e) in self.enhanced[..NB_DF].iter_mut().enumerate() {
+            let c = &self.coefs[f * DF_ORDER * 2..];
+            *e = (0..DF_ORDER).fold(Complex32::default(), |sum, o| {
+                sum + self.spectra[o][f] * Complex32::new(c[o * 2], c[o * 2 + 1])
+            });
+        }
+    }
+
+    /// Process two independent channels. Shared matrix reads preserve separate recurrent states.
+    /// Both arguments must be distinct uninterrupted mono streams. Warm-up and sleep follow
+    /// the same sample-clocked transitions as individual calls to [`Self::process`].
+    pub fn process_pair(
+        left: &mut Self,
+        right: &mut Self,
+        inputs: &[[f32; FRAME_SIZE]; 2],
+        outputs: &mut [[f32; FRAME_SIZE]; 2],
+    ) {
+        let running = |channel: &Self, input: &[f32; FRAME_SIZE]| {
+            matches!(channel.state, State::Running)
+                && !channel.attenuation.is_zero()
+                && input.iter().any(|&v| v != 0.)
+        };
+        if !left.net.can_batch_with(&right.net)
+            || !running(left, &inputs[0])
+            || !running(right, &inputs[1])
+        {
+            left.process(&inputs[0], &mut outputs[0]);
+            right.process(&inputs[1], &mut outputs[1]);
+            return;
+        }
+        for (channel, input) in [&mut *left, &mut *right].into_iter().zip(inputs) {
+            channel.zero_frames = 0;
+            channel.analyze(input);
+            let f = &channel.features;
+            channel.net.encode_features(&f.erb, &f.re, &f.im);
+        }
+        left.net
+            .recurrent_pair(&mut right.net, RecurrentStage::Encoder);
+        let snr = [left.net.encoded_snr(), right.net.encoded_snr()];
+        if left.needs_mask(snr[0]) && right.needs_mask(snr[1]) {
+            left.net.prepare_erb();
+            right.net.prepare_erb();
+            left.net.recurrent_pair(&mut right.net, RecurrentStage::Erb);
+            left.net.finish_erb(&mut left.gains);
+            right.net.finish_erb(&mut right.gains);
+        } else {
+            for (channel, snr) in [&mut *left, &mut *right].into_iter().zip(snr) {
+                if channel.needs_mask(snr) {
+                    channel.net.erb_decode(&mut channel.gains);
+                }
             }
         }
-        self.stft.synthesize(&mut self.enhanced, output);
-        lsnr
+        left.apply_mask(snr[0]);
+        right.apply_mask(snr[1]);
+        if left.needs_deep_filter(snr[0]) && right.needs_deep_filter(snr[1]) {
+            left.net.prepare_df();
+            right.net.prepare_df();
+            left.net.recurrent_pair(&mut right.net, RecurrentStage::Df);
+            left.net.finish_df(&mut left.coefs);
+            right.net.finish_df(&mut right.coefs);
+        } else {
+            for (channel, snr) in [&mut *left, &mut *right].into_iter().zip(snr) {
+                if channel.needs_deep_filter(snr) {
+                    channel.net.df_decode(&mut channel.coefs);
+                }
+            }
+        }
+        for (((channel, snr), input), output) in
+            [left, right].into_iter().zip(snr).zip(inputs).zip(outputs)
+        {
+            if channel.needs_deep_filter(snr) {
+                channel.apply_deep_filter();
+            }
+            channel.stft.synthesize(&mut channel.enhanced, output);
+            channel.mix_dry(input, output, true);
+        }
     }
 }
 
@@ -263,5 +392,54 @@ fn wet_mix(db: f32) -> f32 {
         1.0
     } else {
         1.0 - 10f32.powf(-db.abs() / 20.0)
+    }
+}
+
+#[cfg(all(test, feature = "embedded-model"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paired_streams_match_independent_filters_through_stage_changes_and_silence() {
+        let mut pair = [Denoiser::new(), Denoiser::new()];
+        let mut reference = [Denoiser::new(), Denoiser::new()];
+        for n in 0..90 {
+            for filters in [&mut pair, &mut reference] {
+                match n {
+                    0 | 67 => {
+                        for channel in filters {
+                            channel.set_thresholds(-100., 100., 100.);
+                        }
+                    }
+                    13 => filters[1].set_thresholds(-100., 100., -100.),
+                    29 => filters[0].set_thresholds(100., 100., 100.),
+                    45 => filters[1].set_attenuation_limit_smooth(0., Duration::from_millis(15)),
+                    53 => filters[1].set_attenuation_limit_smooth(12., Duration::from_millis(25)),
+                    _ => {}
+                }
+            }
+            let input = std::array::from_fn(|ch| {
+                std::array::from_fn(|i| {
+                    let phase = (n * FRAME_SIZE + i) as f32 * [0.02, 0.057][ch];
+                    if ch == 0 && (56..69).contains(&n) {
+                        0.
+                    } else {
+                        phase.sin() * 0.25
+                    }
+                })
+            });
+            let mut actual = [[0.; FRAME_SIZE]; 2];
+            let [left, right] = &mut pair;
+            Denoiser::process_pair(left, right, &input, &mut actual);
+            for (ch, denoiser) in reference.iter_mut().enumerate() {
+                let mut expected = [0.; FRAME_SIZE];
+                denoiser.process(&input[ch], &mut expected);
+                assert_eq!(
+                    actual[ch].map(f32::to_bits),
+                    expected.map(f32::to_bits),
+                    "block {n} channel {ch}"
+                );
+            }
+        }
     }
 }

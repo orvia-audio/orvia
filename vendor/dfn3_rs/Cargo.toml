@@ -15,7 +15,3 @@ embedded-model = []
 
 [dependencies]
 realfft = "3.4"
-
-[profile.release]
-codegen-units = 1
-lto = "thin"

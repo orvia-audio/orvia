@@ -48,6 +48,11 @@ impl Stft {
         self.synthesis.fill(0.0);
     }
 
+    pub fn copy_history_from(&mut self, source: &Self) {
+        self.analysis = source.analysis;
+        self.synthesis = source.synthesis;
+    }
+
     pub fn analyze(&mut self, input: &[f32; HOP], spec: &mut [Complex32; BINS]) {
         let (w, t) = (&self.window, &mut self.time);
         for i in 0..HOP {
@@ -128,6 +133,11 @@ impl Features {
         let lerp = |a: f32, b: f32, n: usize, i: usize| a + i as f32 * ((b - a) / (n - 1) as f32);
         self.mean = std::array::from_fn(|i| lerp(-60.0, -90.0, NB_ERB, i));
         self.unit = std::array::from_fn(|i| lerp(0.001, 0.0001, NB_DF, i));
+    }
+
+    pub fn copy_history_from(&mut self, source: &Self) {
+        self.mean = source.mean;
+        self.unit = source.unit;
     }
 
     pub fn compute(&mut self, spec: &[Complex32; BINS]) {

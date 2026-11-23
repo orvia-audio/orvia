@@ -20,8 +20,12 @@ impl Simd {
         Self { avx2 }
     }
 
+    pub fn supports_pair(self) -> bool {
+        self.avx2
+    }
+
     /// `out[r][..n] = relu?(a[r] · w + bias + (acc ? out[r] : 0))` for `r < m`.
-    /// `m` must be 1 or a multiple of 4; all `w.n` padded columns are written.
+    /// `m` must be 1, 2, or a positive multiple of 4; all `w.n` padded columns are written.
     #[allow(clippy::too_many_arguments)]
     pub fn gemm(
         self,
@@ -35,7 +39,7 @@ impl Simd {
         out: &mut [f32],
         ldo: usize,
     ) {
-        assert!(m == 1 || m.is_multiple_of(4));
+        assert!(m == 1 || m == 2 || (m > 0 && m.is_multiple_of(4)));
         assert!(a.len() >= (m - 1) * lda + w.k && out.len() >= (m - 1) * ldo + w.n);
         assert!(w.w.len() == w.k * w.n && bias.is_none_or(|b| b.len() >= w.n));
         macro_rules! run {
@@ -60,16 +64,24 @@ impl Simd {
                         )
                     };
                 }
+                // The packed weights for sixteen output columns are adjacent at each input.
                 for r in 0..m {
-                    for n in 0..w.n {
-                        let col = &weights[n / 16 * w.k * 16 + n % 16..];
-                        let mut sum = 0.0;
-                        for i in 0..w.k {
-                            sum += a[r * lda + i] * $expand(col[i * 16]);
+                    for (tile, packed) in weights.chunks_exact(w.k * 16).enumerate() {
+                        let mut sums = [0.0; 16];
+                        for (&input, row) in
+                            a[r * lda..][..w.k].iter().zip(packed.as_chunks::<16>().0)
+                        {
+                            for (sum, &weight) in sums.iter_mut().zip(row) {
+                                *sum += input * $expand(weight);
+                            }
                         }
-                        let o = &mut out[r * ldo + n];
-                        sum += bias.map_or(0.0, |b| b[n]) + if acc { *o } else { 0.0 };
-                        *o = if relu { sum.max(0.0) } else { sum };
+                        let start = tile * 16;
+                        for (i, mut sum) in sums.into_iter().enumerate() {
+                            let n = start + i;
+                            let o = &mut out[r * ldo + n];
+                            sum += bias.map_or(0.0, |b| b[n]) + if acc { *o } else { 0.0 };
+                            *o = if relu { sum.max(0.0) } else { sum };
+                        }
                     }
                 }
             }};
@@ -233,6 +245,15 @@ mod x86 {
                         0,
                     );
                 }
+            } else if m == 2 {
+                for t in (0..tiles).step_by(2) {
+                    let w = wp.add(t * k * 16 * bytes);
+                    if t + 1 < tiles {
+                        tile::<2, 2, HALF>(k, a, lda, w, bias(t), acc, relu, o.add(t * 16), ldo);
+                    } else {
+                        tile::<2, 1, HALF>(k, a, lda, w, bias(t), acc, relu, o.add(t * 16), ldo);
+                    }
+                }
             } else {
                 for t in 0..tiles {
                     for r in (0..m).step_by(4) {
@@ -325,5 +346,54 @@ mod x86 {
             unsafe { _mm256_storeu_ps(c.as_mut_ptr(), tanh(_mm256_loadu_ps(c.as_ptr()))) };
         }
         tail.iter_mut().for_each(|v| *v = v.tanh());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn portable_tiles_match_scalar_columns_with_padded_rows() {
+        const K: usize = 13;
+        const N: usize = 32;
+        let fp32 = Box::leak(Box::new(std::array::from_fn::<_, { K * N }, _>(|i| {
+            ((i % 29) as f32 - 13.) * 0.0625
+        })));
+        let fp16 = Box::leak(Box::new(std::array::from_fn::<_, { K * N }, _>(|i| {
+            ((i * 97) % 0x7400) as u16 | if i % 5 == 0 { 0x8000 } else { 0 }
+        })));
+        let a = std::array::from_fn::<_, 64, _>(|i| (i as f32 * 0.13).sin());
+        let bias = std::array::from_fn::<_, N, _>(|i| i as f32 * -0.05);
+        for data in [Data::F32(fp32), Data::F16(fp16)] {
+            let w = Mat {
+                k: K,
+                n: N,
+                w: data,
+            };
+            for (rows, bias, acc, relu) in
+                [(1, None, false, true), (4, Some(&bias[..]), true, false)]
+            {
+                let mut output = [0.25; 140];
+                let mut expected = output;
+                for r in 0..rows {
+                    for n in 0..N {
+                        let mut sum = 0.;
+                        for k in 0..K {
+                            let offset = (n / 16 * K + k) * 16 + n % 16;
+                            let weight = match data {
+                                Data::F32(s) => s[offset],
+                                Data::F16(s) => crate::weights::expand(s[offset]),
+                            };
+                            sum += a[r * 16 + k] * weight;
+                        }
+                        sum += bias.map_or(0., |b| b[n]) + if acc { 0.25 } else { 0. };
+                        expected[r * 35 + n] = if relu { sum.max(0.) } else { sum };
+                    }
+                }
+                Simd { avx2: false }.gemm(rows, &a, 16, &w, bias, acc, relu, &mut output, 35);
+                assert_eq!(output, expected);
+            }
+        }
     }
 }

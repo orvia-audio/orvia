@@ -81,16 +81,10 @@ impl From<BlockLevels> for HistoryBlock {
 }
 
 /// Two seconds of metered audio, with display peaks scaled once on the control thread.
+/// The history uses heap storage only while it contains measurements.
+#[derive(Default)]
 pub struct SignalWindow {
     blocks: std::collections::VecDeque<(u64, HistoryBlock)>,
-}
-
-impl Default for SignalWindow {
-    fn default() -> Self {
-        Self {
-            blocks: std::collections::VecDeque::with_capacity(HISTORY_BLOCKS),
-        }
-    }
 }
 
 impl SignalWindow {
@@ -100,6 +94,8 @@ impl SignalWindow {
         for (timestamp, levels) in incoming {
             if self.blocks.len() == HISTORY_BLOCKS {
                 self.blocks.pop_front();
+            } else if self.blocks.is_empty() {
+                self.blocks.reserve_exact(HISTORY_BLOCKS);
             }
             self.blocks.push_back((timestamp, levels.into()));
         }
@@ -109,6 +105,9 @@ impl SignalWindow {
             .is_some_and(|(t, _)| now.saturating_sub(*t) > 2000)
         {
             self.blocks.pop_front();
+        }
+        if self.blocks.is_empty() {
+            self.blocks.shrink_to_fit();
         }
     }
 
@@ -810,6 +809,21 @@ mod tests {
             let history = window.history();
             assert_eq!(history, SignalHistory::from_blocks(blocks[first..].iter()));
             assert_eq!(window.history(), history);
+        }
+    }
+
+    #[test]
+    fn waveform_storage_follows_the_lifetime_of_its_measurements() {
+        let mut window = SignalWindow::default();
+        assert_eq!(window.blocks.capacity(), 0);
+        for start in [0, 5000] {
+            window.update(start, std::iter::once((start, BlockLevels::default())));
+            let capacity = window.blocks.capacity();
+            assert!(capacity >= HISTORY_BLOCKS);
+            window.update(start + 2000, std::iter::empty());
+            assert_eq!(window.blocks.capacity(), capacity);
+            window.update(start + 2001, std::iter::empty());
+            assert_eq!(window.blocks.capacity(), 0);
         }
     }
 

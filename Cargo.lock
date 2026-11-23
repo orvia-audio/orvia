@@ -4710,6 +4710,8 @@ dependencies = [
  "rust-embed",
  "semver",
  "serde",
+ "serde_json",
+ "sysinfo",
  "tempfile",
  "ureq",
 ]
@@ -4734,11 +4736,13 @@ name = "orvia-engine"
 version = "0.1.6-snapshot.10"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "cpal",
  "embed-resource",
  "fs2",
  "hound",
  "orvia-core",
+ "pulseaudio",
  "realfft",
  "resvg 0.50.0",
  "rtrb",
@@ -5147,8 +5151,6 @@ dependencies = [
 [[package]]
 name = "pulseaudio"
 version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9ba79a4c6904c987cc31fa50e9b750539404511c2dbd9ce95e5e58444177a21e"
 dependencies = [
  "bitflags 2.13.2",
  "byteorder",
@@ -7199,8 +7201,6 @@ dependencies = [
 [[package]]
 name = "tray-item"
 version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59d4bd406170690dc30eabb3badc67a085beaf9b2c3b1923afcc9c26a2191353"
 dependencies = [
  "cocoa 0.25.0",
  "core-graphics 0.23.2",

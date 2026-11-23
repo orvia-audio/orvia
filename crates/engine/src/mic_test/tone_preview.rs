@@ -1,7 +1,11 @@
 //! Render a tone comparison in continuous 10 ms blocks as the listener plays it.
-use super::{Clip, Frame, Playback};
+use super::{Clip, Frame, GuideClip, Playback};
 use anyhow::Result;
-use orvia_core::{BLOCK, SAMPLE_RATE, Tone, tone::ToneProcessor};
+use orvia_core::{
+    BLOCK, SAMPLE_RATE, Tone,
+    calibration::{GuideAudio, SampleError},
+    tone::ToneProcessor,
+};
 use std::sync::Arc;
 
 const GAP: usize = SAMPLE_RATE as usize / 4;
@@ -10,14 +14,14 @@ const GAP: usize = SAMPLE_RATE as usize / 4;
 #[derive(Clone)]
 pub struct TonePreview {
     room: Arc<Vec<Frame>>,
-    voice: Arc<Vec<Frame>>,
+    voice: Arc<GuideClip>,
     tone: Tone,
 }
 
 impl TonePreview {
     pub(super) fn pair(
         room: Arc<Vec<Frame>>,
-        voice: Arc<Vec<Frame>>,
+        voice: Arc<GuideClip>,
         current: Tone,
         recommended: Tone,
     ) -> [Self; 2] {
@@ -44,11 +48,11 @@ impl TonePreview {
     }
 
     pub(super) fn len(&self) -> usize {
-        self.room.len() + GAP + self.voice.len()
+        self.room.len() + GAP + self.voice.frame_count()
     }
 
     // Fill the room, pause, and reading on one timeline so filters never restart at a boundary.
-    fn copy_frames(&self, position: usize, output: &mut [Frame]) {
+    fn copy_frames(&self, position: usize, output: &mut [Frame]) -> std::io::Result<()> {
         let voice_start = self.room.len() + GAP;
         let room_count = self.room.len().saturating_sub(position).min(output.len());
         let (room, remaining) = output.split_at_mut(room_count);
@@ -61,33 +65,36 @@ impl TonePreview {
         let (gap, voice) = remaining.split_at_mut(gap_count);
         gap.fill([0.; 2]);
         let offset = position.saturating_sub(voice_start);
-        voice.copy_from_slice(&self.voice[offset..offset + voice.len()]);
+        if !voice.is_empty() {
+            self.voice.read(offset, voice)?;
+        }
+        Ok(())
     }
 
     /// Produce successive buffers of whole DSP blocks, with a short final block at EOF.
-    pub(super) fn reader(self) -> impl FnMut(&mut [Frame]) -> usize {
+    pub(super) fn reader(self) -> impl FnMut(&mut [Frame]) -> std::io::Result<usize> {
         let mut position = 0;
         let mut processor = ToneProcessor::new(self.tone);
         move |output| {
             let count = (self.len() - position).min(output.len());
             debug_assert!(count.is_multiple_of(BLOCK) || position + count == self.len());
             let output = &mut output[..count];
-            self.copy_frames(position, output);
+            self.copy_frames(position, output)?;
             for block in output.chunks_mut(BLOCK) {
-                processor.process(block);
+                processor.process_unmetered(block);
             }
             position += count;
-            count
+            Ok(count)
         }
     }
 
-    pub(super) fn render(self) -> Clip {
+    pub(super) fn render(self) -> Result<Clip, SampleError> {
         let mut frames = vec![[0.; 2]; self.len()];
-        self.reader()(&mut frames);
-        Clip {
+        self.reader()(&mut frames).map_err(|_| SampleError::Incomplete)?;
+        Ok(Clip {
             rate: SAMPLE_RATE,
             frames: frames.into(),
-        }
+        })
     }
 }
 
@@ -112,9 +119,10 @@ mod tests {
             gain_percent: 135,
             compressor_ratio: 4,
         };
-        let previews = TonePreview::pair(room.clone(), voice.clone(), Tone::default(), boosted);
+        let guide = Arc::new(GuideClip::memory(voice.clone()));
+        let previews = TonePreview::pair(room.clone(), guide.clone(), Tone::default(), boosted);
         for preview in previews {
-            assert!(Arc::ptr_eq(&room, &preview.room) && Arc::ptr_eq(&voice, &preview.voice));
+            assert!(Arc::ptr_eq(&room, &preview.room) && Arc::ptr_eq(&guide, &preview.voice));
             let mut expected = room.as_ref().clone();
             expected.resize(room.len() + GAP, [0.; 2]);
             expected.extend_from_slice(&voice);
@@ -125,17 +133,17 @@ mod tests {
             let mut first = preview.clone().reader();
             let mut replay = preview.reader();
             let mut buffer = [[0.; 2]; 4 * BLOCK];
-            assert_eq!(first(&mut buffer), buffer.len());
+            assert_eq!(first(&mut buffer).unwrap(), buffer.len());
             for chunk in expected.chunks(buffer.len()) {
-                let count = replay(&mut buffer);
+                let count = replay(&mut buffer).unwrap();
                 assert_eq!(&buffer[..count], chunk);
             }
-            assert_eq!(replay(&mut buffer), 0);
+            assert_eq!(replay(&mut buffer).unwrap(), 0);
             for chunk in expected[buffer.len()..].chunks(buffer.len()) {
-                let count = first(&mut buffer);
+                let count = first(&mut buffer).unwrap();
                 assert_eq!(&buffer[..count], chunk);
             }
-            assert_eq!(first(&mut buffer), 0);
+            assert_eq!(first(&mut buffer).unwrap(), 0);
         }
     }
 }

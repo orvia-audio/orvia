@@ -104,7 +104,7 @@ pub(crate) struct Network {
     h_erb: [[f32; 256]; 2],
     h_df: [[f32; 256]; 2],
     c0: [f32; NB_DF * C],
-    pending: [[f32; NB_DF * 16]; DF_ORDER], // projected FIR sums; advance only when DF runs
+    pending: [[f32; NB_DF * 10]; DF_ORDER], // projected FIR sums; advance only when DF runs
     c0_head: usize,
     // Scratch (encoder outputs persist until the decoders run).
     e0: [f32; 32 * C],
@@ -179,7 +179,7 @@ impl Network {
             h_erb: [[0.0; 256]; 2],
             h_df: [[0.0; 256]; 2],
             c0: [0.0; NB_DF * C],
-            pending: [[0.0; NB_DF * 16]; DF_ORDER],
+            pending: [[0.0; NB_DF * 10]; DF_ORDER],
             c0_head: 0,
             e0: [0.0; 32 * C],
             e1: [0.0; 16 * C],
@@ -202,7 +202,7 @@ impl Network {
         self.h_erb = [[0.0; 256]; 2];
         self.h_df = [[0.0; 256]; 2];
         self.c0.fill(0.0);
-        self.pending = [[0.0; NB_DF * 16]; DF_ORDER];
+        self.pending = [[0.0; NB_DF * 10]; DF_ORDER];
         self.c0_head = 0;
     }
 
@@ -540,17 +540,7 @@ impl Network {
         let (mats, bias) = &w.df_convp;
         for (tap, mat) in mats.iter().enumerate() {
             let slot = (self.c0_head + DF_ORDER - 1 - tap) % DF_ORDER;
-            s.gemm(
-                NB_DF,
-                &self.c0,
-                C,
-                mat,
-                None,
-                true,
-                false,
-                &mut self.pending[slot],
-                16,
-            );
+            s.accumulate_fir(&self.c0, mat, self.pending[slot].as_chunks_mut::<10>().0);
         }
         let ready = &mut self.pending[self.c0_head];
         // Groups are written in ascending order; each overwrites the previous group's padding.
@@ -560,7 +550,7 @@ impl Network {
         s.tanh(&mut df_out[..NB_DF * 10]);
         for (f, c) in coefs.as_chunks_mut::<10>().0.iter_mut().enumerate() {
             for (j, c) in c.iter_mut().enumerate() {
-                *c = df_out[f * 10 + j] + (ready[f * 16 + j] + bias[j]).max(0.0);
+                *c = df_out[f * 10 + j] + (ready[f * 10 + j] + bias[j]).max(0.0);
             }
         }
         ready.fill(0.0);

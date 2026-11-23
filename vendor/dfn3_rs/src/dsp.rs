@@ -1,6 +1,6 @@
 //! DeepFilterNet's STFT (Vorbis window, 50% overlap) and DFN3 input features.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use realfft::num_complex::Complex32;
 use realfft::{ComplexToReal, RealFftPlanner, RealToComplex};
@@ -13,30 +13,51 @@ pub(crate) const BINS: usize = FFT / 2 + 1;
 /// DeepFilterNet rounds `exp(-HOP / SR / tau)` with tau = 1 s to 0.99.
 const ALPHA: f32 = 0.99;
 
-pub(crate) struct Stft {
+struct StftPlan {
     forward: Arc<dyn RealToComplex<f32>>,
     inverse: Arc<dyn ComplexToReal<f32>>,
+    window: Box<[f32; FFT]>,
+}
+impl StftPlan {
+    fn shared() -> Arc<Self> {
+        // Only construction takes the lock. The final channel releases the plans and window.
+        static LAST: Mutex<Weak<StftPlan>> = Mutex::new(Weak::new());
+        let mut entry = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(live) = entry.upgrade() {
+            return live;
+        }
+        let mut planner = RealFftPlanner::new();
+        let (forward, inverse) = (planner.plan_fft_forward(FFT), planner.plan_fft_inverse(FFT));
+        let pi = std::f64::consts::PI;
+        let result = Arc::new(Self {
+            forward,
+            inverse,
+            window: Box::new(std::array::from_fn(|i| {
+                let s = (0.5 * pi * (i as f64 + 0.5) / HOP as f64).sin();
+                (0.5 * pi * s * s).sin() as f32
+            })),
+        });
+        *entry = Arc::downgrade(&result);
+        result
+    }
+}
+pub(crate) struct Stft {
+    plan: Arc<StftPlan>,
     scratch: Box<[Complex32]>,
-    window: [f32; FFT],
     time: [f32; FFT],
     analysis: [f32; HOP],
     synthesis: [f32; HOP],
 }
-
 impl Stft {
     pub fn new() -> Self {
-        let mut planner = RealFftPlanner::new();
-        let (forward, inverse) = (planner.plan_fft_forward(FFT), planner.plan_fft_inverse(FFT));
-        let scratch = forward.get_scratch_len().max(inverse.get_scratch_len());
-        let pi = std::f64::consts::PI;
+        let plan = StftPlan::shared();
+        let scratch = plan
+            .forward
+            .get_scratch_len()
+            .max(plan.inverse.get_scratch_len());
         Self {
             scratch: vec![Complex32::default(); scratch].into_boxed_slice(),
-            window: std::array::from_fn(|i| {
-                let s = (0.5 * pi * (i as f64 + 0.5) / HOP as f64).sin();
-                (0.5 * pi * s * s).sin() as f32
-            }),
-            forward,
-            inverse,
+            plan,
             time: [0.0; FFT],
             analysis: [0.0; HOP],
             synthesis: [0.0; HOP],
@@ -54,13 +75,14 @@ impl Stft {
     }
 
     pub fn analyze(&mut self, input: &[f32; HOP], spec: &mut [Complex32; BINS]) {
-        let (w, t) = (&self.window, &mut self.time);
+        let (w, t) = (&self.plan.window, &mut self.time);
         for i in 0..HOP {
             t[i] = self.analysis[i] * w[i];
             t[HOP + i] = input[i] * w[HOP + i];
         }
         self.analysis.copy_from_slice(input);
-        self.forward
+        self.plan
+            .forward
             .process_with_scratch(t, spec, &mut self.scratch)
             .expect("fixed-size FFT");
         let norm = 1.0 / ((FFT * FFT) as f32 / (2 * HOP) as f32);
@@ -72,9 +94,10 @@ impl Stft {
         spec[0].im = 0.0;
         spec[BINS - 1].im = 0.0;
         let _ = self
+            .plan
             .inverse
             .process_with_scratch(spec, &mut self.time, &mut self.scratch);
-        let (w, t) = (&self.window, &self.time);
+        let (w, t) = (&self.plan.window, &self.time);
         for i in 0..HOP {
             output[i] = t[i] * w[i] + self.synthesis[i];
             self.synthesis[i] = t[HOP + i] * w[HOP + i];
@@ -163,5 +186,19 @@ impl Features {
             let s = state.sqrt();
             (self.re[i], self.im[i]) = (x.re / s, x.im / s);
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::*;
+
+    #[test]
+    fn simultaneous_transforms_share_plans_and_keep_independent_overlap() {
+        let mut first = Stft::new();
+        let second = Stft::new();
+        assert!(Arc::ptr_eq(&first.plan, &second.plan));
+        first.analyze(&[0.25; HOP], &mut [Complex32::default(); BINS]);
+        assert_eq!(second.analysis, [0.; HOP]);
     }
 }

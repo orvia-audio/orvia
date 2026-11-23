@@ -290,6 +290,15 @@ impl GruLayer {
     }
 
     fn compute(&self, state: &mut [f32], input: &[f32]) {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            self.compute_grouped(state, input);
+            return;
+        }
+        self.compute_portable(state, input);
+    }
+
+    fn compute_portable(&self, state: &mut [f32], input: &[f32]) {
         let mut z = [0.0; MAX_NEURONS];
         let mut r = [0.0; MAX_NEURONS];
         let mut h = [0.0; MAX_NEURONS];
@@ -297,26 +306,56 @@ impl GruLayer {
 
         // Compute update gate.
         copy_i8(&mut z[0..n], &self.bias[0..n]);
-        self.input_submatrix(0).mul_add(&mut z[0..n], input);
-        self.rec_submatrix(0).mul_add(&mut z[0..n], &state[..]);
+        self.input_submatrix(0).mul_add_inner(&mut z[0..n], input);
+        self.rec_submatrix(0)
+            .mul_add_inner(&mut z[0..n], &state[..]);
         for z in z[0..n].iter_mut() {
             *z = sigmoid_approx(WEIGHTS_SCALE * *z);
         }
 
         // Compute reset gate.
         copy_i8(&mut r[0..n], &self.bias[n..(2 * n)]);
-        self.input_submatrix(n).mul_add(&mut r[0..n], input);
-        self.rec_submatrix(n).mul_add(&mut r[0..n], &state[..]);
+        self.input_submatrix(n).mul_add_inner(&mut r[0..n], input);
+        self.rec_submatrix(n)
+            .mul_add_inner(&mut r[0..n], &state[..]);
         for (out, &s) in r[0..n].iter_mut().zip(&state[..]) {
             *out = s * sigmoid_approx(WEIGHTS_SCALE * *out);
         }
 
         // Compute output.
         copy_i8(&mut h[0..n], &self.bias[(2 * n)..]);
-        self.input_submatrix(2 * n).mul_add(&mut h[0..n], input);
-        self.rec_submatrix(2 * n).mul_add(&mut h[0..n], &r[0..n]);
+        self.input_submatrix(2 * n)
+            .mul_add_inner(&mut h[0..n], input);
+        self.rec_submatrix(2 * n)
+            .mul_add_inner(&mut h[0..n], &r[0..n]);
 
-        for (s, &z, &h) in zip3(state, &z[0..n], &h[0..n]) {
+        self.finish(state, &z[..n], &h[..n]);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    fn compute_grouped(&self, state: &mut [f32], input: &[f32]) {
+        let n = self.nb_neurons;
+        let mut gates = [0.; 3 * MAX_NEURONS];
+        let gates = &mut gates[..3 * n];
+        copy_i8(gates, &self.bias);
+        // Contiguous gate rows share each input load, in the same accumulation order.
+        self.input_submatrix(0).mul_add(gates, input);
+        self.rec_submatrix(0).mul_add(&mut gates[..2 * n], state);
+        let (update, rest) = gates.split_at_mut(n);
+        let (reset, candidate) = rest.split_at_mut(n);
+        for z in &mut *update {
+            *z = sigmoid_approx(WEIGHTS_SCALE * *z);
+        }
+        for (r, &s) in reset.iter_mut().zip(state.iter()) {
+            *r = s * sigmoid_approx(WEIGHTS_SCALE * *r);
+        }
+        self.rec_submatrix(2 * n).mul_add(candidate, reset);
+        self.finish(state, update, candidate);
+    }
+
+    #[inline]
+    fn finish(&self, state: &mut [f32], update: &[f32], candidate: &[f32]) {
+        for (s, &z, &h) in zip3(state, update, candidate) {
             let h = match self.activation {
                 Activation::Sigmoid => sigmoid_approx(WEIGHTS_SCALE * h),
                 Activation::Tanh => tansig_approx(WEIGHTS_SCALE * h),
@@ -409,9 +448,51 @@ struct SubMatrix<'a> {
 
 impl<'a> SubMatrix<'a> {
     fn mul_add(&self, output: &mut [f32], input: &[f32]) {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: the running CPU supports the enabled instructions.
+            unsafe { self.mul_add_avx2(output, input) };
+            return;
+        }
+        self.mul_add_inner(output, input);
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2")]
+    unsafe fn mul_add_avx2(&self, output: &mut [f32], input: &[f32]) {
+        self.mul_add_inner(output, input);
+    }
+
+    #[inline(always)]
+    fn mul_add_inner(&self, output: &mut [f32], input: &[f32]) {
         for (col, input) in self.data.chunks_exact(self.stride).zip(input) {
             for (&x, out) in col[self.offset..].iter().zip(&mut *output) {
                 *out += x as f32 * input;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn dispatched_gates_match_portable_recurrent_state() {
+        let model = RnnModel::default();
+        for layer in [&model.vad_gru, &model.noise_gru, &model.denoise_gru] {
+            let mut portable = vec![0.; layer.nb_neurons];
+            let mut dispatched = portable.clone();
+            for frame in 0..96 {
+                let input: Vec<_> = (0..layer.nb_inputs)
+                    .map(|i| ((frame * 13 + i * 19) as f32 * 0.19).sin())
+                    .collect();
+                layer.compute_portable(&mut portable, &input);
+                layer.compute(&mut dispatched, &input);
+                assert!(portable
+                    .iter()
+                    .zip(&dispatched)
+                    .all(|(a, b)| a.to_bits() == b.to_bits()));
             }
         }
     }

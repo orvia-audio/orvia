@@ -6,6 +6,115 @@ const INPUT_COLOR: u32 = 0xb2d3dd;
 const OUTPUT_COLOR: u32 = 0xffaa82;
 const HISTORY_BLOCKS: usize = 200;
 
+pub(crate) struct MixerViews {
+    graph: gpui::Entity<GraphView>,
+    controls: gpui::Entity<ControlsView>,
+}
+
+struct GraphView(gpui::WeakEntity<Panel>);
+
+impl Render for GraphView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.0
+            .update(cx, |p, cx| p.graph_card(cx))
+            .unwrap_or_else(|_| div())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ControlsLayout {
+    window_width: gpui::Pixels,
+    rem: gpui::Pixels,
+    scale: f32,
+    height: gpui::Pixels,
+}
+
+struct ControlsView {
+    panel: gpui::WeakEntity<Panel>,
+    // A cached GPUI view needs an explicit layout height. Measure the normal layout
+    // again after changes to settings, labels or the width available for wrapping.
+    size: std::rc::Rc<std::cell::Cell<Option<ControlsLayout>>>,
+}
+
+impl Render for ControlsView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let size = self.size.clone();
+        let window_width = window.viewport_size().width;
+        let rem = window.rem_size();
+        let scale = window.scale_factor();
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .on_children_prepainted(move |children, _, _| {
+                if let Some(content) = children.first() {
+                    size.set(Some(ControlsLayout {
+                        window_width,
+                        rem,
+                        scale,
+                        height: content.size.height,
+                    }));
+                }
+            })
+            .child(
+                self.panel
+                    .update(cx, |p, cx| p.mixer_controls(cx))
+                    .unwrap_or_else(|_| div()),
+            )
+    }
+}
+
+impl MixerViews {
+    pub(crate) fn new(cx: &mut Context<Panel>) -> Self {
+        let panel = cx.entity();
+        let graph = cx.new(|_| GraphView(panel.downgrade()));
+        let controls = cx.new(|cx| {
+            cx.observe(&panel, |controls: &mut ControlsView, _, cx| {
+                controls.size.set(None);
+                cx.notify();
+            })
+            .detach();
+            ControlsView {
+                panel: panel.downgrade(),
+                size: Default::default(),
+            }
+        });
+        Self { graph, controls }
+    }
+
+    pub(crate) fn refresh_graph(&self, cx: &mut Context<Panel>) {
+        self.graph.update(cx, |_, cx| cx.notify());
+    }
+}
+
+impl Panel {
+    pub(super) fn mixer(&self, window: &Window, cx: &Context<Self>) -> gpui::Div {
+        let controls = &self.mixer_views.controls;
+        let mut view = gpui::AnyView::from(controls.clone());
+        if let Some(layout) = controls.read(cx).size.get()
+            && layout.window_width == window.viewport_size().width
+            && layout.rem == window.rem_size()
+            && layout.scale == window.scale_factor()
+        {
+            view = view.cached(
+                gpui::StyleRefinement::default()
+                    .w_full()
+                    .h(layout.height)
+                    .flex_shrink_0(),
+            );
+        }
+        let visibility = self.graph_visible.clone();
+        stack()
+            .gap_2()
+            .on_children_prepainted(move |children, window, _| {
+                if let Some(card) = children.first() {
+                    visibility.set(card.intersects(&window.content_mask().bounds));
+                }
+            })
+            .child(self.mixer_views.graph.clone())
+            .child(view)
+    }
+}
+
 fn needs_restart(status: &EngineStatus, spectrum: bool) -> bool {
     status.version != env!("CARGO_PKG_VERSION")
         && if spectrum {
@@ -58,6 +167,14 @@ fn history(levels: Vec<[u8; 2]>, filtered: bool) -> impl IntoElement {
                 let mut area = gpui::PathBuilder::fill();
                 area.move_to(point(start, bottom));
                 for (i, block) in levels.iter().enumerate() {
+                    // Retain both ends of each horizontal run for the stroke and filled area.
+                    if i > 0
+                        && i + 1 < levels.len()
+                        && levels[i - 1][channel] == block[channel]
+                        && levels[i + 1][channel] == block[channel]
+                    {
+                        continue;
+                    }
                     let x = start + stride * i as f32;
                     let y = bottom - (h - px(2.)) * (f32::from(block[channel]) / 60.);
                     let p = point(x, y);
@@ -219,7 +336,7 @@ impl Panel {
             .child(track)
     }
 
-    pub(super) fn mixer(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn graph_card(&self, cx: &mut Context<Self>) -> gpui::Div {
         let l = self.prefs.language;
         let live = self
             .status
@@ -227,40 +344,7 @@ impl Panel {
             .filter(|s| s.message.starts_with("Streaming"));
         let outdated = live.is_some_and(|s| needs_restart(s, self.show_spectrum));
         let levels = live.map(|s| s.signal.peaks.as_slice()).unwrap_or_default();
-        let selected = self.prefs.active_noise_method();
-        let filtered = selected.is_some();
-        let mut methods = row();
-        for (id, label, method) in [
-            ("bypass", l.text("Off", "オフ"), None),
-            (
-                "deepfilternet3",
-                "DeepFilterNet3",
-                Some(NoiseMethod::DeepFilterNet3),
-            ),
-            ("rnnoise", "RNNoise", Some(NoiseMethod::Rnnoise)),
-            ("webrtc", "WebRTC", Some(NoiseMethod::WebRtc)),
-        ] {
-            methods = methods.child(self.button(
-                id,
-                label,
-                selected == method,
-                Control::Noise(method),
-                cx,
-            ));
-        }
-        let mut mix = row();
-        for (id, label, mode) in [
-            ("stereo", l.text("Stereo", "ステレオ"), Mixing::Stereo),
-            ("mono", l.text("Mono", "モノラル"), Mixing::Average),
-        ] {
-            mix = mix.child(self.button(
-                id,
-                label,
-                self.prefs.mixing == mode,
-                Control::Mix(mode),
-                cx,
-            ));
-        }
+        let filtered = self.prefs.active_noise_method().is_some();
         let summary = stack()
             .gap_2()
             .p_4()
@@ -315,51 +399,89 @@ impl Panel {
                         self.state_label()
                     })),
             );
-        let summary =
-            if self.show_spectrum {
-                self.spectrum_chart(summary, live.and_then(|s| s.spectrum.as_ref()), cx)
-            } else {
-                summary
-                    .child(
-                        row()
-                            .justify_between()
-                            .child(
-                                row()
-                                    .child(legend(
-                                        if filtered {
-                                            l.text("Before", "抑制前")
-                                        } else {
-                                            l.text("Input", "入力")
-                                        },
-                                        INPUT_COLOR,
-                                    ))
-                                    .when(filtered, |d| {
-                                        d.child(legend(l.text("After", "抑制後"), OUTPUT_COLOR))
-                                    }),
-                            )
-                            .child(div().text_xs().text_color(rgb(0xd5dcd9)).child(
-                                l.text("2 s   ·   −60 to 0 dBFS", "2 秒   ·   −60 ～ 0 dBFS"),
-                            )),
-                    )
-                    .child(history(levels.to_vec(), filtered))
-                    .child(
-                        row()
-                            .justify_between()
-                            .child(div().flex_1().when(filtered, |d| {
-                                let change =
-                                    attenuation_label(live.and_then(|s| s.signal.attenuation_db));
-                                d.text_sm().child(format!(
-                                    "{}  {change}",
-                                    l.text("Pre-gain attenuation", "ゲイン適用前の減衰量")
+        if self.show_spectrum {
+            self.spectrum_chart(summary, live.and_then(|s| s.spectrum.as_ref()), cx)
+        } else {
+            summary
+                .child(
+                    row()
+                        .justify_between()
+                        .child(
+                            row()
+                                .child(legend(
+                                    if filtered {
+                                        l.text("Before", "抑制前")
+                                    } else {
+                                        l.text("Input", "入力")
+                                    },
+                                    INPUT_COLOR,
                                 ))
-                            }))
-                            .child(div().text_sm().child(format!(
-                                "{}  {}",
-                                l.text("Output", "出力"),
-                                output_label(live.map_or(0., |s| s.peak))
-                            ))),
-                    )
-            };
+                                .when(filtered, |d| {
+                                    d.child(legend(l.text("After", "抑制後"), OUTPUT_COLOR))
+                                }),
+                        )
+                        .child(
+                            div().text_xs().text_color(rgb(0xd5dcd9)).child(
+                                l.text("2 s   ·   −60 to 0 dBFS", "2 秒   ·   −60 ～ 0 dBFS"),
+                            ),
+                        ),
+                )
+                .child(history(levels.to_vec(), filtered))
+                .child(
+                    row()
+                        .justify_between()
+                        .child(div().flex_1().when(filtered, |d| {
+                            let change =
+                                attenuation_label(live.and_then(|s| s.signal.attenuation_db));
+                            d.text_sm().child(format!(
+                                "{}  {change}",
+                                l.text("Pre-gain attenuation", "ゲイン適用前の減衰量")
+                            ))
+                        }))
+                        .child(div().text_sm().child(format!(
+                            "{}  {}",
+                            l.text("Output", "出力"),
+                            output_label(live.map_or(0., |s| s.peak))
+                        ))),
+                )
+        }
+    }
+
+    fn mixer_controls(&self, cx: &mut Context<Self>) -> gpui::Div {
+        let l = self.prefs.language;
+        let selected = self.prefs.active_noise_method();
+        let mut methods = row();
+        for (id, label, method) in [
+            ("bypass", l.text("Off", "オフ"), None),
+            (
+                "deepfilternet3",
+                "DeepFilterNet3",
+                Some(NoiseMethod::DeepFilterNet3),
+            ),
+            ("rnnoise", "RNNoise", Some(NoiseMethod::Rnnoise)),
+            ("webrtc", "WebRTC", Some(NoiseMethod::WebRtc)),
+        ] {
+            methods = methods.child(self.button(
+                id,
+                label,
+                selected == method,
+                Control::Noise(method),
+                cx,
+            ));
+        }
+        let mut mix = row();
+        for (id, label, mode) in [
+            ("stereo", l.text("Stereo", "ステレオ"), Mixing::Stereo),
+            ("mono", l.text("Mono", "モノラル"), Mixing::Average),
+        ] {
+            mix = mix.child(self.button(
+                id,
+                label,
+                self.prefs.mixing == mode,
+                Control::Mix(mode),
+                cx,
+            ));
+        }
         let tone = orvia_core::Tone {
             low_cut_hz: self.slider_value(Slider::LowCut),
             gain_percent: self.slider_value(Slider::Gain),
@@ -410,7 +532,6 @@ impl Panel {
             .child(controls);
         stack()
             .gap_2()
-            .child(summary)
             .child(
                 card()
                     .gap_2()
@@ -480,6 +601,7 @@ mod tests {
 
     fn live() -> EngineStatus {
         EngineStatus {
+            window_observers: true,
             signal: SignalHistory {
                 peaks: vec![[28, 22]; HISTORY_BLOCKS],
                 attenuation_db: Some(6.),

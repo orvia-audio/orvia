@@ -208,6 +208,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
             // events still reach observers on the next supervisor tick.
             if changed || audio_changed || heartbeat {
                 let status = EngineStatus {
+                    window_observers: true,
                     spectrum,
                     signal,
                     monitoring: last_monitor.0,

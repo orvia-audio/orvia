@@ -24,6 +24,42 @@ pub enum SampleError {
     Clipped,
 }
 
+/// Random-access stereo PCM for guided setup. Implementations can keep long readings on disk.
+pub trait GuideAudio {
+    /// Total number of normalized 48 kHz stereo frames in the completed recording.
+    fn frame_count(&self) -> usize;
+
+    /// Fill the destination starting at the given frame, preserving the captured sample bits.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sample error if the requested frames cannot be read in full.
+    fn read_frames(&self, start: usize, out: &mut [[f32; 2]]) -> Result<(), SampleError>;
+}
+
+impl GuideAudio for [[f32; 2]] {
+    fn frame_count(&self) -> usize {
+        self.len()
+    }
+
+    fn read_frames(&self, start: usize, out: &mut [[f32; 2]]) -> Result<(), SampleError> {
+        let frames = self
+            .get(start..)
+            .and_then(|tail| tail.get(..out.len()))
+            .ok_or(SampleError::Incomplete)?;
+        out.copy_from_slice(frames);
+        Ok(())
+    }
+}
+
+pub(crate) fn check_cancelled(cancelled: &dyn Fn() -> bool) -> Result<(), SampleError> {
+    if cancelled() {
+        Err(SampleError::Incomplete)
+    } else {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct Energy {
     dry: f64,
@@ -32,11 +68,17 @@ struct Energy {
 }
 
 impl Energy {
+    fn add(&mut self, block: Self) {
+        self.dry += block.dry;
+        self.wet += block.wet;
+        self.cross += block.cross;
+    }
+
+    #[cfg(test)]
     fn sum(blocks: &[Self]) -> Self {
-        blocks.iter().fold(Self::default(), |a, b| Self {
-            dry: a.dry + b.dry,
-            wet: a.wet + b.wet,
-            cross: a.cross + b.cross,
+        blocks.iter().fold(Self::default(), |mut sum, &block| {
+            sum.add(block);
+            sum
         })
     }
 
@@ -59,12 +101,12 @@ fn dry_mix(limit: u16) -> f64 {
 
 /// Locate the active 50 ms windows using the input alone, before running the model.
 fn onset_windows(
-    blocks: &[Energy],
+    blocks: &[f64],
     room_range: Range<usize>,
     phrases: [Range<usize>; 2],
 ) -> Result<Vec<Range<usize>>, SampleError> {
-    fn percentile90(blocks: &[Energy]) -> f64 {
-        let mut powers: Vec<_> = blocks.iter().map(|b| b.dry).collect();
+    fn percentile90(blocks: &[f64]) -> f64 {
+        let mut powers: Vec<_> = blocks.to_vec();
         let rank = powers.len() * 9 / 10;
         *powers.select_nth_unstable_by(rank, f64::total_cmp).1
     }
@@ -80,14 +122,12 @@ fn onset_windows(
             return Err(SampleError::UnclearSpeech);
         }
         let threshold = floor.max(percentile90(speech) * 0.025);
-        if speech.iter().filter(|b| b.dry > threshold).take(20).count() < 20 {
+        if speech.iter().filter(|b| **b > threshold).take(20).count() < 20 {
             return Err(SampleError::UnclearSpeech);
         }
         let first = speech
             .windows(4)
-            .position(|w| {
-                w[0].dry > threshold && w.iter().filter(|b| b.dry > threshold).count() >= 3
-            })
+            .position(|w| w[0] > threshold && w.iter().filter(|b| **b > threshold).count() >= 3)
             .ok_or(SampleError::UnclearSpeech)?;
         if first + 15 > speech.len() {
             return Err(SampleError::UnclearSpeech);
@@ -95,7 +135,7 @@ fn onset_windows(
         let start = phrase.start + first;
         let previous = onsets.len();
         for i in (start..start + 15).step_by(5) {
-            if Energy::sum(&blocks[i..i + 5]).dry > 5. * floor {
+            if blocks[i..i + 5].iter().sum::<f64>() > 5. * floor {
                 onsets.push(i..i + 5);
             }
         }
@@ -147,86 +187,125 @@ pub fn recommend(
     phrases: [&[[f32; 2]]; 2],
     mixing: Mixing,
 ) -> Result<Recommendation, SampleError> {
-    // Round each boundary to complete model blocks and preserve a room interval before each onset.
-    let sections = [room, phrases[0], room, phrases[1]];
-    let chunks = || sections.iter().flat_map(|s| s.chunks_exact(BLOCK));
+    recommend_from(room, phrases, mixing, &|| false)
+}
+
+/// Estimate a suppression limit from seekable readings, checking for cancellation between blocks.
+///
+/// # Errors
+///
+/// Returns a sample error for unreadable, cancelled, clipped, or incomplete guides.
+pub fn recommend_from<S: GuideAudio + ?Sized>(
+    room: &[[f32; 2]],
+    phrases: [&S; 2],
+    mixing: Mixing,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Recommendation, SampleError> {
     let room_blocks = room.len() / BLOCK;
-    let first = room_blocks..room_blocks + phrases[0].len() / BLOCK;
+    let first = room_blocks..room_blocks + phrases[0].frame_count() / BLOCK;
     let start = first.end + room_blocks;
-    let second = start..start + phrases[1].len() / BLOCK;
-    if chunks().flatten().flatten().any(|x| !x.is_finite()) {
-        return Err(SampleError::Incomplete);
-    }
-    if chunks()
-        .flatten()
-        .filter(|f| f.iter().any(|x| x.abs() >= 0.999))
-        .count()
-        > SAMPLE_RATE as usize / 100
-    {
-        return Err(SampleError::Clipped);
-    }
+    let second = start..start + phrases[1].frame_count() / BLOCK;
+    let total = second.end;
+    let read = |i: usize, buf: &mut [[f32; 2]; BLOCK]| {
+        check_cancelled(cancelled)?;
+        if first.contains(&i) {
+            phrases[0].read_frames((i - first.start) * BLOCK, buf)
+        } else if second.contains(&i) {
+            phrases[1].read_frames((i - second.start) * BLOCK, buf)
+        } else {
+            let room_index = if i < room_blocks { i } else { i - first.end };
+            room.read_frames(room_index * BLOCK, buf)
+        }
+    };
     let channels = if mixing == Mixing::Stereo { 2 } else { 1 };
     let scale = (channels * BLOCK) as f64;
     let sample = |frame: &[f32; 2], ch: usize| match mixing {
         Mixing::Stereo => frame[ch],
         Mixing::Average => (frame[0] + frame[1]) * 0.5,
     };
-    let mut blocks: Vec<_> = chunks()
-        .map(|chunk| {
-            let mut dry = 0.;
-            for ch in 0..channels {
-                for frame in chunk {
-                    let x = f64::from(sample(frame, ch));
-                    dry += x * x;
-                }
+    let mut powers = Vec::with_capacity(total);
+    let mut clipped = 0;
+    let mut first_difference = None;
+    let mut block = [[0.; 2]; BLOCK];
+    for i in 0..total {
+        if (first.end..second.start).contains(&i) {
+            // Reuse the room preflight; both occurrences still advance the model below.
+            powers.push(powers[i - first.end]);
+            continue;
+        }
+        read(i, &mut block)?;
+        let mut power = 0.;
+        for frame in &block {
+            if !frame[0].is_finite() || !frame[1].is_finite() {
+                return Err(SampleError::Incomplete);
             }
-            Energy {
-                dry: dry / scale,
-                ..Energy::default()
+            if frame[0].abs() >= 0.999 || frame[1].abs() >= 0.999 {
+                clipped += if i < room_blocks { 2 } else { 1 };
             }
-        })
-        .collect();
-    let windows = onset_windows(&blocks, 0..room_blocks, [first, second])?;
+            if frame[0].to_bits() != frame[1].to_bits() {
+                first_difference.get_or_insert(i);
+            }
+            let x = f64::from(sample(frame, 0));
+            power += x * x;
+        }
+        if channels == 2 {
+            for frame in &block {
+                let x = f64::from(frame[1]);
+                power += x * x;
+            }
+        }
+        powers.push(power / scale);
+    }
+    if clipped > SAMPLE_RATE as usize / 100 {
+        return Err(SampleError::Clipped);
+    }
+    let windows = onset_windows(&powers, 0..room_blocks, [first.clone(), second.clone()])?;
     let last = windows.last().expect("each phrase has an onset").end;
-    let delay = dfn3_rs::ALGORITHM_DELAY / BLOCK;
-    let independent = channels == 2
-        && chunks()
-            .take(last + delay)
-            .flatten()
-            .any(|f| f[0].to_bits() != f[1].to_bits());
+    const DELAY: usize = dfn3_rs::ALGORITHM_DELAY / BLOCK;
+    let independent = channels == 2 && first_difference.is_some_and(|i| i < last + DELAY);
     let mut left = dfn3_rs::Denoiser::new();
     let mut right = independent.then(|| Box::new(dfn3_rs::Denoiser::new()));
-    let mut aligned = chunks().zip(&mut blocks);
-    // Keep all inference history through the last required window, including lookahead.
-    for (i, chunk) in chunks()
-        .chain(std::iter::repeat_n(&[][..], delay))
-        .take(last + delay)
-        .enumerate()
-    {
+    let mut dry = [[[0.; 2]; BLOCK]; DELAY + 1];
+    let mut room_energy = Energy::default();
+    let mut onsets = vec![Energy::default(); windows.len()];
+    for i in 0..last + DELAY {
+        let block = &mut dry[i % (DELAY + 1)];
+        if i < total {
+            read(i, block)?;
+        } else {
+            check_cancelled(cancelled)?;
+            block.fill([0.; 2]);
+        }
         let mut input = [[0.; BLOCK]; 2];
-        for (slot, frame) in input[0].iter_mut().zip(chunk) {
+        let mut output = [[0.; BLOCK]; 2];
+        for (slot, frame) in input[0].iter_mut().zip(&*block) {
             *slot = sample(frame, 0);
         }
-        let mut output = [[0.; BLOCK]; 2];
         if let Some(right) = &mut right {
-            for (slot, frame) in input[1].iter_mut().zip(chunk) {
+            for (slot, frame) in input[1].iter_mut().zip(&*block) {
                 *slot = frame[1];
             }
             dfn3_rs::Denoiser::process_pair(&mut left, right, &input, &mut output);
         } else {
             left.process(&input[0], &mut output[0]);
         }
-        let Some(index) = i.checked_sub(delay) else {
+        let Some(index) = i.checked_sub(DELAY) else {
             continue;
         };
-        let (dry, energy) = aligned.next().expect("window lies within the guide");
-        if index >= room_blocks && !windows.iter().any(|w| w.contains(&index)) {
+        let target = if index < room_blocks {
+            &mut room_energy
+        } else if let Some(w) = windows.iter().position(|w| w.contains(&index)) {
+            &mut onsets[w]
+        } else {
             continue;
-        }
-        // Accumulate in channel order even when identical stereo shares a model.
+        };
+        let mut energy = Energy {
+            dry: powers[index],
+            ..Energy::default()
+        };
         for ch in 0..channels {
             let enhanced = &output[if independent { ch } else { 0 }];
-            for (frame, &wet) in dry.iter().zip(enhanced) {
+            for (frame, &wet) in dry[index % (DELAY + 1)].iter().zip(enhanced) {
                 let b = f64::from(wet);
                 energy.wet += b * b;
                 energy.cross += f64::from(sample(frame, ch)) * b;
@@ -234,17 +313,36 @@ pub fn recommend(
         }
         energy.wet /= scale;
         energy.cross /= scale;
+        target.add(energy);
     }
-    let onsets: Vec<_> = windows
-        .into_iter()
-        .map(|r| Energy::sum(&blocks[r]))
-        .collect();
-    Ok(choose(Energy::sum(&blocks[..room_blocks]), &onsets))
+    Ok(choose(room_energy, &onsets))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_guides_stop_before_reading_the_recording() {
+        struct Unread;
+        impl GuideAudio for Unread {
+            fn frame_count(&self) -> usize {
+                48_000
+            }
+            fn read_frames(&self, _: usize, _: &mut [[f32; 2]]) -> Result<(), SampleError> {
+                panic!("cancelled recording was read")
+            }
+        }
+        let room = vec![[0.; 2]; BLOCK * 50];
+        assert_eq!(
+            recommend_from(&room, [&Unread, &Unread], Mixing::Stereo, &|| true).unwrap_err(),
+            SampleError::Incomplete
+        );
+        assert_eq!(
+            crate::tone::recommend_from(&room, &Unread, &|| true).unwrap_err(),
+            SampleError::Incomplete
+        );
+    }
 
     #[test]
     fn calibrates_duplicated_speech_equally_in_mono_and_stereo() {
@@ -305,11 +403,15 @@ mod tests {
             block.wet /= scale;
             block.cross /= scale;
         }
-        let onsets: Vec<_> = onset_windows(&reference, 0..30, [30..95, 125..190])
-            .unwrap()
-            .into_iter()
-            .map(|r| Energy::sum(&reference[r]))
-            .collect();
+        let onsets: Vec<_> = onset_windows(
+            &reference.iter().map(|v| v.dry).collect::<Vec<_>>(),
+            0..30,
+            [30..95, 125..190],
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| Energy::sum(&reference[r]))
+        .collect();
         let expected = choose(Energy::sum(&reference[..30]), &onsets);
         assert_eq!(actual.limit_db, expected.limit_db);
         assert_eq!(
@@ -333,7 +435,11 @@ mod tests {
     fn strong_attenuation_is_suitable_only_when_both_onsets_survive() {
         let speech = [200..500, 700..1000];
         let choose = |blocks: &[Energy]| -> Result<Recommendation, SampleError> {
-            let windows = onset_windows(blocks, 30..170, speech.clone())?;
+            let windows = onset_windows(
+                &blocks.iter().map(|v| v.dry).collect::<Vec<_>>(),
+                30..170,
+                speech.clone(),
+            )?;
             let onsets: Vec<_> = windows
                 .into_iter()
                 .map(|r| Energy::sum(&blocks[r]))

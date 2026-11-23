@@ -6,7 +6,8 @@ use gpui::{
     Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 use microphone_test::TestAction;
-use orvia_core::{EngineStatus, Language, Mixing, NoiseMethod, Settings, data_dir, read_json};
+use observation::{ObserverLease, StatusReader, StatusUpdate};
+use orvia_core::{EngineStatus, Language, Mixing, NoiseMethod, Settings, data_dir};
 use semver::Version;
 use slider::{Slider, SliderDrag};
 use std::{
@@ -84,7 +85,10 @@ impl ControlAnchor {
 }
 
 struct Panel {
+    observer: ObserverLease,
     show_spectrum: bool,
+    graph_visible: std::rc::Rc<std::cell::Cell<bool>>,
+    mixer_views: view::MixerViews,
     spectrum_anchor: ControlAnchor,
     spectrum_band: Option<usize>,
     picker_anchors: [ControlAnchor; 6],
@@ -151,9 +155,13 @@ impl Panel {
             let mut last_poll = heartbeat;
             let mut last_prefs = heartbeat;
             let mut last_observer = None;
+            let mut last_waveform = StatusReader::default();
+            let mut last_audio_display = None;
+            let mut last_error = String::new();
             let frame_seen = std::rc::Rc::new(std::cell::Cell::new(true));
             let mut last_frame = Instant::now();
             let mut was_visible = true;
+            let started = Instant::now();
             loop {
                 // GPUI receives compositor frames for visible windows even without keyboard focus.
                 // Keep one callback pending while minimized, without requesting a repaint.
@@ -177,20 +185,22 @@ impl Panel {
                     if !visible && !audio {
                         return (None, false, false);
                     }
-                    let mixer = visible && p.live_mixer();
+                    let mixer = visible && p.live_mixer() && p.graph_visible.get();
                     let spectrum = mixer && p.show_spectrum;
-                    let legacy = p
-                        .status
-                        .as_ref()
-                        .is_none_or(|s| s.version != env!("CARGO_PKG_VERSION"));
+                    let legacy = p.status.as_ref().map_or_else(
+                        || started.elapsed() >= Duration::from_secs(1),
+                        |s| !s.window_observers,
+                    );
                     let observer = if legacy {
                         "observe"
                     } else if spectrum {
-                        orvia_core::spectrum::OBSERVER_FILE
+                        orvia_core::observer::SPECTRUM
                     } else if mixer {
-                        "observe"
+                        orvia_core::observer::WAVEFORM
+                    } else if p.test_only {
+                        orvia_core::observer::MIC_TEST
                     } else {
-                        orvia_core::SUMMARY_OBSERVER
+                        orvia_core::observer::SUMMARY
                     };
                     let streaming = p
                         .status
@@ -223,24 +233,14 @@ impl Panel {
                         w.activate_window();
                     });
                 }
-                if let Some((name, legacy_spectrum)) = observer
-                    && (last_observer != observer || heartbeat.elapsed() >= Duration::from_secs(2))
+                if last_observer != observer
+                    || (observer.is_some() && heartbeat.elapsed() >= Duration::from_secs(2))
                 {
-                    // Older engines require both heartbeats to publish a spectrum.
-                    let _ = fs::write(poll_dir.join(name), b"1");
-                    if legacy_spectrum {
-                        let _ = fs::write(poll_dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
-                    }
+                    let _ = this.update(cx, |p, _| p.observer.refresh(&p.dir, observer));
                     heartbeat = Instant::now();
                 }
                 last_observer = observer;
-                let status = observer
-                    .and_then(|_| read_json::<EngineStatus>(&status_path).ok())
-                    .filter(|s| {
-                        s.observed
-                            .elapsed()
-                            .is_ok_and(|age| age < Duration::from_secs(2))
-                    });
+                let status = observer.and_then(|_| fs::read(&status_path).ok());
                 // Local edits update the panel immediately. Active recordings and auditions
                 // also check external edits on every poll to detect route changes.
                 let prefs = if audio || restored || last_prefs.elapsed() >= Duration::from_secs(1) {
@@ -251,27 +251,40 @@ impl Panel {
                 };
                 if this
                     .update(cx, |p, cx| {
-                        let retain = status.is_none()
-                            && p.status.as_ref().is_some_and(|s| {
-                                s.observed
-                                    .elapsed()
-                                    .is_ok_and(|age| age < Duration::from_secs(2))
-                            });
-                        let mut redraw = false;
-                        if !retain {
-                            redraw = p.status_changed(status.as_ref());
-                            p.status = status;
-                        }
+                        let monitor = |p: &Panel| {
+                            p.status
+                                .as_ref()
+                                .map(|s| (s.monitoring, s.monitor_error.is_some()))
+                        };
+                        let last_monitor = monitor(p);
+                        let status_redraw = match last_waveform.decode(status, p.status.as_ref()) {
+                            StatusUpdate::Keep => false,
+                            StatusUpdate::Replace(next) => {
+                                let redraw = p.status_changed(next.as_ref());
+                                p.status = next;
+                                redraw
+                            }
+                        };
+                        let graph_only = p.live_mixer() && last_monitor == monitor(p);
+                        let mut redraw = status_redraw && !graph_only;
                         if let Some(prefs) = prefs
                             && p.prefs != prefs
                         {
                             p.prefs = prefs;
                             redraw = true;
                         }
-                        redraw |= p.polling_audio();
                         p.poll_tone_setup(cx);
                         if p.page == Page::MicTest {
                             p.poll_mic_test(cx);
+                        }
+                        let display = p.audio_display();
+                        if last_audio_display.as_ref() != Some(&display) {
+                            redraw = true;
+                            last_audio_display = Some(display);
+                        }
+                        if last_error != p.error {
+                            redraw = true;
+                            last_error.clone_from(&p.error);
                         }
                         if !p.test_only && p.prefs.check_updates_automatically && p.updates.due() {
                             p.check_for_updates(cx);
@@ -279,6 +292,8 @@ impl Panel {
                         }
                         if visible && (redraw || restored) {
                             cx.notify();
+                        } else if visible && status_redraw && p.graph_visible.get() {
+                            p.mixer_views.refresh_graph(cx);
                         }
                     })
                     .is_err()
@@ -297,7 +312,7 @@ impl Panel {
         if test_only {
             panel.page = Page::MicTest;
             panel.open_mic_test();
-        } else {
+        } else if panel.prefs.monitor.is_some() {
             panel.monitors = orvia_engine::monitors().unwrap_or_default();
         }
         panel
@@ -351,8 +366,11 @@ impl Panel {
         let slider_anchors = std::array::from_fn(|_| ControlAnchor::new(cx));
         Self::observe_slider_focus(&slider_anchors, window, cx);
         Self {
+            observer: ObserverLease::default(),
             updates: Default::default(),
             show_spectrum: false,
+            graph_visible: std::rc::Rc::new(std::cell::Cell::new(true)),
+            mixer_views: view::MixerViews::new(cx),
             spectrum_anchor: ControlAnchor::new(cx),
             spectrum_band: None,
             show_update_feedback: false,
@@ -411,9 +429,6 @@ impl Panel {
             Control::ShowSpectrum(on) => {
                 self.show_spectrum = on;
                 self.spectrum_band = None;
-                if on {
-                    let _ = fs::write(self.dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
-                }
             }
             Control::Page(page) => {
                 self.tone_setup = None;
@@ -600,6 +615,7 @@ mod auto_adjust;
 mod engine_control;
 mod icons;
 mod microphone_test;
+mod observation;
 mod reading;
 mod slider;
 mod tone_setup;

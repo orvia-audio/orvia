@@ -1,8 +1,44 @@
 //! End a microphone check when the waveform settles after an utterance.
-use std::time::{Duration, Instant};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
+    time::{Duration, Instant},
+};
 
 use orvia_core::Language;
-use orvia_engine::mic_test::{FileRecording, Recording};
+use orvia_engine::mic_test::{FileRecording, GuidedRecording, Recording};
+
+/// Dropping the receiving stage cancels analysis at its next audio block.
+pub(super) struct Analysis<T> {
+    pub(super) result: mpsc::Receiver<T>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl<T: Send + 'static> Analysis<T> {
+    pub(super) fn start(
+        cx: &gpui::Context<super::Panel>,
+        analyze: impl FnOnce(&dyn Fn() -> bool) -> T + Send + 'static,
+    ) -> Self {
+        let (sender, result) = mpsc::channel();
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let flag = cancelled.clone();
+        cx.background_executor()
+            .spawn(async move {
+                let _ = sender.send(analyze(&|| flag.load(Ordering::Relaxed)));
+            })
+            .detach();
+        Self { result, cancelled }
+    }
+}
+
+impl<T> Drop for Analysis<T> {
+    fn drop(&mut self) {
+        self.cancelled.store(true, Ordering::Relaxed);
+    }
+}
 
 const BASELINE_BLOCKS: usize = 15;
 const ONSET_BLOCKS: usize = 4;
@@ -38,6 +74,21 @@ impl Reader {
         let rate = recording.rate();
         let frames = recording.collect().map_err(|e| e.to_string())?;
         self.listen_frames(frames, rate, language)
+    }
+
+    /// Retain the quiet lead-in and stream every analyzed block after speech begins.
+    pub(super) fn listen_guided(
+        &mut self,
+        guide: &mut GuidedRecording,
+        language: Language,
+    ) -> Result<bool, String> {
+        let done = self.listen(guide.input(), language)?;
+        if self.speaking {
+            self.checked -= guide.retain(self.checked).map_err(|e| e.to_string())?;
+        } else {
+            self.trim_waiting(guide.input());
+        }
+        Ok(done)
     }
 
     /// Retain just the unfinished analysis block while the recording streams to its WAV.

@@ -103,6 +103,43 @@ impl InputRate {
         }
     }
 
+    /// Convert a device batch, retaining the previous sample across callbacks.
+    /// Integer upsampling ratios use the same fixed phases for every input frame.
+    pub fn push_batch(
+        &mut self,
+        frames: impl Iterator<Item = [f32; 2]>,
+        mut emit: impl FnMut([f32; 2]),
+    ) {
+        match self.rate {
+            8_000 => self.upsample_integer::<6>(frames, emit),
+            12_000 => self.upsample_integer::<4>(frames, emit),
+            16_000 => self.upsample_integer::<3>(frames, emit),
+            24_000 => self.upsample_integer::<2>(frames, emit),
+            SAMPLE_RATE => frames.for_each(emit),
+            _ => frames.for_each(|frame| self.push(frame, &mut emit)),
+        }
+    }
+
+    fn upsample_integer<const N: usize>(
+        &mut self,
+        frames: impl Iterator<Item = [f32; 2]>,
+        mut emit: impl FnMut([f32; 2]),
+    ) {
+        let phases: [f32; N] = std::array::from_fn(|i| {
+            (i as u32 * (SAMPLE_RATE / N as u32)) as f32 / SAMPLE_RATE as f32
+        });
+        for frame in frames {
+            let previous = self.previous.replace(frame).unwrap_or(frame);
+            let delta = [frame[0] - previous[0], frame[1] - previous[1]];
+            for phase in phases {
+                emit([
+                    previous[0] + delta[0] * phase,
+                    previous[1] + delta[1] * phase,
+                ]);
+            }
+        }
+    }
+
     /// Emit the 48 kHz samples covered by one incoming stereo frame.
     pub fn push(&mut self, frame: [f32; 2], mut emit: impl FnMut([f32; 2])) {
         if self.rate == SAMPLE_RATE {
@@ -118,5 +155,35 @@ impl InputRate {
             self.phase += self.rate;
         }
         self.phase -= SAMPLE_RATE;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batches_preserve_the_sample_clock_across_splits() {
+        let input = [
+            [-0.0, 0.0],
+            [0.123, -0.75],
+            [f32::from_bits(3), -1.0],
+            [0.5, -0.0],
+        ];
+        for hz in [8_000, 12_000, 16_000, 24_000, 44_100, 48_000, 96_000] {
+            let mut reference = InputRate::new(hz);
+            let mut expected = Vec::new();
+            for frame in input {
+                reference.push(frame, |s| expected.push(s.map(f32::to_bits)));
+            }
+            for split in 0..=input.len() {
+                let mut clock = InputRate::new(hz);
+                let mut actual = Vec::new();
+                for batch in [&input[..split], &input[split..]] {
+                    clock.push_batch(batch.iter().copied(), |s| actual.push(s.map(f32::to_bits)));
+                }
+                assert_eq!(actual, expected, "{hz} Hz split at {split}");
+            }
+        }
     }
 }

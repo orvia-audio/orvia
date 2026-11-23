@@ -29,6 +29,62 @@ fn engine_running(dir: &Path) -> bool {
 
 #[cfg(windows)]
 fn stop(dir: &Path, engine: &Path) -> io::Result<()> {
+    if !engine_running(dir) {
+        return Ok(());
+    }
+    if let Some(pid) = local_engine_pid(engine) {
+        let request = dir.join(format!("stop-engine-{pid}"));
+        fs::write(&request, b"1")?;
+        let deadline = Instant::now() + Duration::from_millis(1500);
+        while engine_running(dir) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = fs::remove_file(request);
+        if !engine_running(dir) {
+            return Ok(());
+        }
+    }
+    // Older engines and stalled streams can require the verified process-handle fallback.
+    stop_legacy(dir, engine)
+}
+
+#[cfg(windows)]
+fn local_engine_pid(engine: &Path) -> Option<u32> {
+    use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, UpdateKind};
+    let mut system = System::new();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, ProcessRefreshKind::new());
+    let session = system
+        .process(sysinfo::get_current_pid().ok()?)?
+        .session_id()?;
+    let name = engine.file_name()?;
+    let ids: Vec<_> = system
+        .processes()
+        .values()
+        .filter(|p| p.name().eq_ignore_ascii_case(name) && p.session_id() == Some(session))
+        .map(|p| p.pid())
+        .collect();
+    if ids.is_empty() {
+        return None;
+    }
+    system.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&ids),
+        ProcessRefreshKind::new().with_exe(UpdateKind::Always),
+    );
+    let path = fs::canonicalize(engine).ok()?;
+    let mut matches = ids.into_iter().filter(|pid| {
+        system
+            .process(*pid)
+            .and_then(|p| p.exe())
+            .and_then(|p| fs::canonicalize(p).ok())
+            .as_deref()
+            == Some(path.as_path())
+    });
+    let pid = matches.next()?;
+    matches.next().is_none().then(|| pid.as_u32())
+}
+
+#[cfg(windows)]
+fn stop_legacy(dir: &Path, engine: &Path) -> io::Result<()> {
     use std::os::windows::process::CommandExt;
     let powershell = std::env::var_os("SystemRoot")
         .map(PathBuf::from)
@@ -116,6 +172,14 @@ pub(super) fn restart(dir: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
     use fs2::FileExt;
+
+    #[cfg(windows)]
+    #[test]
+    fn native_restart_identifies_the_executable_in_its_own_session() {
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(local_engine_pid(&exe), Some(std::process::id()));
+        assert_eq!(local_engine_pid(&exe.with_extension("missing")), None);
+    }
 
     #[test]
     fn only_a_held_engine_lock_skips_launch() {

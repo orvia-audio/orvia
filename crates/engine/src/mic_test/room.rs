@@ -78,8 +78,10 @@ impl RoomRecording {
     ///
     /// Reports an empty take, device error or queue overflow.
     pub fn finish(mut self) -> Result<Clip> {
-        let tail = self.capture.stop()?;
-        self.excerpt.extend(&tail, &mut self.resampler);
+        self.capture.stop_and_drain(|frames| {
+            self.excerpt.extend(frames, &mut self.resampler);
+            Ok(())
+        })?;
         ensure!(
             self.excerpt.seen > 0,
             "The microphone returned no audio frames"
@@ -104,26 +106,27 @@ struct RoomExcerpt {
 
 impl RoomExcerpt {
     fn extend(&mut self, frames: &[Frame], resampler: &mut InputRate) {
-        for &frame in frames {
-            resampler.push(frame, |sample| {
-                if self.recent.len() == WINDOW {
-                    self.recent.pop_front();
-                }
-                self.recent.push_back(sample);
-                self.seen += 1;
-                for value in sample {
-                    self.energy += value * value;
-                }
-                if self.seen.is_multiple_of(BLOCK) {
-                    self.compare(self.seen - BLOCK);
-                }
-                if self.wanted_end == Some(self.seen) {
-                    self.best.clear();
-                    self.best.extend(self.recent.iter().copied());
-                    self.wanted_end = None;
-                }
-            });
-        }
+        resampler.push_batch(frames.iter().copied(), |sample| {
+            if self.recent.len() == WINDOW {
+                self.recent.pop_front();
+            } else if self.recent.len() == self.recent.capacity() && self.recent.len() > WINDOW / 2
+            {
+                self.recent.reserve_exact(WINDOW - self.recent.len());
+            }
+            self.recent.push_back(sample);
+            self.seen += 1;
+            for value in sample {
+                self.energy += value * value;
+            }
+            if self.seen.is_multiple_of(BLOCK) {
+                self.compare(self.seen - BLOCK);
+            }
+            if self.wanted_end == Some(self.seen) {
+                self.best.clear();
+                self.best.extend(self.recent.iter().copied());
+                self.wanted_end = None;
+            }
+        });
     }
 
     fn compare(&mut self, block_start: usize) {

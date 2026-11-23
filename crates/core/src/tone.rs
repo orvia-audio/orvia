@@ -1,5 +1,8 @@
 //! Voice tone controls shared by the live mixer and the microphone setup preview.
-use crate::{BLOCK, SAMPLE_RATE, calibration::SampleError};
+use crate::{
+    BLOCK, SAMPLE_RATE,
+    calibration::{GuideAudio, SampleError, check_cancelled},
+};
 use serde::{Deserialize, Serialize};
 
 /// Output processing applied after the selected noise filter. Defaults to unity bypass.
@@ -66,15 +69,20 @@ impl HighPass {
         }
     }
 
-    fn frame(&mut self, mut samples: [f32; 2]) -> [f32; 2] {
-        for (sample, state) in samples.iter_mut().zip(&mut self.state) {
-            let x = f64::from(*sample) * self.b;
+    fn frame<const MONO: bool>(&mut self, samples: [f32; 2]) -> [f32; 2] {
+        let step = |sample, state: &mut [f64; 2]| {
+            let x = f64::from(sample) * self.b;
             let y = x + state[0];
             state[0] = state[1] - 2. * x - self.a1 * y;
             state[1] = x - self.a2 * y;
-            *sample = y as f32;
+            y as f32
+        };
+        let left = step(samples[0], &mut self.state[0]);
+        if MONO {
+            [left; 2]
+        } else {
+            [left, step(samples[1], &mut self.state[1])]
         }
-        samples
     }
 }
 
@@ -125,7 +133,24 @@ impl ToneProcessor {
         self.process_block::<true>(frames)
     }
 
+    /// Apply up to 480 normalized frames without measuring the playback peak.
+    pub fn process_unmetered(&mut self, frames: &mut [[f32; 2]]) {
+        self.process_block::<false>(frames);
+    }
+
+    pub(crate) fn settings(&self) -> Tone {
+        self.settings
+    }
+
     pub(crate) fn process_block<const OUTPUT_PEAK: bool>(
+        &mut self,
+        frames: &mut [[f32; 2]],
+    ) -> f32 {
+        self.process_channels::<OUTPUT_PEAK, false>(frames)
+    }
+
+    /// The caller selects mono only on routes whose channels are identical for their entire lifetime.
+    pub(crate) fn process_channels<const OUTPUT_PEAK: bool, const MONO: bool>(
         &mut self,
         frames: &mut [[f32; 2]],
     ) -> f32 {
@@ -136,7 +161,8 @@ impl ToneProcessor {
             && gain == self.gain
         {
             if self.settings.low_cut_hz != 0 {
-                if self.highpass.state == [[0.; 2]; 2] && frames.iter().flatten().all(|&s| s == 0.)
+                if self.highpass.state == [[0.; 2]; 2]
+                    && frames.iter().flatten().all(|s| s.to_bits() == 0)
                 {
                     return 0.;
                 }
@@ -144,7 +170,7 @@ impl ToneProcessor {
                 for frame in frames {
                     *frame = self
                         .highpass
-                        .frame(*frame)
+                        .frame::<MONO>(*frame)
                         .map(|s| (s * gain).clamp(-1., 1.));
                     if OUTPUT_PEAK {
                         peak = peak.max(frame[0].abs()).max(frame[1].abs());
@@ -162,7 +188,7 @@ impl ToneProcessor {
             }
             return peak;
         }
-        let peak = self.prepare_compressor_input(frames, gain);
+        let peak = self.prepare_compressor_input::<MONO>(frames, gain);
         let threshold = 0.25;
         // An earlier loud block may still be releasing even after the input falls below threshold.
         if peak <= threshold && self.reduction == 1. {
@@ -203,7 +229,11 @@ impl ToneProcessor {
     }
 
     /// Apply low-cut and gain transitions and measure the peak that drives both channels.
-    fn prepare_compressor_input(&mut self, frames: &mut [[f32; 2]], gain: f32) -> f32 {
+    fn prepare_compressor_input<const MONO: bool>(
+        &mut self,
+        frames: &mut [[f32; 2]],
+        gain: f32,
+    ) -> f32 {
         if self.previous_filter.is_none()
             && self.settings.low_cut_hz == 0
             && self.gain == 1.
@@ -223,10 +253,10 @@ impl ToneProcessor {
             let mix = (i + 1) as f32 / count;
             let dry = *frame;
             if self.settings.low_cut_hz != 0 {
-                *frame = self.highpass.frame(dry);
+                *frame = self.highpass.frame::<MONO>(dry);
             }
             if let Some(previous) = &mut self.previous_filter {
-                let before = previous.frame(dry);
+                let before = previous.frame::<MONO>(dry);
                 for (s, old) in frame.iter_mut().zip(before) {
                     *s = old + (*s - old) * mix;
                 }
@@ -255,7 +285,7 @@ fn power(frames: &[[f32; 2]]) -> f64 {
 fn filtered_power(filter: &mut HighPass, frames: &[[f32; 2]]) -> f64 {
     frames
         .iter()
-        .flat_map(|&frame| filter.frame(frame))
+        .flat_map(|&frame| filter.frame::<false>(frame))
         .map(|s| f64::from(s).powi(2))
         .sum::<f64>()
         / (2 * frames.len()).max(1) as f64
@@ -271,7 +301,7 @@ fn preserves_speech(dry: &[f64], wet: &[f64]) -> bool {
     let dry_floor = tail_power(dry);
     let wet_floor = tail_power(wet);
     let strongest = dry.iter().copied().fold(0., f64::max);
-    let mut losses = Vec::new();
+    let (mut observed, mut preserved) = (0, 0);
     for (before, after) in dry.chunks(10).zip(wet.chunks(10)) {
         let count = before.len() as f64;
         let before = before.iter().sum::<f64>() / count - dry_floor;
@@ -279,13 +309,13 @@ fn preserves_speech(dry: &[f64], wet: &[f64]) -> bool {
             continue;
         }
         let after = after.iter().sum::<f64>() / count - wet_floor;
-        losses.push(10. * (before / after.max(1e-15)).log10());
+        observed += 1;
+        if 10. * (before / after.max(1e-15)).log10() <= 1. {
+            preserved += 1;
+        }
     }
-    if losses.is_empty() {
-        return false;
-    }
-    let rank = losses.len() * 9 / 10;
-    *losses.select_nth_unstable_by(rank, f64::total_cmp).1 <= 1.
+    // The zero-based 90th percentile is within the limit iff enough windows pass it.
+    preserved > observed * 9 / 10
 }
 
 /// Recommend tone controls from separate virtual-mic noise and speech takes at 48 kHz.
@@ -296,37 +326,77 @@ fn preserves_speech(dry: &[f64], wet: &[f64]) -> bool {
 ///
 /// Returns a sample error for a short, non-finite, clipped, or inaudible recording.
 pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleError> {
-    if room.len() < BLOCK * 50
-        || voice.len() < BLOCK * 20
-        || room.iter().chain(voice).flatten().any(|s| !s.is_finite())
-    {
+    recommend_from(room, voice, &|| false)
+}
+
+/// Estimate the tone from a seekable reading, checking for cancellation between blocks.
+///
+/// # Errors
+///
+/// Returns a sample error for cancelled, unreadable, clipped, or unusable recordings.
+pub fn recommend_from<S: GuideAudio + ?Sized>(
+    room: &[[f32; 2]],
+    voice: &S,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Tone, SampleError> {
+    let len = voice.frame_count();
+    if room.len() < BLOCK * 50 || len < BLOCK * 20 {
         return Err(SampleError::Incomplete);
     }
-    if voice
-        .iter()
-        .filter(|f| f.iter().any(|v| v.abs() >= 0.999))
-        .count()
-        > BLOCK
-    {
+    let mut room_sum = 0.;
+    for block in room.chunks(BLOCK) {
+        check_cancelled(cancelled)?;
+        for &s in block.iter().flatten() {
+            if !s.is_finite() {
+                return Err(SampleError::Incomplete);
+            }
+            room_sum += f64::from(s).powi(2);
+        }
+    }
+    let noise = room_sum / (2 * room.len()) as f64;
+    let read = |i: usize, storage: &mut [[f32; 2]; BLOCK]| {
+        check_cancelled(cancelled)?;
+        let start = i * BLOCK;
+        let count = (len - start).min(BLOCK);
+        voice.read_frames(start, &mut storage[..count])?;
+        Ok::<usize, SampleError>(count)
+    };
+    let mut storage = [[0.; 2]; BLOCK];
+    let mut levels = Vec::with_capacity(len / BLOCK);
+    let mut clipped = 0;
+    let mut peak_power = 0_f64;
+    for i in 0..len.div_ceil(BLOCK) {
+        let n = read(i, &mut storage)?;
+        let mut sum = 0.;
+        for &[l, r] in &storage[..n] {
+            if !l.is_finite() || !r.is_finite() {
+                return Err(SampleError::Incomplete);
+            }
+            if l.abs() >= 0.999 || r.abs() >= 0.999 {
+                clipped += 1;
+            }
+            sum += f64::from(l).powi(2);
+            sum += f64::from(r).powi(2);
+        }
+        if n == BLOCK {
+            let power = sum / (2 * BLOCK) as f64;
+            peak_power = peak_power.max(power);
+            levels.push(power);
+        }
+    }
+    if clipped > BLOCK {
         return Err(SampleError::Clipped);
     }
-    let levels: Vec<_> = voice.chunks_exact(BLOCK).map(power).collect();
-    let peak_power = levels.iter().copied().fold(0., f64::max);
     // The reading includes quiet lead-in and trailing silence from the endpoint detector.
     let mut quiet: Vec<_> = levels.iter().rev().take(30).copied().collect();
     quiet.sort_unstable_by(f64::total_cmp);
     let speech_floor = (quiet[quiet.len() / 4] * 2.)
         .max(peak_power * 0.001)
         .max(1e-8);
-    let active: Vec<_> = levels
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &p)| (p > speech_floor).then_some(i))
-        .collect();
-    if active.len() < 15 {
+    let active_count = levels.iter().filter(|&&p| p > speech_floor).count();
+    if active_count < 15 {
         return Err(SampleError::UnclearSpeech);
     }
-    let noise = power(room);
     let mut hz = 0;
     let mut best = 0.;
     let mut selected_levels = None;
@@ -338,10 +408,11 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
                 continue;
             }
             let mut filter = HighPass::new(cutoff);
-            let filtered_levels: Vec<_> = voice
-                .chunks_exact(BLOCK)
-                .map(|block| filtered_power(&mut filter, block))
-                .collect();
+            let mut filtered_levels = Vec::with_capacity(levels.len());
+            for i in 0..levels.len() {
+                read(i, &mut storage)?;
+                filtered_levels.push(filtered_power(&mut filter, &storage));
+            }
             if preserves_speech(&levels, &filtered_levels) {
                 selected_levels = Some(filtered_levels);
                 hz = cutoff;
@@ -352,11 +423,21 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
             }
         }
     }
-    let selected_levels = selected_levels.as_deref().unwrap_or(&levels);
-    let mut speech: Vec<_> = active.iter().map(|&i| selected_levels[i]).collect();
     // Aim for ordinary speech near -20 dBFS RMS, with at least 1 dB of headroom.
-    let rank = speech.len() / 2;
-    let median_power = *speech.select_nth_unstable_by(rank, f64::total_cmp).1;
+    // Only the median survives into the compressor trials.
+    let median_power = {
+        let filtered = selected_levels.as_deref().unwrap_or(&levels);
+        let mut speech = Vec::with_capacity(active_count);
+        speech.extend(
+            levels
+                .iter()
+                .zip(filtered)
+                .filter_map(|(&dry, &wet)| (dry > speech_floor).then_some(wet)),
+        );
+        let rank = speech.len() / 2;
+        *speech.select_nth_unstable_by(rank, f64::total_cmp).1
+    };
+    drop(selected_levels);
     let gain = (0.1 / median_power.sqrt().max(1e-6)).clamp(0.01, 2.);
     // Allow loud syllables 8 dB above ordinary speech. Below the compressor knee,
     // gain alone should preserve the speaker's dynamics.
@@ -369,29 +450,44 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
     for ratio in 1..=4 {
         tone.compressor_ratio = ratio;
         let mut preview = ToneProcessor::new(tone);
-        let mut peak = 0_f32;
-        let mut voiced = Vec::with_capacity(active.len());
-        let mut active_blocks = active.iter().copied().peekable();
-        for (i, block) in voice.chunks(BLOCK).enumerate() {
-            let mut buffer = [[0.; 2]; BLOCK];
-            let buffer = &mut buffer[..block.len()];
-            buffer.copy_from_slice(block);
-            peak = peak.max(preview.process(buffer));
-            if active_blocks.next_if_eq(&i).is_some() {
-                voiced.push(power(buffer));
+        let mut too_loud = 0;
+        let allowed_loud = active_count - (active_count * 9 / 10 + 1);
+        let mut acceptable = true;
+        for i in 0..len.div_ceil(BLOCK) {
+            let n = read(i, &mut storage)?;
+            let block = &mut storage[..n];
+            if preview.process(block) > 0.89 {
+                acceptable = false;
+                break;
+            }
+            if ratio < 4
+                && levels.get(i).is_some_and(|&p| p > speech_floor)
+                && power(block) > loud_power_limit
+            {
+                too_loud += 1;
+                if too_loud > allowed_loud {
+                    acceptable = false;
+                    break;
+                }
             }
         }
-        let rank = voiced.len() * 9 / 10;
-        let loud = *voiced.select_nth_unstable_by(rank, f64::total_cmp).1;
-        if peak <= 0.89 && (loud <= loud_power_limit || ratio == 4) {
+        if acceptable {
             return Ok(tone);
         }
     }
     let mut filter = HighPass::new(hz);
-    let peak = voice
-        .iter()
-        .flat_map(|&frame| if hz == 0 { frame } else { filter.frame(frame) })
-        .fold(0_f32, |peak, s| peak.max(s.abs()));
+    let mut peak = 0_f32;
+    for i in 0..len.div_ceil(BLOCK) {
+        let n = read(i, &mut storage)?;
+        for &frame in &storage[..n] {
+            let samples = if hz == 0 {
+                frame
+            } else {
+                filter.frame::<false>(frame)
+            };
+            peak = peak.max(samples[0].abs()).max(samples[1].abs());
+        }
+    }
     tone.gain_percent = tone.gain_percent.min((89. / peak.max(0.01)).floor() as u16);
     Ok(tone)
 }
@@ -399,6 +495,35 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mono_filter_matches_stereo_across_control_changes() {
+        let mut mono = ToneProcessor::new(Tone::default());
+        let mut stereo = ToneProcessor::new(Tone::default());
+        for block in 0..240 {
+            let tone = Tone {
+                low_cut_hz: [0, 50, 125, 0][block / 13 % 4],
+                gain_percent: [100, 150, 70][block / 19 % 3],
+                compressor_ratio: [1, 3][block / 23 % 2],
+            };
+            mono.configure(tone);
+            stereo.configure(tone);
+            let mut a = std::array::from_fn::<_, BLOCK, _>(|i| {
+                [((block * BLOCK + i) as f32 * 0.015).sin() * 0.45; 2]
+            });
+            let mut b = a;
+            assert_eq!(
+                mono.process_channels::<true, true>(&mut a).to_bits(),
+                stereo.process(&mut b).to_bits()
+            );
+            assert!(
+                a.iter()
+                    .flatten()
+                    .zip(b.iter().flatten())
+                    .all(|(l, r)| l.to_bits() == r.to_bits())
+            );
+        }
+    }
 
     #[test]
     fn quiet_blocks_pass_through_only_after_compressor_release() {
@@ -432,6 +557,24 @@ mod tests {
     }
 
     #[test]
+    fn settled_low_cut_preserves_the_filtered_sign_of_zero() {
+        let settings = Tone {
+            low_cut_hz: 80,
+            ..Tone::default()
+        };
+        let mut processor = ToneProcessor::new(settings);
+        let mut reference = HighPass::new(settings.low_cut_hz);
+        let mut frames = std::array::from_fn::<_, BLOCK, _>(|i| match i % 3 {
+            0 => [0., -0.],
+            1 => [-0., 0.],
+            _ => [-0., -0.],
+        });
+        let expected = frames.map(|f| reference.frame::<false>(f).map(f32::to_bits));
+        processor.process_unmetered(&mut frames);
+        assert_eq!(frames.map(|f| f.map(f32::to_bits)), expected);
+    }
+
+    #[test]
     fn silent_high_pass_feedback_settles_without_changing_pcm_on_resume() {
         for hz in [1, 50, 150] {
             let mut reference = HighPass::new(hz);
@@ -444,7 +587,7 @@ mod tests {
             assert_eq!(live.state[1], reference.state[1]);
             for i in 0..2 * BLOCK {
                 let input = [if i >= BLOCK { 1e-15 } else { 0. }, -0.002];
-                assert_eq!(reference.frame(input), live.frame(input));
+                assert_eq!(reference.frame::<false>(input), live.frame::<false>(input));
             }
         }
     }

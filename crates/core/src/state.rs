@@ -166,6 +166,9 @@ impl Audition {
 /// Audio samples are never serialized.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct EngineStatus {
+    /// Whether this engine accepts separate observer heartbeats for each settings window.
+    #[serde(default)]
+    pub window_observers: bool,
     /// Rolling filter envelopes for the most recent two seconds.
     #[serde(default)]
     pub signal: crate::SignalHistory,

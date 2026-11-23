@@ -1,6 +1,6 @@
 //! File requests and observer heartbeats consumed by the audio supervisor.
 
-use orvia_core::{AUDITION_FILE, SUMMARY_OBSERVER, spectrum::OBSERVER_FILE};
+use orvia_core::{AUDITION_FILE, SUMMARY_OBSERVER, observer, spectrum::OBSERVER_FILE};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -16,6 +16,7 @@ pub(super) struct Requests {
     pub summary: bool,
     /// An audition may be present. Its contents and expiry must still be checked on the route.
     check_audition: bool,
+    windows_present: [bool; 4],
 }
 
 impl Requests {
@@ -25,6 +26,7 @@ impl Requests {
         spectrum: true,
         summary: true,
         check_audition: true,
+        windows_present: [true; 4],
     };
 }
 
@@ -34,6 +36,7 @@ pub(super) struct ControlFiles {
     mixer: PathBuf,
     spectrum: PathBuf,
     summary: PathBuf,
+    windows: [PathBuf; 4],
     #[cfg(windows)]
     dir: PathBuf,
     #[cfg(windows)]
@@ -41,6 +44,13 @@ pub(super) struct ControlFiles {
 }
 
 impl ControlFiles {
+    const WINDOWS: [&str; 4] = [
+        observer::WAVEFORM,
+        observer::SPECTRUM,
+        observer::SUMMARY,
+        observer::MIC_TEST,
+    ];
+
     pub(super) fn new(dir: &Path) -> Self {
         Self {
             stop: super::stop_request(dir),
@@ -48,6 +58,7 @@ impl ControlFiles {
             mixer: dir.join("observe"),
             spectrum: dir.join(OBSERVER_FILE),
             summary: dir.join(SUMMARY_OBSERVER),
+            windows: Self::WINDOWS.map(|name| dir.join(name)),
             #[cfg(windows)]
             dir: dir.to_owned(),
             #[cfg(windows)]
@@ -74,12 +85,16 @@ impl ControlFiles {
         if !requests.stop {
             // NTFS directory entries can retain old timestamps when another hard link is
             // written. Query the actual paths for present heartbeats, also following symlinks.
-            requests.metering = requests.metering && recently_observed(&self.mixer);
-            requests.spectrum = requests.spectrum && recently_observed(&self.spectrum);
-            requests.summary = requests.summary
-                && !requests.metering
+            let active =
+                |i: usize| requests.windows_present[i] && recently_observed(&self.windows[i]);
+            requests.metering = active(0) || (requests.metering && recently_observed(&self.mixer));
+            requests.spectrum =
+                active(1) || (requests.spectrum && recently_observed(&self.spectrum));
+            requests.summary = !requests.metering
                 && !requests.spectrum
-                && recently_observed(&self.summary);
+                && (active(2)
+                    || active(3)
+                    || (requests.summary && recently_observed(&self.summary)));
         }
         requests
     }
@@ -114,6 +129,10 @@ impl ControlFiles {
             let entry = entry.ok()?;
             let name = entry.file_name();
             let name = name.to_str()?;
+            if let Some(index) = Self::WINDOWS.iter().position(|&marker| marker == name) {
+                requests.windows_present[index] = true;
+                continue;
+            }
             match name {
                 "observe" => requests.metering = true,
                 OBSERVER_FILE => requests.spectrum = true,
@@ -131,6 +150,7 @@ impl ControlFiles {
                         AUDITION_FILE,
                     ]
                     .iter()
+                    .chain(Self::WINDOWS.iter())
                     .any(|key| key.eq_ignore_ascii_case(n)) =>
                 {
                     return None;
@@ -254,4 +274,22 @@ mod tests {
             .unwrap();
         assert!(!files.poll().spectrum);
     }
+}
+#[test]
+fn main_and_standalone_observers_coexist_with_external_requests() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut files = ControlFiles::new(dir.path());
+    let main = dir.path().join(observer::SPECTRUM);
+    let test = dir.path().join(observer::MIC_TEST);
+    fs::write(&main, b"1").unwrap();
+    fs::write(&test, b"1").unwrap();
+    fs::write(&files.mixer, b"1").unwrap();
+    let both = files.poll();
+    assert!(both.spectrum && both.metering);
+    fs::remove_file(&main).unwrap();
+    fs::remove_file(&files.mixer).unwrap();
+    let only_test = files.poll();
+    assert!(only_test.summary && !only_test.spectrum && !only_test.metering);
+    fs::remove_file(test).unwrap();
+    assert!(!files.poll().summary);
 }

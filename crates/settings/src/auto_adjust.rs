@@ -5,21 +5,20 @@ use orvia_core::{
     calibration::{Recommendation, SampleError},
     write_json,
 };
-use orvia_engine::mic_test::{self, Clip, FileRecording, Recording, SavedClip};
-use std::{
-    sync::mpsc::{self, Receiver, TryRecvError},
-    time::SystemTime,
+use orvia_engine::mic_test::{
+    self, Clip, FileRecording, GuideClip, GuidedRecording, Recording, SavedClip,
 };
+use std::{sync::mpsc::TryRecvError, time::SystemTime};
 
 pub(super) enum Stage {
     Room(Recording, Instant),
     Phrase {
         room: Clip,
-        first: Option<Clip>,
-        recording: Option<Recording>,
+        first: Option<GuideClip>,
+        recording: Option<Box<GuidedRecording>>,
         reader: reading::Reader,
     },
-    Analyzing(Receiver<Result<Recommendation, SampleError>>),
+    Analyzing(reading::Analysis<Result<Recommendation, SampleError>>),
     Auditioning {
         result: Recommendation,
         trial: Trial,
@@ -171,12 +170,11 @@ impl Stage {
                     return Ok(Self::Phrase {
                         room,
                         first,
-                        recording: Some(mic),
+                        recording: Some(Box::new(GuidedRecording::new(mic))),
                         reader,
                     });
                 };
-                if !reader.listen(&mut recording, l)? {
-                    reader.trim_waiting(&mut recording);
+                if !reader.listen_guided(&mut recording, l)? {
                     return Ok(Self::Phrase {
                         room,
                         first,
@@ -193,16 +191,13 @@ impl Stage {
                         reader: Default::default(),
                     });
                 };
-                let (tx, rx) = mpsc::channel();
                 let mixing = settings.mixing;
-                cx.background_executor()
-                    .spawn(async move {
-                        let _ = tx.send(room.recommend_owned([first, phrase], mixing));
-                    })
-                    .detach();
-                Ok(Self::Analyzing(rx))
+                Ok(Self::Analyzing(reading::Analysis::start(
+                    cx,
+                    move |cancelled| room.recommend_guided([first, phrase], mixing, cancelled),
+                )))
             }
-            Self::Analyzing(ref rx) => match rx.try_recv() {
+            Self::Analyzing(ref rx) => match rx.result.try_recv() {
                 Ok(Ok(result)) => {
                     let trial = Trial::start(
                         &panel.dir,

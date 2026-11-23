@@ -303,6 +303,7 @@ where
 }
 
 /// Stereo audio from a microphone test, stored at its original capture rate.
+#[derive(Clone)]
 pub struct Clip {
     frames: Arc<[Frame]>,
     rate: u32,
@@ -355,10 +356,12 @@ impl Clip {
             .min(room.len().saturating_sub(room_window));
         let room = &room[start..(start + room_window).min(room.len())];
         let recommended = orvia_core::tone::recommend(room, &voice)?;
-        let clips = [current, recommended].map(|tone| {
+        let render = |tone| {
             let mut processor = orvia_core::tone::ToneProcessor::new(tone);
-            let mut frames = room.to_vec();
-            frames.extend(std::iter::repeat_n([0.; 2], SAMPLE_RATE as usize / 4));
+            let gap = SAMPLE_RATE as usize / 4;
+            let mut frames = Vec::with_capacity(room.len() + gap + voice.len());
+            frames.extend_from_slice(room);
+            frames.resize(room.len() + gap, [0.; 2]);
             frames.extend_from_slice(&voice);
             for block in frames.chunks_mut(orvia_core::BLOCK) {
                 processor.process(block);
@@ -367,8 +370,14 @@ impl Clip {
                 frames: frames.into(),
                 rate: SAMPLE_RATE,
             }
-        });
-        Ok((recommended, clips))
+        };
+        let before = render(current);
+        let after = if current == recommended {
+            before.clone()
+        } else {
+            render(recommended)
+        };
+        Ok((recommended, [before, after]))
     }
 
     fn model_frames(&self) -> std::borrow::Cow<'_, [Frame]> {
@@ -625,6 +634,8 @@ mod tests {
             live.process(block.try_into().unwrap());
         }
         assert_eq!(reference.as_slice(), after.frames.as_ref());
+        let (_, [first, second]) = room.tone_previews(&voice, settings).unwrap();
+        assert!(Arc::ptr_eq(&first.frames, &second.frames));
     }
 
     #[test]

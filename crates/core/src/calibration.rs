@@ -144,79 +144,82 @@ pub fn recommend(
     mixing: Mixing,
 ) -> Result<Recommendation, SampleError> {
     // Round each boundary to complete model blocks and preserve a room interval before each onset.
-    let mut input = Vec::new();
-    let mut append = |samples: &[[f32; 2]]| {
-        let start = input.len() / BLOCK;
-        input.extend_from_slice(&samples[..samples.len() / BLOCK * BLOCK]);
-        start..input.len() / BLOCK
-    };
-    let room_range = append(room);
-    let first = append(phrases[0]);
-    append(room);
-    let second = append(phrases[1]);
-    let block_count = input.len() / BLOCK;
-    if input.iter().flatten().any(|x| !x.is_finite()) {
+    let sections = [room, phrases[0], room, phrases[1]];
+    let chunks = || sections.iter().flat_map(|s| s.chunks_exact(BLOCK));
+    let room_blocks = room.len() / BLOCK;
+    let first = room_blocks..room_blocks + phrases[0].len() / BLOCK;
+    let start = first.end + room_blocks;
+    let second = start..start + phrases[1].len() / BLOCK;
+    if chunks().flatten().flatten().any(|x| !x.is_finite()) {
         return Err(SampleError::Incomplete);
     }
-    if input
-        .iter()
+    if chunks()
+        .flatten()
         .filter(|f| f.iter().any(|x| x.abs() >= 0.999))
         .count()
         > SAMPLE_RATE as usize / 100
     {
         return Err(SampleError::Clipped);
     }
-    let dry: Vec<_> = input
-        .iter()
-        .map(|&f| match mixing {
-            Mixing::Average => [(f[0] + f[1]) * 0.5; 2],
-            Mixing::Stereo => f,
-        })
-        .collect();
-    let mut wet = vec![[0.; 2]; dry.len()];
+    let mut blocks = vec![Energy::default(); second.end];
     let channels = if mixing == Mixing::Stereo { 2 } else { 1 };
     let delay = dfn3_rs::ALGORITHM_DELAY / BLOCK;
     for ch in 0..channels {
+        let sample = |frame: &[f32; 2]| match mixing {
+            Mixing::Stereo => frame[ch],
+            Mixing::Average => (frame[0] + frame[1]) * 0.5,
+        };
         let mut filter = dfn3_rs::Denoiser::new();
-        for i in 0..block_count + delay {
+        let mut aligned = chunks().zip(&mut blocks);
+        for (i, chunk) in chunks()
+            .chain(std::iter::repeat_n(&[][..], delay))
+            .enumerate()
+        {
+            let mut input = [0.; BLOCK];
+            for (slot, frame) in input.iter_mut().zip(chunk) {
+                *slot = sample(frame);
+            }
             let mut enhanced = [0.; BLOCK];
-            let frame = std::array::from_fn(|j| dry.get(i * BLOCK + j).map_or(0., |f| f[ch]));
-            filter.process(&frame, &mut enhanced);
-            if let Some(output) = i.checked_sub(delay) {
-                for (f, s) in wet[output * BLOCK..][..BLOCK].iter_mut().zip(enhanced) {
-                    f[ch] = s;
-                    if channels == 1 {
-                        f[1] = s;
-                    }
+            filter.process(&input, &mut enhanced);
+            if i >= delay
+                && let Some((dry, energy)) = aligned.next()
+            {
+                for (frame, wet) in dry.iter().zip(enhanced) {
+                    let (a, b) = (f64::from(sample(frame)), f64::from(wet));
+                    energy.dry += a * a;
+                    energy.wet += b * b;
+                    energy.cross += a * b;
                 }
             }
         }
     }
-    let blocks: Vec<_> = dry
-        .chunks_exact(BLOCK)
-        .zip(wet.chunks_exact(BLOCK))
-        .map(|(d, w)| {
-            let mut e = Energy::default();
-            for (&a, &b) in d.iter().flatten().zip(w.iter().flatten()) {
-                let (a, b) = (f64::from(a), f64::from(b));
-                e.dry += a * a;
-                e.wet += b * b;
-                e.cross += a * b;
-            }
-            let n = (2 * BLOCK) as f64;
-            Energy {
-                dry: e.dry / n,
-                wet: e.wet / n,
-                cross: e.cross / n,
-            }
-        })
-        .collect();
-    choose(&blocks, room_range, [first, second])
+    let n = (channels * BLOCK) as f64;
+    for e in &mut blocks {
+        e.dry /= n;
+        e.wet /= n;
+        e.cross /= n;
+    }
+    choose(&blocks, 0..room_blocks, [first, second])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calibrates_duplicated_speech_equally_in_mono_and_stereo() {
+        let room = vec![[0.0004; 2]; BLOCK * 50];
+        let mut phrase: Vec<_> = (0..BLOCK * 40)
+            .map(|i| [(i as f32 * 0.04).sin() * 0.12; 2])
+            .collect();
+        // Each prompt contributes only complete 10 ms blocks.
+        phrase.push([f32::NAN; 2]);
+        let mono = recommend(&room, [&phrase, &phrase], Mixing::Average).unwrap();
+        let stereo = recommend(&room, [&phrase, &phrase], Mixing::Stereo).unwrap();
+        assert_eq!(mono.limit_db, stereo.limit_db);
+        assert!((mono.onset_loss_db - stereo.onset_loss_db).abs() < 0.001);
+        assert!((mono.room_reduction_db - stereo.room_reduction_db).abs() < 0.001);
+    }
 
     #[test]
     fn strong_attenuation_is_suitable_only_when_both_onsets_survive() {

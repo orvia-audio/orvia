@@ -183,6 +183,15 @@ fn filtered(frames: &[[f32; 2]], hz: u16) -> Vec<[f32; 2]> {
     frames.iter().map(|&f| filter.frame(f)).collect()
 }
 
+fn filtered_power(filter: &mut HighPass, frames: &[[f32; 2]]) -> f64 {
+    frames
+        .iter()
+        .flat_map(|&frame| filter.frame(frame))
+        .map(|s| f64::from(s).powi(2))
+        .sum::<f64>()
+        / (2 * frames.len()).max(1) as f64
+}
+
 /// Compare speech energy above the room floor in 100 ms windows. A steady rumble
 /// can continue under the reading, so its removal should not count as lost voice.
 fn preserves_speech(dry: &[f64], wet: &[f64]) -> bool {
@@ -252,13 +261,17 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
     let mut best = 0.;
     if noise > 1e-8 {
         for cutoff in [50, 65, 80, 100, 125, 150] {
-            let reduction = 10. * (noise / power(&filtered(room, cutoff)).max(1e-15)).log10();
-            let candidate = filtered(voice, cutoff);
-            let filtered_levels: Vec<_> = candidate.chunks_exact(BLOCK).map(power).collect();
-            if reduction >= 3.
-                && reduction > best + 0.5
-                && preserves_speech(&levels, &filtered_levels)
-            {
+            let room_power = filtered_power(&mut HighPass::new(cutoff), room);
+            let reduction = 10. * (noise / room_power.max(1e-15)).log10();
+            if reduction < 3. || reduction <= best + 0.5 {
+                continue;
+            }
+            let mut filter = HighPass::new(cutoff);
+            let filtered_levels: Vec<_> = voice
+                .chunks_exact(BLOCK)
+                .map(|block| filtered_power(&mut filter, block))
+                .collect();
+            if preserves_speech(&levels, &filtered_levels) {
                 hz = cutoff;
                 best = reduction;
                 if reduction >= 6. {
@@ -267,7 +280,13 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
             }
         }
     }
-    let voice = filtered(voice, hz);
+    let filtered_voice;
+    let voice = if hz == 0 {
+        voice
+    } else {
+        filtered_voice = filtered(voice, hz);
+        &filtered_voice
+    };
     let mut speech: Vec<_> = active
         .iter()
         .map(|&i| power(&voice[i * BLOCK..(i + 1) * BLOCK]))

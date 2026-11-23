@@ -423,9 +423,10 @@ impl Panel {
                     if page == Page::MicTest {
                         self.open_mic_test();
                     } else if page == Page::Devices {
-                        self.inputs = orvia_engine::inputs().unwrap_or_default();
-                        self.outputs = orvia_engine::outputs().unwrap_or_default();
-                        self.receivers = orvia_engine::mic_test::sources().unwrap_or_default();
+                        let devices = orvia_engine::RouteDevices::discover().unwrap_or_default();
+                        self.inputs = devices.inputs;
+                        self.outputs = devices.outputs;
+                        self.receivers = devices.receivers;
                     }
                 }
                 self.show_update_feedback = false;

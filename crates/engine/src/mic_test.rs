@@ -35,13 +35,16 @@ const QUEUE_DURATION: Duration = Duration::from_secs(10);
 const RECORDING_FILE: &str = "recording.wav";
 type Frame = [f32; 2];
 
+/// Only the packaged virtual source and its sink monitor can receive a Linux mix.
+#[cfg(target_os = "linux")]
+pub(super) fn is_receiver_id(id: &str) -> bool {
+    matches!(id, "orvia_microphone" | "orvia_output.monitor")
+}
+
 fn is_test_source(device: &Device) -> bool {
-    // PulseAudio also exposes a monitor for every physical speaker.
     #[cfg(target_os = "linux")]
     {
-        device
-            .id()
-            .is_ok_and(|id| matches!(id.id(), "orvia_microphone" | "orvia_output.monitor"))
+        device.id().is_ok_and(|id| is_receiver_id(id.id()))
     }
     #[cfg(not(target_os = "linux"))]
     {

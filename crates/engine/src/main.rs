@@ -189,36 +189,45 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                 || last.monitoring != last_monitor.0
                 || last.monitor_error != last_monitor.1
         });
-        if observed
-            && (changed
-                || (live && running.is_some())
-                || last_publish.elapsed() >= Duration::from_secs(1))
-        {
+        let heartbeat = last_publish.elapsed() >= Duration::from_secs(1);
+        if observed && (changed || heartbeat || (live && running.is_some())) {
             let (peak, missing_frames, dropped_frames) = running
                 .as_ref()
                 .map(stream::Route::metrics)
                 .unwrap_or_default();
-            let status = EngineStatus {
-                spectrum,
-                signal: running
-                    .as_ref()
-                    .filter(|_| metering)
-                    .map(stream::Route::envelopes)
-                    .unwrap_or_default(),
-                monitoring: last_monitor.0,
-                monitor_error: last_monitor.1.clone(),
-                audition,
-                observed: SystemTime::now(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                message: message.clone(),
-                peak,
-                missing_frames,
-                dropped_frames,
-            };
-            // A busy diagnostics file must not interrupt the audio streams.
-            if write_json(&status_path, &status).is_ok() {
-                published = Some(status);
-                last_publish = now;
+            let signal = running
+                .as_ref()
+                .filter(|_| metering)
+                .map(stream::Route::envelopes)
+                .unwrap_or_default();
+            let audio_changed = published.as_ref().is_none_or(|last| {
+                last.signal != signal
+                    || last.spectrum != spectrum
+                    || last.peak != peak
+                    || last.missing_frames != missing_frames
+                    || last.dropped_frames != dropped_frames
+            });
+            // An unchanged graph only needs a liveness heartbeat. New audio and route
+            // events still reach observers on the next supervisor tick.
+            if changed || audio_changed || heartbeat {
+                let status = EngineStatus {
+                    spectrum,
+                    signal,
+                    monitoring: last_monitor.0,
+                    monitor_error: last_monitor.1.clone(),
+                    audition,
+                    observed: SystemTime::now(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    message: message.clone(),
+                    peak,
+                    missing_frames,
+                    dropped_frames,
+                };
+                // A busy diagnostics file must not interrupt the audio streams.
+                if write_json(&status_path, &status).is_ok() {
+                    published = Some(status);
+                    last_publish = now;
+                }
             }
         } else if !observed && published.take().is_some() {
             let _ = fs::remove_file(&status_path);

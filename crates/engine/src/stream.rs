@@ -8,8 +8,9 @@ use orvia_core::{
     BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings, SignalWindow,
 };
 use orvia_engine::{
+    described_virtual_cable, display_name,
     formats::{InputRate, Port, config, stream_config, stream_continues},
-    host, is_virtual_cable, label,
+    host,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
@@ -22,6 +23,75 @@ use std::{
 
 type Frame = [f32; 2];
 type TimedFrame = (Frame, u64);
+type Levels = (u64, BlockLevels);
+
+/// Transfers the metering producer at block boundaries. The control thread owns
+/// the consumer until the producer has returned, so allocation and destruction
+/// of the history queue both occur outside the audio callback.
+struct MeterTap {
+    offered: Consumer<Producer<Levels>>,
+    returned: Producer<Producer<Levels>>,
+    active: Option<Producer<Levels>>,
+}
+
+struct MeterReader {
+    offer: Producer<Producer<Levels>>,
+    returns: Consumer<Producer<Levels>>,
+    levels: Option<Consumer<Levels>>,
+}
+
+impl MeterTap {
+    fn queue(&mut self, enabled: bool) -> Option<&mut Producer<Levels>> {
+        if self.active.is_none() {
+            self.active = self.offered.pop().ok();
+        }
+        if !enabled && let Some(queue) = self.active.take() {
+            // The control thread offers at most one producer at a time.
+            if let Err(rtrb::PushError::Full(queue)) = self.returned.push(queue) {
+                self.active = Some(queue);
+            }
+            return None;
+        }
+        self.active.as_mut()
+    }
+}
+
+impl MeterReader {
+    fn new() -> (Self, MeterTap) {
+        let (offer, offered) = RingBuffer::new(1);
+        let (returned, returns) = RingBuffer::new(1);
+        (
+            Self {
+                offer,
+                returns,
+                levels: None,
+            },
+            MeterTap {
+                offered,
+                returned,
+                active: None,
+            },
+        )
+    }
+
+    fn update(&mut self, enabled: bool, now: u64, history: &mut SignalWindow) {
+        let returned = self.returns.pop().ok();
+        history.update(now, std::iter::from_fn(|| self.levels.as_mut()?.pop().ok()));
+        if let Some(producer) = returned {
+            if enabled {
+                self.offer
+                    .push(producer)
+                    .expect("the producer just returned");
+            } else {
+                self.levels = None;
+            }
+        } else if enabled && self.levels.is_none() {
+            let (write, read) = RingBuffer::new(200);
+            self.offer.push(write).expect("the first producer fits");
+            self.levels = Some(read);
+        }
+    }
+}
 struct MonitorStreams {
     _source: Stream,
     _headphones: Stream,
@@ -66,7 +136,7 @@ pub(super) struct Route {
     processing: (Mixing, Option<NoiseMethod>),
     replacements: Producer<Processor>,
     retired: Consumer<Processor>,
-    incoming_levels: Consumer<(u64, BlockLevels)>,
+    incoming_levels: MeterReader,
     pub(super) spectrum: crate::spectrum::Observation,
     levels: SignalWindow,
     monitor: Monitor,
@@ -80,7 +150,8 @@ pub(super) struct Route {
 impl Route {
     pub(super) fn open(settings: &Settings) -> Result<Self> {
         let host = host()?;
-        let output = orvia_engine::mic_test::virtual_output_on(&host, settings.output.as_deref())?;
+        let (output, output_desc) =
+            orvia_engine::mic_test::described_output_on(&host, settings.output.as_deref())?;
         let input = match &settings.input {
             Some(id) => host
                 .device_by_id(&id.parse()?)
@@ -89,18 +160,23 @@ impl Route {
                 .default_input_device()
                 .context("No default microphone")?,
         };
+        let input_desc = input.description()?;
         ensure!(
-            input.description()?.supports_input() && !is_virtual_cable(&input),
+            input_desc.supports_input() && !described_virtual_cable(&input, &input_desc),
             "Select a physical microphone to avoid feedback"
         );
         let input_id = input.id()?;
-        let name = format!("{} → {}", label(&input)?, label(&output)?);
+        let name = format!(
+            "{} → {}",
+            display_name(&input_desc),
+            display_name(&output_desc)
+        );
         let input_config = stream_config(&config(&input, Port::Microphone)?);
         let output_config = config(&output, Port::Cable)?;
         let counters = Arc::new(Counters::default());
         let start = Instant::now();
         let (mut tx, rx) = RingBuffer::<TimedFrame>::new(BLOCK * 10);
-        let (mut envelope_tx, incoming_levels) = RingBuffer::new(200);
+        let (incoming_levels, mut envelope) = MeterReader::new();
         let (mut spectrum_tap, spectrum) = crate::spectrum::Observation::new();
         let controls = Arc::new(AtomicU64::new(controls(settings)));
         let live = controls.clone();
@@ -138,7 +214,7 @@ impl Route {
                         processor.set_deep_filter_limit((word >> 48) as u16);
                         current_controls = Some(word);
                     }
-                    if meter.metering.load(Relaxed) {
+                    if let Some(envelope_tx) = envelope.queue(meter.metering.load(Relaxed)) {
                         let (peak, levels) = processor.process_with_levels(block);
                         let _ = envelope_tx.push((stamp, levels));
                         meter.peak.fetch_max(peak.to_bits(), Relaxed);
@@ -212,7 +288,6 @@ impl Route {
     }
 
     pub(super) fn update_controls(&mut self, settings: &Settings, observed: bool) {
-        self.counters.metering.store(observed, Relaxed);
         self.controls.store(controls(settings), Relaxed);
         let _ = self.retired.pop();
         let requested = (settings.mixing, settings.active_noise_method());
@@ -227,8 +302,8 @@ impl Route {
             self.processing = requested;
         }
         let now = self.start.elapsed().as_millis() as u64;
-        self.levels
-            .update(now, std::iter::from_fn(|| self.incoming_levels.pop().ok()));
+        self.incoming_levels.update(observed, now, &mut self.levels);
+        self.counters.metering.store(observed, Relaxed);
         self.update_monitor(settings);
     }
 
@@ -270,7 +345,7 @@ impl Route {
         self.monitor.attempted = Some(Instant::now());
         self.monitor.error = self
             .monitor
-            .connect(id, &self.output, self.start)
+            .connect(&self.host, id, &self.output, self.start)
             .err()
             .map(|e| format!("{e:#}"));
     }
@@ -309,16 +384,17 @@ impl CaptureBlocks {
     fn push(&mut self, mut samples: &[f32], mut emit: impl FnMut(&mut [Frame; BLOCK])) {
         let channels = self.channels;
         if let Some(rate) = &mut self.resampler {
-            for frame in samples.chunks_exact(channels) {
-                rate.push([frame[0], *frame.get(1).unwrap_or(&frame[0])], |frame| {
-                    self.buffer[self.filled] = frame;
-                    self.filled += 1;
-                    if self.filled == BLOCK {
-                        emit(&mut self.buffer);
-                        self.filled = 0;
-                    }
-                });
-            }
+            let frames = samples
+                .chunks_exact(channels)
+                .map(|frame| [frame[0], *frame.get(1).unwrap_or(&frame[0])]);
+            rate.push_batch(frames, |frame| {
+                self.buffer[self.filled] = frame;
+                self.filled += 1;
+                if self.filled == BLOCK {
+                    emit(&mut self.buffer);
+                    self.filled = 0;
+                }
+            });
             return;
         }
         while samples.len() >= channels {
@@ -345,14 +421,21 @@ impl CaptureBlocks {
 }
 
 impl Monitor {
-    fn connect(&mut self, id: &str, output: &Device, start: Instant) -> Result<()> {
-        let receiver = orvia_engine::mic_test::receiver(output, self.receiver.as_deref())?;
+    fn connect(
+        &mut self,
+        host: &cpal::Host,
+        id: &str,
+        output: &Device,
+        start: Instant,
+    ) -> Result<()> {
+        let receiver = orvia_engine::mic_test::receiver_on(host, output, self.receiver.as_deref())?;
         let capture_format = config(&receiver, Port::Recording)?;
-        let device = host()?
+        let device = host
             .device_by_id(&id.parse()?)
             .context("Headphones disconnected")?;
+        let desc = device.description()?;
         ensure!(
-            device.description()?.supports_output() && !is_virtual_cable(&device),
+            desc.supports_output() && !described_virtual_cable(&device, &desc),
             "Choose a physical playback device"
         );
         let format = config(&device, Port::Headphones)?;
@@ -420,13 +503,14 @@ where
                 }
                 return;
             }
-            for f in data.chunks_exact(channels) {
+            let frames = data.chunks_exact(channels).map(|f| {
                 let left = f[0].to_sample();
                 let right = f.get(1).map_or(left, |s| s.to_sample());
-                rate.push([left, right], |frame| {
-                    let _ = tx.push((frame, stamp));
-                });
-            }
+                [left, right]
+            });
+            rate.push_batch(frames, |frame| {
+                let _ = tx.push((frame, stamp));
+            });
         },
         on_error(counters),
         None,
@@ -580,6 +664,28 @@ impl Playback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waveform_queue_survives_quick_reopens_and_retires_off_the_callback() {
+        let (mut reader, mut tap) = MeterReader::new();
+        let mut history = SignalWindow::default();
+        assert!(reader.levels.is_none());
+        reader.update(true, 0, &mut history);
+        // The window can close before the next audio block takes the producer.
+        reader.update(false, 1, &mut history);
+        assert!(tap.queue(false).is_none());
+        reader.update(true, 2, &mut history);
+        tap.queue(true)
+            .unwrap()
+            .push((3, BlockLevels::default()))
+            .unwrap();
+        assert!(tap.queue(false).is_none());
+        reader.update(false, 4, &mut history);
+        assert!(reader.levels.is_none());
+        assert_eq!(history.history().peaks.len(), 1);
+        reader.update(true, 5, &mut history);
+        assert!(tap.queue(true).is_some());
+    }
 
     #[test]
     fn recoverable_audio_notifications_keep_the_stream_open() {

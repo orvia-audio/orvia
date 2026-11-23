@@ -47,8 +47,21 @@ pub fn label(device: &Device) -> Result<String, cpal::Error> {
     Ok(display_name(&desc).to_owned())
 }
 
-fn display_name(desc: &DeviceDescription) -> &str {
+/// Get the full endpoint label from properties already fetched for validation.
+pub fn display_name(desc: &DeviceDescription) -> &str {
     desc.extended().next().unwrap_or(desc.name())
+}
+
+/// Identify a cable while reusing the description fetched for this endpoint.
+pub fn described_virtual_cable(_device: &Device, _description: &DeviceDescription) -> bool {
+    #[cfg(windows)]
+    {
+        adapter(_description).is_some()
+    }
+    #[cfg(not(windows))]
+    {
+        is_virtual_cable(_device)
+    }
 }
 
 /// Open the desktop sound server used for both enumeration and streaming.

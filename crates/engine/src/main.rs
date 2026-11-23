@@ -1,6 +1,7 @@
 //! Resident audio process. Closing the settings window leaves its streams running.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod control_files;
 mod log;
 mod spectrum;
 mod stream;
@@ -12,9 +13,7 @@ mod tray;
 
 use anyhow::Result;
 use fs2::FileExt;
-use orvia_core::{
-    AUDITION_FILE, Audition, EngineEvent, EngineStatus, Settings, data_dir, read_json, write_json,
-};
+use orvia_core::{EngineEvent, EngineStatus, Settings, data_dir, write_json};
 use std::{
     fs, io,
     path::Path,
@@ -51,16 +50,8 @@ fn stop_request(dir: &Path) -> std::path::PathBuf {
     dir.join(format!("stop-engine-{}", std::process::id()))
 }
 
-fn recently_observed(path: &Path) -> bool {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age < Duration::from_secs(5))
-}
-
 fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> bool) -> Result<()> {
-    let stop_request = stop_request(dir);
+    let mut controls = control_files::ControlFiles::new(dir);
     let mut log = log::EngineLog::open(dir);
     log.record(EngineEvent::Started(env!("CARGO_PKG_VERSION").into()));
     let mut last_monitor = (false, None);
@@ -73,20 +64,17 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
     let mut last_publish = last_attempt;
     let status_path = dir.join("status.json");
     let settings_path = dir.join("settings.json");
-    let audition_path = dir.join(AUDITION_FILE);
-    let mixer_path = dir.join("observe");
-    let summary_path = dir.join(orvia_core::SUMMARY_OBSERVER);
-    let spectrum_path = dir.join(orvia_core::spectrum::OBSERVER_FILE);
     loop {
-        if stop_request.exists() {
-            let _ = fs::remove_file(&stop_request);
+        let requests = controls.poll();
+        if requests.stop {
+            let _ = fs::remove_file(&controls.stop);
             break;
         }
         let now = Instant::now();
-        let metering = recently_observed(&mixer_path);
-        let spectrum_requested = recently_observed(&spectrum_path);
+        let metering = requests.metering;
+        let spectrum_requested = requests.spectrum;
         let live = metering || spectrum_requested;
-        let observed = live || recently_observed(&summary_path);
+        let observed = live || requests.summary;
         let settings = Settings::load(&settings_path);
         if menu(settings.as_ref().ok().map(|s| s.language)) {
             break;
@@ -163,8 +151,8 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     }
                 }
                 if let Some(route) = &mut running {
-                    let request = read_json::<Audition>(&audition_path)
-                        .ok()
+                    let request = controls
+                        .audition(&requests)
                         .filter(|r| r.active(&s, SystemTime::now()));
                     if let Some(r) = &request {
                         r.target.apply(&mut s);

@@ -84,7 +84,7 @@ impl PushSincResampler {
         assert!(destination_frames > 0);
         let ratio = source_frames as f64 / destination_frames as f64;
         Self {
-            resampler: SincResampler::new(ratio, source_frames),
+            resampler: SincResampler::new_fixed(ratio, source_frames),
             source_float_buffer: vec![0.0; source_frames],
             dest_float_buffer: Vec::new(),
             destination_frames,

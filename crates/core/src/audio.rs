@@ -255,18 +255,16 @@ impl Processor {
     fn suppress(&mut self, frames: &mut [[f32; 2]; BLOCK]) {
         // Identical stereo input has identical recurrent history until the first differing sample.
         // Once split, equal samples alone cannot establish that the two histories match again.
-        if self.linked_stereo {
-            if frames.iter().any(|[l, r]| l.to_bits() != r.to_bits()) {
-                match self.filters.as_mut_slice() {
-                    [Filter::Rnnoise(left), Filter::Rnnoise(right)] => right.copy_stream_from(left),
-                    [Filter::WebRtc(left), Filter::WebRtc(right)] => right.split_from(left),
-                    [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] => {
-                        right.copy_stream_from(left)
-                    }
-                    _ => unreachable!("linked channels always use the same filter"),
+        if self.linked_stereo && frames.iter().any(|[l, r]| l.to_bits() != r.to_bits()) {
+            match self.filters.as_mut_slice() {
+                [Filter::Rnnoise(left), Filter::Rnnoise(right)] => right.copy_stream_from(left),
+                [Filter::WebRtc(left), Filter::WebRtc(right)] => right.split_from(left),
+                [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] => {
+                    right.copy_stream_from(left)
                 }
-                self.linked_stereo = false;
+                _ => unreachable!("linked channels always use the same filter"),
             }
+            self.linked_stereo = false;
         }
         if !self.linked_stereo
             && let [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] =

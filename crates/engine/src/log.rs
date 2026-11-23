@@ -17,7 +17,9 @@ pub(super) struct EngineLog {
 impl EngineLog {
     pub(super) fn open(dir: &Path) -> Self {
         let path = dir.join(ENGINE_LOG);
-        let entries = read_json(&path).unwrap_or_default();
+        let mut entries: VecDeque<LogEntry> = read_json(&path).unwrap_or_default();
+        entries.drain(..entries.len().saturating_sub(LIMIT));
+        entries.shrink_to(LIMIT);
         Self {
             dir: dir.to_owned(),
             entries,
@@ -39,10 +41,12 @@ impl EngineLog {
             offset.abs() / 60,
             offset.abs() % 60
         );
-        self.entries.push_back(LogEntry { timestamp, event });
-        while self.entries.len() > LIMIT {
+        if self.entries.len() == LIMIT {
             self.entries.pop_front();
+        } else if self.entries.len() == self.entries.capacity() && self.entries.len() > LIMIT / 2 {
+            self.entries.reserve_exact(LIMIT - self.entries.len());
         }
+        self.entries.push_back(LogEntry { timestamp, event });
         // A busy disk must not tear down a running stream. The next event retries the write.
         let _ = write_json(&self.dir.join(ENGINE_LOG), &self.entries);
         let _ = self.write_text();
@@ -109,6 +113,7 @@ mod tests {
         log.record(EngineEvent::Stopped);
         let reopened = EngineLog::open(&dir);
         assert_eq!(reopened.entries.len(), LIMIT);
+        assert_eq!(reopened.entries.capacity(), LIMIT);
         assert_eq!(
             reopened.entries.front().unwrap().event,
             EngineEvent::Started("1".into())
@@ -127,6 +132,21 @@ mod tests {
         std::fs::remove_file(dir.join(ENGINE_LOG)).unwrap();
         std::fs::remove_file(dir.join(ENGINE_LOG_TEXT)).unwrap();
         std::fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn reopening_an_oversized_history_keeps_only_the_newest_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let entries: Vec<_> = (0..LIMIT + 7)
+            .map(|i| LogEntry {
+                timestamp: i.to_string(),
+                event: EngineEvent::Reconnecting,
+            })
+            .collect();
+        write_json(&dir.path().join(ENGINE_LOG), &entries).unwrap();
+        let log = EngineLog::open(dir.path());
+        assert_eq!(log.entries.capacity(), LIMIT);
+        assert_eq!(log.entries.front().unwrap().timestamp, "7");
     }
 
     #[test]

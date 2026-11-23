@@ -1,0 +1,16 @@
+dfn3_rs implements DeepFilterNet3 inference.
+
+DSP, streaming conventions, and model parameters are derived from DeepFilterNet
+by Hendrik Schroeter and contributors:
+https://github.com/Rikorose/DeepFilterNet
+Upstream revision: 7b14b895fe7fc42cab72b4a4c1e49c982bd6404b
+Upstream model archive: models/DeepFilterNet3_onnx.tar.gz
+
+weights/dfn3.bin contains reordered and padded matrices and folded convolution
+weights. Encoder matrices are FP32; decoder matrices are IEEE binary16. Biases
+and convolution taps remain FP32. SHA256:
+6f6148765e2ded639370d7ee6b4e6a39989c7900986461ac0cd826459904cd4e
+
+DeepFilterNet code and model weights are MIT OR Apache-2.0. Original license
+texts are included in LICENSE-MIT and LICENSE-APACHE. This is an independent
+implementation, not an official DeepFilterNet release.

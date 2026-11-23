@@ -232,10 +232,7 @@ impl Recording {
     /// Reports device loss, queue overflow or insufficient memory for the take.
     pub fn collect(&mut self) -> Result<&[[f32; 2]]> {
         let count = self.pending()?;
-        if count > 0 {
-            self.frames.try_reserve(count)?;
-            self.frames.extend(self.rx.read_chunk(count)?);
-        }
+        append_captured(&mut self.frames, &mut self.rx, count)?;
         Ok(&self.frames)
     }
 
@@ -308,12 +305,22 @@ impl Recording {
             count < self.rx.buffer().capacity(),
             "The recording device queue overflowed"
         );
-        if count > 0 {
-            self.frames.try_reserve(count)?;
-            self.frames.extend(self.rx.read_chunk(count)?);
-        }
+        append_captured(&mut self.frames, &mut self.rx, count)?;
         Ok(self.frames)
     }
+}
+
+/// Append both contiguous parts of the capture queue before returning them to the device.
+fn append_captured(frames: &mut Vec<Frame>, rx: &mut Consumer<Frame>, count: usize) -> Result<()> {
+    if count > 0 {
+        frames.try_reserve(count)?;
+        let chunk = rx.read_chunk(count)?;
+        let (first, second) = chunk.as_slices();
+        frames.extend_from_slice(first);
+        frames.extend_from_slice(second);
+        chunk.commit_all();
+    }
+    Ok(())
 }
 
 fn capture<T: SizedSample>(
@@ -523,6 +530,32 @@ impl Clip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collecting_a_wrapped_recording_preserves_the_previous_tail_and_frame_order() {
+        let (mut tx, mut rx) = RingBuffer::new(5);
+        tx.push_entire_slice(&[[0., 1.], [2., 3.], [4., 5.]])
+            .unwrap();
+        let mut frames = vec![[-2., -1.]];
+        append_captured(&mut frames, &mut rx, 2).unwrap();
+        tx.push_entire_slice(&[[6., 7.], [8., 9.], [10., 11.]])
+            .unwrap();
+        append_captured(&mut frames, &mut rx, 4).unwrap();
+        append_captured(&mut frames, &mut rx, 0).unwrap();
+        assert_eq!(
+            frames,
+            [
+                [-2., -1.],
+                [0., 1.],
+                [2., 3.],
+                [4., 5.],
+                [6., 7.],
+                [8., 9.],
+                [10., 11.]
+            ]
+        );
+        assert_eq!(rx.slots(), 0);
+    }
 
     #[test]
     fn owned_conversion_matches_the_live_input_clock_and_reuses_native_48_khz_audio() {

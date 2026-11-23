@@ -4134,8 +4134,6 @@ dependencies = [
 [[package]]
 name = "nnnoiseless"
 version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805d5964d1e7a0006a7fdced7dae75084d66d18b35f1dfe81bd76929b1f8da0c"
 dependencies = [
  "easyfft",
  "once_cell",
@@ -6215,8 +6213,6 @@ dependencies = [
 [[package]]
 name = "sonora"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d461e6c9ad112f8728919387a4bc5639fd28631f2070171efad38676e907edd8"
 dependencies = [
  "sonora-aec3",
  "sonora-agc2",
@@ -6254,8 +6250,6 @@ dependencies = [
 [[package]]
 name = "sonora-common-audio"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2c05dfa300c14dc8498751ce2c5b87aad2acf1892d4f9d66b92ae2f372a83410"
 dependencies = [
  "derive_more 2.1.1",
  "sonora-simd",
@@ -6273,8 +6267,6 @@ dependencies = [
 [[package]]
 name = "sonora-ns"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31c0a62e78419a174dbf9c9c01943c1ecd8c298a68d15c4fb4906cb19f0428b9"
 dependencies = [
  "sonora-fft",
 ]

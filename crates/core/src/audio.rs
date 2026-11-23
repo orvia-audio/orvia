@@ -94,7 +94,7 @@ fn levels(frames: &[[f32; 2]; BLOCK]) -> (f32, f32) {
 
 enum Filter {
     Rnnoise(Box<DenoiseState<'static>>),
-    WebRtc(Box<sonora::AudioProcessing>),
+    WebRtc(Box<sonora::NoiseChannel>),
     DeepFilterNet3(Box<dfn3_rs::Denoiser>),
 }
 
@@ -139,20 +139,7 @@ impl Processor {
                         filter.set_attenuation_limit(f32::from(settings.deep_filter_limit_db));
                         Filter::DeepFilterNet3(filter)
                     }
-                    NoiseMethod::WebRtc => {
-                        let config = sonora::Config {
-                            noise_suppression: Some(sonora::config::NoiseSuppression {
-                                level: sonora::config::NoiseSuppressionLevel::High,
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        };
-                        let apm = sonora::AudioProcessing::builder()
-                            .config(config)
-                            .capture_config(sonora::StreamConfig::new(SAMPLE_RATE, 1))
-                            .build();
-                        Filter::WebRtc(Box::new(apm))
-                    }
+                    NoiseMethod::WebRtc => Filter::WebRtc(Box::default()),
                 })
                 .collect()
         } else {
@@ -165,8 +152,7 @@ impl Processor {
         };
         Self {
             tone: crate::tone::ToneProcessor::new(settings.tone()),
-            linked_stereo: channels == 2
-                && settings.active_noise_method() == Some(NoiseMethod::DeepFilterNet3),
+            linked_stereo: channels == 2 && settings.suppress_noise,
             settings,
             filters,
             delayed_levels: vec![(0., 0.); delay_blocks].into(),
@@ -269,22 +255,30 @@ impl Processor {
     fn suppress(&mut self, frames: &mut [[f32; 2]; BLOCK]) {
         // Identical stereo input has identical recurrent history until the first differing sample.
         // Once split, equal samples alone cannot establish that the two histories match again.
-        if let [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] =
-            self.filters.as_mut_slice()
-        {
-            if self.linked_stereo && frames.iter().any(|[l, r]| l.to_bits() != r.to_bits()) {
-                right.copy_stream_from(left);
+        if self.linked_stereo {
+            if frames.iter().any(|[l, r]| l.to_bits() != r.to_bits()) {
+                match self.filters.as_mut_slice() {
+                    [Filter::Rnnoise(left), Filter::Rnnoise(right)] => right.copy_stream_from(left),
+                    [Filter::WebRtc(left), Filter::WebRtc(right)] => right.split_from(left),
+                    [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] => {
+                        right.copy_stream_from(left)
+                    }
+                    _ => unreachable!("linked channels always use the same filter"),
+                }
                 self.linked_stereo = false;
             }
-            if !self.linked_stereo {
-                let inputs = std::array::from_fn(|ch| std::array::from_fn(|i| frames[i][ch]));
-                let mut outputs = [[0.; BLOCK]; 2];
-                dfn3_rs::Denoiser::process_pair(left, right, &inputs, &mut outputs);
-                for (i, frame) in frames.iter_mut().enumerate() {
-                    *frame = [outputs[0][i], outputs[1][i]];
-                }
-                return;
+        }
+        if !self.linked_stereo
+            && let [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] =
+                self.filters.as_mut_slice()
+        {
+            let inputs = std::array::from_fn(|ch| std::array::from_fn(|i| frames[i][ch]));
+            let mut outputs = [[0.; BLOCK]; 2];
+            dfn3_rs::Denoiser::process_pair(left, right, &inputs, &mut outputs);
+            for (i, frame) in frames.iter_mut().enumerate() {
+                *frame = [outputs[0][i], outputs[1][i]];
             }
+            return;
         }
         let mirror = self.linked_stereo || self.settings.mixing != Mixing::Stereo;
         for (channel, filter) in self
@@ -308,11 +302,7 @@ impl Processor {
                 }
                 Filter::WebRtc(f) => {
                     let input: [f32; BLOCK] = std::array::from_fn(|i| frames[i][channel]);
-                    if f.process_capture_f32(&[&input], &mut [&mut output])
-                        .is_err()
-                    {
-                        output = input;
-                    }
+                    f.process(&input, &mut output);
                 }
             }
             for (frame, sample) in frames.iter_mut().zip(output) {
@@ -402,6 +392,55 @@ mod tests {
                 assert_eq!(linked.linked_stereo, n < split);
                 for (i, (actual, expected)) in frame.iter().zip(expected).enumerate() {
                     assert_eq!(*actual, expected, "split at {split}, block {n}, sample {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn speech_filters_preserve_independent_channel_histories_on_split() {
+        for method in [NoiseMethod::Rnnoise, NoiseMethod::WebRtc] {
+            for split in [0, 47, 153] {
+                let settings = Settings {
+                    noise_method: method,
+                    ..Settings::default()
+                };
+                let mut linked = Processor::new(&settings);
+                let mut separate = Processor::new(&settings);
+                separate.linked_stereo = false;
+                for n in 0..split + 28 {
+                    let mut block = std::array::from_fn(|i| {
+                        let phase = (n * BLOCK + i) as f32;
+                        let left = match n % 53 {
+                            0..=12 => 0.,
+                            13..=14 => {
+                                if i % 7 == 0 {
+                                    1.
+                                } else {
+                                    -1.
+                                }
+                            }
+                            _ => (0.34 * phase).sin() * (0.007 * phase).cos() * 0.3,
+                        };
+                        let right = if n == split && i == BLOCK - 1 {
+                            0.93
+                        } else if n > split && n % 3 == 0 {
+                            -left
+                        } else {
+                            left
+                        };
+                        [left, right]
+                    });
+                    let mut reference = block;
+                    linked.process_unmetered(&mut block);
+                    separate.process_unmetered(&mut reference);
+                    for (i, (a, b)) in block.iter().zip(reference).enumerate() {
+                        assert_eq!(
+                            a.map(f32::to_bits),
+                            b.map(f32::to_bits),
+                            "{method:?}, split {split}, block {n}, sample {i}"
+                        );
+                    }
                 }
             }
         }

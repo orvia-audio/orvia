@@ -66,6 +66,13 @@ pub struct PushSincResampler {
 }
 
 impl PushSincResampler {
+    /// Copy the position and signal history of an identically configured resampler.
+    /// The immutable kernels and scratch buffers are reused.
+    pub fn copy_stream_from(&mut self, source: &Self) {
+        self.first_pass = source.first_pass;
+        self.resampler.copy_stream_from(&source.resampler);
+    }
+
     /// Create a new push resampler.
     ///
     /// - `source_frames`: number of input frames per call (e.g. 480 for 10ms at 48kHz)

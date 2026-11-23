@@ -17,6 +17,11 @@ pub(crate) struct PitchFinder {
 }
 
 impl PitchFinder {
+    pub(crate) fn copy_history_from(&mut self, source: &Self) {
+        self.last_period = source.last_period;
+        self.last_gain = source.last_gain;
+    }
+
     pub(crate) fn new() -> PitchFinder {
         assert!(
             PITCH_MAX_PERIOD + 1

@@ -328,6 +328,14 @@ impl GruLayer {
 }
 
 impl<'model> RnnState<'model> {
+    pub(crate) fn copy_history_from(&mut self, source: &Self) {
+        self.vad_gru_state.copy_from_slice(&source.vad_gru_state);
+        self.noise_gru_state
+            .copy_from_slice(&source.noise_gru_state);
+        self.denoise_gru_state
+            .copy_from_slice(&source.denoise_gru_state);
+    }
+
     pub(crate) fn new(model: Cow<'model, RnnModel>) -> RnnState<'model> {
         let vad_gru_state = vec![0.0f32; model.vad_gru.nb_neurons];
         let noise_gru_state = vec![0.0f32; model.noise_gru.nb_neurons];

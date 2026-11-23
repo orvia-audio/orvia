@@ -64,6 +64,15 @@ impl DenoiseState<'static> {
 }
 
 impl<'model> DenoiseState<'model> {
+    /// Copy the history of a stream using the same model without allocating.
+    ///
+    /// Call between frames when two previously identical channels first diverge.
+    pub fn copy_stream_from(&mut self, source: &Self) {
+        self.lastg = source.lastg;
+        self.rnn.copy_history_from(&source.rnn);
+        self.feat.copy_history_from(&source.feat);
+    }
+
     /// Creates a new `DenoiseState` using a custom model.
     ///
     /// The main difference between this method and `DenoiseState::from_model` is that here

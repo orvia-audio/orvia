@@ -281,6 +281,31 @@ pub struct NoiseSuppressor {
 }
 
 impl NoiseSuppressor {
+    /// Copy stream history from a suppressor using the same level and number of bands.
+    ///
+    /// The destination reuses its upper-band delay buffers and FFT workspace.
+    pub fn copy_stream_from(&mut self, source: &Self) {
+        assert_eq!(self.num_bands, source.num_bands);
+        assert!(std::ptr::eq(
+            self.suppression_params,
+            source.suppression_params
+        ));
+        self.num_analyzed_frames = source.num_analyzed_frames;
+        self.cached_upper_band_gain = source.cached_upper_band_gain;
+        let src = &source.channel;
+        let dst = &mut self.channel;
+        dst.speech_probability_estimator
+            .clone_from(&src.speech_probability_estimator);
+        dst.noise_estimator.clone_from(&src.noise_estimator);
+        dst.wiener_filter.clone_from(&src.wiener_filter);
+        dst.prev_analysis_signal_spectrum = src.prev_analysis_signal_spectrum;
+        dst.analyze_analysis_memory = src.analyze_analysis_memory;
+        dst.process_analysis_memory = src.process_analysis_memory;
+        dst.process_synthesis_memory = src.process_synthesis_memory;
+        dst.process_delay_memory
+            .copy_from_slice(&src.process_delay_memory);
+    }
+
     /// Create a new single-band noise suppressor with the given configuration.
     pub fn new(config: NsConfig) -> Self {
         let suppression_params = SuppressionParams::for_level(config.target_level);

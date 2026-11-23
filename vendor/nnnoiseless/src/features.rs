@@ -54,6 +54,15 @@ const fn max(a: usize, b: usize) -> usize {
 }
 
 impl DenoiseFeatures {
+    pub(crate) fn copy_history_from(&mut self, source: &Self) {
+        self.input_mem = source.input_mem;
+        self.cepstral_mem = source.cepstral_mem;
+        self.mem_id = source.mem_id;
+        self.mem_hp_x = source.mem_hp_x;
+        self.synthesis_mem = source.synthesis_mem;
+        self.pitch_finder.copy_history_from(&source.pitch_finder);
+    }
+
     /// Creates a new, empty, `DenoiseFeatures`.
     pub fn new() -> DenoiseFeatures {
         DenoiseFeatures {

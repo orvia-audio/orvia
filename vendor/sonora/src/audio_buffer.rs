@@ -50,6 +50,22 @@ pub(crate) struct AudioBuffer {
 }
 
 impl AudioBuffer {
+    pub(crate) fn copy_history_from(&mut self, src: &Self) {
+        for (dst, src) in self.input_resamplers.iter_mut().zip(&src.input_resamplers) {
+            dst.copy_stream_from(src);
+        }
+        for (dst, src) in self
+            .output_resamplers
+            .iter_mut()
+            .zip(&src.output_resamplers)
+        {
+            dst.copy_stream_from(src);
+        }
+        if let (Some(dst), Some(src)) = (&mut self.splitting_filter, &src.splitting_filter) {
+            dst.copy_history_from(src);
+        }
+    }
+
     /// Create a new audio buffer.
     ///
     /// - `input_rate`: sample rate of incoming audio

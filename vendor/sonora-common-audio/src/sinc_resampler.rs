@@ -89,6 +89,20 @@ fn sinc_scale_factor(io_ratio: f64) -> f64 {
 }
 
 impl SincResampler {
+    pub(crate) fn copy_stream_from(&mut self, source: &Self) {
+        debug_assert_eq!(self.io_sample_rate_ratio, source.io_sample_rate_ratio);
+        debug_assert_eq!(self.request_frames, source.request_frames);
+        self.virtual_source_idx = source.virtual_source_idx;
+        self.buffer_primed = source.buffer_primed;
+        self.block_size = source.block_size;
+        self.input_buffer.copy_from_slice(&source.input_buffer);
+        self.r0 = source.r0;
+        self.r1 = source.r1;
+        self.r2 = source.r2;
+        self.r3 = source.r3;
+        self.r4 = source.r4;
+    }
+
     /// Create a new resampler.
     ///
     /// - `io_sample_rate_ratio`: input / output sample rate ratio

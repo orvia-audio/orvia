@@ -171,6 +171,27 @@ pub(crate) struct AudioProcessingImpl {
 }
 
 impl AudioProcessingImpl {
+    /// Fork the capture history of two fixed noise-only pipelines between frames.
+    pub(crate) fn copy_noise_history_from(&mut self, src: &Self) {
+        self.capture
+            .capture_audio
+            .as_mut()
+            .unwrap()
+            .copy_history_from(src.capture.capture_audio.as_ref().unwrap());
+        if let (Some(dst), Some(src)) = (
+            &mut self.capture.capture_fullband_audio,
+            &src.capture.capture_fullband_audio,
+        ) {
+            dst.copy_history_from(src);
+        }
+        self.submodules
+            .high_pass_filter
+            .as_mut()
+            .unwrap()
+            .copy_history_from(src.submodules.high_pass_filter.as_ref().unwrap());
+        self.submodules.noise_suppressors[0].copy_stream_from(&src.submodules.noise_suppressors[0]);
+    }
+
     /// Creates a new audio processing instance with the given configuration.
     pub(crate) fn with_config(config: Config) -> Self {
         let mut apm = Self {

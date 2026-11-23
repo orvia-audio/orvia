@@ -110,3 +110,7 @@ version = "1.9.0"
 version = "0.8.5"
 optional = true
 
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = ["cfg(cargo_c)"]

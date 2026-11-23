@@ -3,17 +3,18 @@ use orvia_core::{BLOCK, Mixing, Processor, SAMPLE_RATE, Settings, calibration};
 use std::{hint::black_box, time::Instant};
 
 fn main() {
-    let case = std::env::args()
-        .nth(1)
-        .expect("choose bypass, mono-input, stereo-input, or calibration");
+    let case = std::env::args().nth(1).expect(
+        "choose bypass, mono-input, mirrored-input, stereo-input, quiet-low-cut, or calibration",
+    );
     let mono = case == "mono-input";
+    let mirrored = mono || case == "mirrored-input";
     let mut seed = 19_u32;
     let samples: Vec<[f32; 2]> = (0..SAMPLE_RATE * 12)
         .map(|i| {
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             let x =
                 0.13 * (i as f32 * 0.055).sin() + (seed as i32 as f32) * 0.015 / i32::MAX as f32;
-            [x, if mono { x } else { x * 0.7 }]
+            [x, if mirrored { x } else { x * 0.7 }]
         })
         .collect();
     if case == "calibration" {
@@ -32,20 +33,26 @@ fn main() {
     }
     assert!(matches!(
         case.as_str(),
-        "bypass" | "mono-input" | "stereo-input"
+        "bypass" | "mono-input" | "mirrored-input" | "stereo-input" | "quiet-low-cut"
     ));
     let settings = Settings {
-        suppress_noise: case != "bypass",
+        suppress_noise: !matches!(case.as_str(), "bypass" | "quiet-low-cut"),
+        low_cut_hz: if case == "quiet-low-cut" { 80 } else { 0 },
         ..Settings::default()
     };
     let mut processor = Processor::for_input(&settings, if mono { 1 } else { 2 });
     let mut times = Vec::new();
-    for frames in samples
-        .chunks_exact(BLOCK)
-        .cycle()
-        .take(if case == "bypass" { 80_000 } else { 1600 })
-    {
+    for frames in samples.chunks_exact(BLOCK).cycle().take(
+        if matches!(case.as_str(), "bypass" | "quiet-low-cut") {
+            80_000
+        } else {
+            1600
+        },
+    ) {
         let mut block = *<&[[f32; 2]; BLOCK]>::try_from(frames).unwrap();
+        if case == "quiet-low-cut" && !times.is_empty() {
+            block.fill([0.; 2]);
+        }
         let start = Instant::now();
         processor.process_unmetered(black_box(&mut block));
         times.push(start.elapsed().as_nanos());

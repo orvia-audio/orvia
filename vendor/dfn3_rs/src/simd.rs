@@ -39,8 +39,40 @@ impl Simd {
         out: &mut [f32],
         ldo: usize,
     ) {
+        self.gemm_rows::<16>(m, a, lda, w, bias, acc, relu, out, ldo);
+    }
+
+    /// Add the five complex FIR coefficients to each compact frequency row.
+    pub fn accumulate_fir(self, a: &[f32], w: &Mat, out: &mut [[f32; 10]]) {
+        assert!(w.n == 16 && out.len().is_multiple_of(4));
+        self.gemm_rows::<10>(
+            out.len(),
+            a,
+            w.k,
+            w,
+            None,
+            true,
+            false,
+            out.as_flattened_mut(),
+            10,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn gemm_rows<const WRITE: usize>(
+        self,
+        m: usize,
+        a: &[f32],
+        lda: usize,
+        w: &Mat,
+        bias: Option<&[f32]>,
+        acc: bool,
+        relu: bool,
+        out: &mut [f32],
+        ldo: usize,
+    ) {
         assert!(m == 1 || m == 2 || (m > 0 && m.is_multiple_of(4)));
-        assert!(a.len() >= (m - 1) * lda + w.k && out.len() >= (m - 1) * ldo + w.n);
+        assert!(a.len() >= (m - 1) * lda + w.k && out.len() >= (m - 1) * ldo + w.n - (16 - WRITE));
         assert!(w.w.len() == w.k * w.n && bias.is_none_or(|b| b.len() >= w.n));
         macro_rules! run {
             ($weights:expr, $expand:expr, $half:literal) => {{
@@ -49,7 +81,7 @@ impl Simd {
                 if self.avx2 {
                     // SAFETY: CPU support checked at construction; bounds asserted above.
                     return unsafe {
-                        x86::gemm::<$half>(
+                        x86::gemm::<$half, WRITE>(
                             m,
                             a,
                             lda,
@@ -76,7 +108,7 @@ impl Simd {
                             }
                         }
                         let start = tile * 16;
-                        for (i, mut sum) in sums.into_iter().enumerate() {
+                        for (i, mut sum) in sums.into_iter().take(WRITE).enumerate() {
                             let n = start + i;
                             let o = &mut out[r * ldo + n];
                             sum += bias.map_or(0.0, |b| b[n]) + if acc { *o } else { 0.0 };
@@ -130,7 +162,7 @@ mod x86 {
     /// One register tile: `R` rows x `T` 16-column tiles (R * T * 2 <= 8 accumulators).
     #[target_feature(enable = "avx2,fma,f16c")]
     #[allow(clippy::too_many_arguments)]
-    unsafe fn tile<const R: usize, const T: usize, const HALF: bool>(
+    unsafe fn tile<const R: usize, const T: usize, const HALF: bool, const WRITE: usize>(
         k: usize,
         a: *const f32,
         lda: usize,
@@ -165,6 +197,14 @@ mod x86 {
                 for (t, s) in row.iter().enumerate() {
                     for (h, &v) in s.iter().enumerate() {
                         let o = out.add(r * ldo + t * 16 + h * 8);
+                        if WRITE == 10 && h == 1 {
+                            // The compact FIR row has two remaining lanes. Masked loads/stores
+                            // leave the following frequency (and the end of the slice) untouched.
+                            let mask = _mm256_setr_epi32(-1, -1, 0, 0, 0, 0, 0, 0);
+                            let old = _mm256_maskload_ps(o, mask);
+                            _mm256_maskstore_ps(o, mask, _mm256_add_ps(v, old));
+                            continue;
+                        }
                         let mut v = v;
                         if !bias.is_null() {
                             v = _mm256_add_ps(v, _mm256_loadu_ps(bias.add(t * 16 + h * 8)));
@@ -184,7 +224,7 @@ mod x86 {
 
     #[target_feature(enable = "avx2,fma,f16c")]
     #[allow(clippy::too_many_arguments)]
-    pub(super) unsafe fn gemm<const HALF: bool>(
+    pub(super) unsafe fn gemm<const HALF: bool, const WRITE: usize>(
         m: usize,
         a: &[f32],
         lda: usize,
@@ -205,7 +245,7 @@ mod x86 {
             if m == 1 {
                 let mut t = 0;
                 while t + 4 <= tiles {
-                    tile::<1, 4, HALF>(
+                    tile::<1, 4, HALF, WRITE>(
                         k,
                         a,
                         0,
@@ -219,7 +259,7 @@ mod x86 {
                     t += 4;
                 }
                 while t + 2 <= tiles {
-                    tile::<1, 2, HALF>(
+                    tile::<1, 2, HALF, WRITE>(
                         k,
                         a,
                         0,
@@ -233,7 +273,7 @@ mod x86 {
                     t += 2;
                 }
                 if t < tiles {
-                    tile::<1, 1, HALF>(
+                    tile::<1, 1, HALF, WRITE>(
                         k,
                         a,
                         0,
@@ -249,16 +289,36 @@ mod x86 {
                 for t in (0..tiles).step_by(2) {
                     let w = wp.add(t * k * 16 * bytes);
                     if t + 1 < tiles {
-                        tile::<2, 2, HALF>(k, a, lda, w, bias(t), acc, relu, o.add(t * 16), ldo);
+                        tile::<2, 2, HALF, WRITE>(
+                            k,
+                            a,
+                            lda,
+                            w,
+                            bias(t),
+                            acc,
+                            relu,
+                            o.add(t * 16),
+                            ldo,
+                        );
                     } else {
-                        tile::<2, 1, HALF>(k, a, lda, w, bias(t), acc, relu, o.add(t * 16), ldo);
+                        tile::<2, 1, HALF, WRITE>(
+                            k,
+                            a,
+                            lda,
+                            w,
+                            bias(t),
+                            acc,
+                            relu,
+                            o.add(t * 16),
+                            ldo,
+                        );
                     }
                 }
             } else {
                 for t in 0..tiles {
                     for r in (0..m).step_by(4) {
                         let (a, o) = (a.add(r * lda), o.add(r * ldo + t * 16));
-                        tile::<4, 1, HALF>(
+                        tile::<4, 1, HALF, WRITE>(
                             k,
                             a,
                             lda,
@@ -352,6 +412,43 @@ mod x86 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compact_fir_writes_only_the_first_ten_projection_lanes() {
+        #[repr(align(64))]
+        struct Aligned<T>(T);
+        const K: usize = 12;
+        let fp32 = &Box::leak(Box::new(Aligned(std::array::from_fn::<_, { K * 16 }, _>(
+            |i| (i as f32 * 0.11).sin(),
+        ))))
+        .0;
+        let fp16 = &Box::leak(Box::new(Aligned(std::array::from_fn::<_, { K * 16 }, _>(
+            |i| 0x3000 + (i as u16 % 0x100),
+        ))))
+        .0;
+        let input = std::array::from_fn::<_, { K * 8 }, _>(|i| (i as f32 * 0.087).cos());
+        for w in [Data::F32(fp32), Data::F16(fp16)] {
+            let matrix = Mat { k: K, n: 16, w };
+            for kernel in [Simd { avx2: false }, Simd::new()] {
+                let mut padded = [0.37; 8 * 16];
+                let mut compact = [[0.37; 10]; 10];
+                for _ in 0..3 {
+                    kernel.gemm(8, &input, K, &matrix, None, true, false, &mut padded, 16);
+                    kernel.accumulate_fir(&input, &matrix, &mut compact[1..9]);
+                }
+                assert_eq!(compact[0], [0.37; 10]);
+                assert_eq!(compact[9], [0.37; 10]);
+                for (a, b) in padded.chunks_exact(16).zip(&compact[1..9]) {
+                    assert!(
+                        a[..10]
+                            .iter()
+                            .zip(b)
+                            .all(|(x, y)| x.to_bits() == y.to_bits())
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn portable_tiles_match_scalar_columns_with_padded_rows() {

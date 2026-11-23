@@ -50,6 +50,18 @@ pub(crate) struct AudioBuffer {
 }
 
 impl AudioBuffer {
+    /// A fixed mono float input uses neither integer conversion nor channel downmixing.
+    pub(crate) fn release_mono_float_scratch(&mut self) {
+        self.scratch = Vec::new();
+        for resampler in self
+            .input_resamplers
+            .iter_mut()
+            .chain(&mut self.output_resamplers)
+        {
+            resampler.release_integer_scratch();
+        }
+    }
+
     pub(crate) fn copy_history_from(&mut self, src: &Self) {
         for (dst, src) in self.input_resamplers.iter_mut().zip(&src.input_resamplers) {
             dst.copy_stream_from(src);

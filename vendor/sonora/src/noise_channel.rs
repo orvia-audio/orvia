@@ -18,12 +18,12 @@ impl Default for NoiseChannel {
             }),
             ..Default::default()
         };
-        Self(
-            AudioProcessing::builder()
-                .config(config)
-                .capture_config(StreamConfig::new(48_000, 1))
-                .build(),
-        )
+        let mut processor = AudioProcessing::builder()
+            .config(config)
+            .capture_config(StreamConfig::new(48_000, 1))
+            .build();
+        processor.inner.retain_mono_noise_capture();
+        Self(processor)
     }
 }
 

@@ -66,6 +66,12 @@ pub struct PushSincResampler {
 }
 
 impl PushSincResampler {
+    /// Release the conversion buffer for a route using only floating-point samples.
+    /// Calling the integer interface later recreates its temporary storage.
+    pub fn release_integer_scratch(&mut self) {
+        self.source_float_buffer = Vec::new();
+    }
+
     /// Copy the position and signal history of an identically configured resampler.
     /// The immutable kernels and scratch buffers are reused.
     pub fn copy_stream_from(&mut self, source: &Self) {
@@ -138,6 +144,7 @@ impl PushSincResampler {
         assert!(destination.len() >= self.destination_frames);
 
         // Convert i16 → f32 into reusable buffer (no allocation).
+        self.source_float_buffer.resize(source.len(), 0.);
         for (d, &s) in self.source_float_buffer.iter_mut().zip(source) {
             *d = s as f32;
         }

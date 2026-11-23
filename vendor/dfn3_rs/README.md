@@ -78,7 +78,9 @@ to emit the delayed tail. For offline delay compensation, discard the first
 
 Build and check with `cargo build --release`, `cargo clippy --all-targets -- -D warnings`,
 and `cargo test --release`. `realfft` is the only direct dependency; FFT plans and
-scratch buffers are allocated during construction. Construct, warm up, and reset
+scratch buffers are allocated during construction. Concurrent instances share immutable
+FFT plans and the window. Each channel retains its own scratch, overlap, and five
+complex deep-filter coefficients per frequency row. Construct, warm up, and reset
 the denoiser before starting real-time processing. To warm all neural stages,
 temporarily set thresholds to -100, 100, 100, process a few low-level nonzero
 frames, reset, and restore the intended thresholds.

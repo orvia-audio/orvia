@@ -171,6 +171,19 @@ pub(crate) struct AudioProcessingImpl {
 }
 
 impl AudioProcessingImpl {
+    /// Discard storage unreachable through the fixed noise-only float capture interface.
+    pub(crate) fn retain_mono_noise_capture(&mut self) {
+        self.render.render_audio = None;
+        for buffer in self
+            .capture
+            .capture_audio
+            .iter_mut()
+            .chain(&mut self.capture.capture_fullband_audio)
+        {
+            buffer.release_mono_float_scratch();
+        }
+    }
+
     /// Fork the capture history of two fixed noise-only pipelines between frames.
     pub(crate) fn copy_noise_history_from(&mut self, src: &Self) {
         self.capture

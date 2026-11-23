@@ -39,7 +39,7 @@ impl SavedClip {
         latest_path(dir)?.map(|path| Self::open(&path)).transpose()
     }
 
-    fn open(path: &Path) -> Result<Self> {
+    pub(super) fn open(path: &Path) -> Result<Self> {
         let reader = checked_reader(path)?;
         Ok(Self {
             frames: reader.duration(),
@@ -170,7 +170,7 @@ impl Playback {
 }
 
 enum Frames {
-    Memory(Arc<[Frame]>),
+    Memory(Arc<Vec<Frame>>),
     Buffered {
         queue: Consumer<Frame>,
         pair: [Frame; 2],
@@ -344,7 +344,8 @@ mod tests {
             rate: 44_100,
             frames: (0..length)
                 .map(|i| [i as f32 * 0.001, -(i as f32)])
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
         };
         clip.save_latest(dir.path()).unwrap();
         let saved = SavedClip::latest(dir.path()).unwrap().unwrap();
@@ -398,7 +399,7 @@ mod tests {
     #[test]
     fn replay_preserves_pauses_across_buffers_and_resamples_both_channels() {
         let mut cursor = Cursor {
-            frames: Frames::Memory(Arc::from([[0.5, -0.5], [0., 0.], [0., 0.], [0.5, -0.5]])),
+            frames: Frames::Memory(Arc::new(vec![[0.5, -0.5], [0., 0.], [0., 0.], [0.5, -0.5]])),
             length: 4,
             phase: 0,
             input_rate: 24_000,

@@ -188,9 +188,13 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     wait_for(recording, "Retake did not start a new recording")
     time.sleep(11)
     assert recording() and take.read_bytes() == first, "Silence before speech must not end a take"
+    draft, = (p for p in take.parent.iterdir() if p != take)
+    bytes_per_second = int.from_bytes(first[28:32], "little")
+    assert draft.stat().st_size >= 8 * bytes_per_second, "Waiting audio was not written incrementally"
     speak("orvia_output")
     wait_for(lambda: take.stat().st_size > len(first), "A short utterance did not finish after silence", timeout=15)
     second = take.read_bytes()
+    assert len(second) >= 11 * bytes_per_second and not draft.exists()
     run("xdotool", "key", "Return")
     wait_for(playing, "The primary button did not play the automatically stopped retake")
     assert take.read_bytes() == second and not recording()

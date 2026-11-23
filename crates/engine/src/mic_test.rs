@@ -14,12 +14,14 @@ use orvia_core::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
-    io::BufWriter,
     path::Path,
     sync::{Arc, mpsc},
     time::Duration,
 };
 
+mod file_recording;
+pub use file_recording::FileRecording;
+use file_recording::PendingWav;
 mod playback;
 pub use playback::{Playback, SavedClip};
 use playback::{checked_reader, latest_path};
@@ -260,21 +262,33 @@ impl Recording {
     /// # Errors
     ///
     /// Returns an error if capture failed or the device delivered no frames.
-    pub fn finish(mut self) -> Result<Clip> {
-        self.collect()?;
-        drop(self.stream);
-        let count = self.rx.slots();
-        if count > 0 {
-            self.frames.extend(self.rx.read_chunk(count)?);
-        }
+    pub fn finish(self) -> Result<Clip> {
+        let rate = self.rate;
+        let mut frames = self.stop()?;
+        frames.shrink_to_fit();
         ensure!(
-            !self.frames.is_empty(),
+            !frames.is_empty(),
             "The microphone returned no audio frames"
         );
         Ok(Clip {
-            frames: self.frames.into(),
-            rate: self.rate,
+            frames: frames.into(),
+            rate,
         })
+    }
+
+    fn stop(mut self) -> Result<Vec<Frame>> {
+        self.collect()?;
+        drop(self.stream);
+        let count = self.rx.slots();
+        ensure!(
+            count < self.rx.buffer().capacity(),
+            "The recording device queue overflowed"
+        );
+        if count > 0 {
+            self.frames.try_reserve(count)?;
+            self.frames.extend(self.rx.read_chunk(count)?);
+        }
+        Ok(self.frames)
     }
 }
 
@@ -308,7 +322,7 @@ where
 /// Stereo audio from a microphone test, stored at its original capture rate.
 #[derive(Clone)]
 pub struct Clip {
-    frames: Arc<[Frame]>,
+    frames: Arc<Vec<Frame>>,
     rate: u32,
 }
 
@@ -422,26 +436,9 @@ impl Clip {
     ///
     /// Returns a filesystem or WAV encoding error. The parent directory must exist.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let tmp =
-            tempfile::NamedTempFile::new_in(path.parent().context("Missing recording directory")?)?;
-        let spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: self.rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut writer = hound::WavWriter::new(BufWriter::new(tmp.as_file()), spec)?;
-        for sample in self.frames.iter().flatten() {
-            writer.write_sample(*sample)?;
-        }
-        writer.finalize()?;
-        // The standard rename can replace a take that another window is playing on Windows.
-        let staging = tmp.into_temp_path().keep()?;
-        if let Err(error) = std::fs::rename(&staging, path) {
-            let _ = std::fs::remove_file(staging);
-            return Err(error.into());
-        }
-        Ok(())
+        let mut take = PendingWav::new(path, self.rate)?;
+        take.append(&self.frames)?;
+        take.publish(|_| Ok(()))
     }
 
     /// Open a test WAV saved by this or a previous installation.
@@ -500,7 +497,8 @@ mod tests {
                     };
                     [x, x * 0.6]
                 })
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
         };
         let (settings, [before, after]) = room.tone_previews(&voice, Default::default()).unwrap();
         assert_eq!(
@@ -529,7 +527,7 @@ mod tests {
         let before = dir.path().join("before.wav");
         let after = dir.path().join("after.wav");
         let mut clip = Clip {
-            frames: Arc::from([[0.4, 0.3], [0., 0.]]),
+            frames: Arc::new(vec![[0.4, 0.3], [0., 0.]]),
             rate: 44_100,
         };
         assert!(Clip::load_latest(dir.path()).unwrap().is_none());
@@ -538,7 +536,7 @@ mod tests {
             Clip::load_latest(dir.path()).unwrap().unwrap().frames,
             clip.frames
         );
-        clip.frames = Arc::from([[0.125, -0.125]]);
+        clip.frames = Arc::new(vec![[0.125, -0.125]]);
         clip.save(&after).unwrap();
         assert_eq!(
             Clip::load_latest(dir.path()).unwrap().unwrap().frames,
@@ -557,7 +555,7 @@ mod tests {
             original.frames
         );
         let previous = clip.frames.clone();
-        clip.frames = Arc::from([[0.7, -0.7]]);
+        clip.frames = Arc::new(vec![[0.7, -0.7]]);
         clip.save_latest(dir.path()).unwrap();
         assert_eq!(
             Clip::load_latest(dir.path()).unwrap().unwrap().frames,

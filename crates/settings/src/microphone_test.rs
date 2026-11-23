@@ -1,6 +1,6 @@
 //! Session-scoped controls for recording and replaying the virtual microphone.
 use super::*;
-use orvia_engine::mic_test::{self, Clip, Playback, Recording, SavedClip};
+use orvia_engine::mic_test::{self, Clip, FileRecording, Playback, SavedClip};
 
 /// The operation shown on a microphone test button when it was rendered.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -51,7 +51,7 @@ pub(super) struct MicTest {
     pub(super) sources: Vec<(String, String)>,
     pub(super) source: Option<String>,
     pub(super) speaker: Option<String>,
-    pub(super) recording: Option<Recording>,
+    pub(super) recording: Option<FileRecording>,
     pub(super) reader: reading::Reader,
     pub(super) clip: Option<Take>,
     pub(super) playback: Option<Playback>,
@@ -147,20 +147,15 @@ impl Panel {
             return;
         };
         self.test.recording_route = None;
-        let result = recording.finish().and_then(|clip| {
-            let dir = self.dir.join("mic-test");
-            clip.save_latest(&dir)?;
-            SavedClip::latest(&dir)
-        });
-        match result {
-            Ok(clip) => self.test.clip = clip.map(Take::Saved),
+        match recording.finish() {
+            Ok(clip) => self.test.clip = Some(Take::Saved(clip)),
             Err(e) => self.test_error(e),
         }
     }
 
     fn start_test_recording(&mut self) {
         if let Some(id) = &self.test.source {
-            match Recording::start(id) {
+            match FileRecording::start(id, &self.dir.join("mic-test")) {
                 Ok(recording) => {
                     self.error.clear();
                     self.test.recording = Some(recording);
@@ -225,7 +220,11 @@ impl Panel {
                     )
                     .into();
             } else {
-                match self.test.reader.listen(recording, self.prefs.language) {
+                match self
+                    .test
+                    .reader
+                    .listen_saved(recording, self.prefs.language)
+                {
                     Ok(true) => self.finish_test_recording(),
                     Ok(false) => {}
                     Err(e) => {

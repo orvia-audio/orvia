@@ -110,6 +110,15 @@ impl ToneProcessor {
         }
         self.settings = settings;
     }
+
+    /// Whether bounded input will pass through without advancing any gain or filter transition.
+    pub(crate) fn is_bypassed(&self) -> bool {
+        self.settings == Tone::default()
+            && self.previous_filter.is_none()
+            && self.gain == 1.
+            && self.reduction == 1.
+    }
+
     /// Apply one block of at most 480 normalized stereo frames and return the final peak.
     /// A settled compressor passes through blocks at or below its threshold.
     pub fn process(&mut self, frames: &mut [[f32; 2]]) -> f32 {

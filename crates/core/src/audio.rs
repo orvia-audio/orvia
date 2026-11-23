@@ -240,7 +240,19 @@ impl Processor {
         } else {
             (input_levels, input_levels)
         };
-        let peak = self.tone.process_block::<OUTPUT_PEAK>(frames);
+        // The mixer already bounded the input. With no active effects its output peak is the input peak.
+        let peak = if self.filters.is_empty() && self.tone.is_bypassed() {
+            if OUTPUT_PEAK && !METER {
+                frames
+                    .iter()
+                    .flatten()
+                    .fold(0_f32, |peak, s| peak.max(s.abs()))
+            } else {
+                input_levels.0
+            }
+        } else {
+            self.tone.process_block::<OUTPUT_PEAK>(frames)
+        };
         (
             peak,
             BlockLevels {
@@ -492,6 +504,61 @@ mod tests {
             });
             processor.process(&mut frames);
             assert!(frames.iter().all(|frame| *frame == expected));
+        }
+    }
+
+    #[test]
+    fn bypass_matches_the_tone_processor_across_control_changes() {
+        let neutral = crate::Tone::default();
+        let active = crate::Tone {
+            low_cut_hz: 80,
+            gain_percent: 75,
+            compressor_ratio: 3,
+        };
+        for mixing in [Mixing::Stereo, Mixing::Average] {
+            let mut mixer = Processor::new(&Settings {
+                mixing,
+                suppress_noise: false,
+                ..Settings::default()
+            });
+            let mut tone = crate::tone::ToneProcessor::new(neutral);
+            for (n, controls) in [neutral, active, active, neutral, neutral, neutral, neutral]
+                .into_iter()
+                .enumerate()
+            {
+                mixer.set_tone(controls);
+                tone.configure(controls);
+                let mut actual = std::array::from_fn(|i| match i % 4 {
+                    0 => [-0., f32::from_bits(11)],
+                    1 => [f32::NAN, f32::INFINITY],
+                    2 => [1.3, -0.45],
+                    _ => [-1.7, 0.82],
+                });
+                let mut expected = actual.map(|frame| {
+                    let [l, r] = frame.map(|s| if s.is_finite() { s.clamp(-1., 1.) } else { 0. });
+                    if mixing == Mixing::Average {
+                        [(l + r) * 0.5; 2]
+                    } else {
+                        [l, r]
+                    }
+                });
+                let input = levels(&expected);
+                let peak = tone.process(&mut expected);
+                match n % 3 {
+                    0 => assert_eq!(mixer.process(&mut actual), peak),
+                    1 => mixer.process_unmetered(&mut actual),
+                    _ => {
+                        let (output, b) = mixer.process_with_levels(&mut actual);
+                        assert_eq!(output, peak);
+                        assert_eq!((b.before_peak, b.before_power), input);
+                        assert_eq!((b.after_peak, b.after_power), input);
+                    }
+                }
+                assert_eq!(
+                    actual.map(|f| f.map(f32::to_bits)),
+                    expected.map(|f| f.map(f32::to_bits))
+                );
+            }
         }
     }
 

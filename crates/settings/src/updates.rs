@@ -144,7 +144,7 @@ pub(super) fn fetch(dir: &Path) -> Result<Check, CheckError> {
         .build()
         .new_agent();
     let version = match agent
-        .get("https://api.github.com/repos/sya-ri/orvia/releases/latest")
+        .get("https://api.github.com/repos/orvia-audio/orvia/releases/latest")
         .header("User-Agent", "Orvia")
         .call()
     {

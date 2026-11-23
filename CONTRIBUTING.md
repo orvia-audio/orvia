@@ -15,7 +15,7 @@ The Linux build resolves `xattr 0.2.3` through GPUI's `zed-async-tar` dependency
 
 ## UI snapshots
 
-Use the [snapshot reviewer](https://gh.s7a.dev/orvia/review/) to step through screens, pin comments and compare two commits. Review progress and comments stay in your browser. Copy or download the Markdown report to share feedback.
+Use the [snapshot reviewer](https://orvia.s7a.dev/review/) to step through screens, pin comments and compare two commits. Review progress and comments stay in your browser. Copy or download the Markdown report to share feedback.
 
 For a pull request, open the review link in its Linux CI summary, or choose **Compare → PR** and enter the PR head SHA. The viewer compares committed baselines from the merge base to the head, including fork PRs. If rendering differs from the committed baselines, the Linux check publishes the actual images in its difference artifact.
 

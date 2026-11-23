@@ -25,7 +25,7 @@ actions!(
         PreviousControl
     ]
 );
-const RELEASES: &str = "https://github.com/sya-ri/orvia/releases/latest";
+const RELEASES: &str = "https://github.com/orvia-audio/orvia/releases/latest";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Endpoint {

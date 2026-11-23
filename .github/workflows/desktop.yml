@@ -34,7 +34,7 @@ jobs:
           PR_TARGET: ${{ github.event.pull_request.base.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          echo "[Review this PR's snapshots](https://gh.s7a.dev/orvia/review/?pr=$PR_HEAD&target=$PR_TARGET&pull=$PR_NUMBER)" >> "$GITHUB_STEP_SUMMARY"
+          echo "[Review this PR's snapshots](https://orvia.s7a.dev/review/?pr=$PR_HEAD&target=$PR_TARGET&pull=$PR_NUMBER)" >> "$GITHUB_STEP_SUMMARY"
       - name: Select Rust
         run: |
           rustup toolchain install 1.93.1 --profile minimal --component clippy

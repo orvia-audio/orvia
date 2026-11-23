@@ -1,7 +1,7 @@
 import {matchingPulls, pullMergeBase} from "./pulls.mjs";
 
 const $ = id => document.getElementById(id);
-const repo = "sya-ri/orvia";
+const repo = "orvia-audio/orvia";
 const prefix = "orvia-review-v1/";
 const params = new URLSearchParams(location.search);
 const touchPreview = matchMedia("(pointer: coarse), (max-width: 830px)");

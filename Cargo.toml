@@ -14,7 +14,7 @@ tray-item = { path = "vendor/tray-item" }
 edition = "2024"
 version = "0.1.6"
 license = "MIT"
-repository = "https://github.com/sya-ri/orvia"
+repository = "https://github.com/orvia-audio/orvia"
 rust-version = "1.93"
 
 [workspace.metadata.windows-installer]

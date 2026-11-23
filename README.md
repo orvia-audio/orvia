@@ -15,11 +15,11 @@ Orvia is a desktop microphone mixer for Windows, macOS, and Linux. Reduce backgr
 
 https://github.com/user-attachments/assets/f70d9515-6fc0-45b6-9218-495529a97bc9
 
-[Compare filters on the same recording](https://gh.s7a.dev/orvia/#listen)
+[Compare filters on the same recording](https://orvia.s7a.dev/#listen)
 
 ## Getting started
 
-[Download Orvia from GitHub Releases](https://github.com/sya-ri/orvia/releases/latest)
+[Download Orvia from GitHub Releases](https://github.com/orvia-audio/orvia/releases/latest)
 
 | System | Installer | Virtual microphone |
 | --- | --- | --- |

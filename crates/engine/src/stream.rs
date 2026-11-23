@@ -38,6 +38,7 @@ struct Monitor {
 
 #[derive(Default)]
 struct Counters {
+    metering: AtomicBool,
     peak: AtomicU32,
     missing: AtomicU64,
     dropped: AtomicU64,
@@ -56,6 +57,7 @@ fn controls(settings: &Settings) -> u64 {
 }
 
 pub(super) struct Route {
+    input_channels: u16,
     controls: Arc<AtomicU64>,
     applied: Arc<AtomicU64>,
     processing: (Mixing, Option<NoiseMethod>),
@@ -107,7 +109,9 @@ impl Route {
         let applied = Arc::new(AtomicU64::new(u64::MAX));
         let acknowledged = applied.clone();
         let monitor = Monitor::default();
-        let mut processor = Processor::new(settings);
+        let input_channels = input_config.channels;
+        let mut processor = Processor::for_input(settings, input_channels);
+        let mut current_controls = None;
         let (replacements, mut next_processor) = RingBuffer::new(1);
         let (mut return_processor, retired) = RingBuffer::new(1);
         let mut block = [[0.; 2]; BLOCK];
@@ -132,23 +136,33 @@ impl Route {
                             {
                                 let old = std::mem::replace(&mut processor, next);
                                 let _ = return_processor.push(old);
+                                current_controls = None;
                             }
                             let word = live.load(Relaxed);
-                            processor.set_tone(orvia_core::Tone {
-                                low_cut_hz: word as u16,
-                                gain_percent: (word >> 16) as u16,
-                                compressor_ratio: (word >> 32) as u16,
-                            });
-                            processor.set_deep_filter_limit((word >> 48) as u16);
-                            let (peak, levels) = processor.process_with_levels(&mut block);
+                            if current_controls != Some(word) {
+                                processor.set_tone(orvia_core::Tone {
+                                    low_cut_hz: word as u16,
+                                    gain_percent: (word >> 16) as u16,
+                                    compressor_ratio: (word >> 32) as u16,
+                                });
+                                processor.set_deep_filter_limit((word >> 48) as u16);
+                                current_controls = Some(word);
+                            }
+                            if meter.metering.load(Relaxed) {
+                                let (peak, levels) = processor.process_with_levels(&mut block);
+                                let _ = envelope_tx.push((stamp, levels));
+                                meter.peak.fetch_max(peak.to_bits(), Relaxed);
+                            } else {
+                                processor.process(&mut block);
+                            }
                             spectrum_tap.capture(&block);
                             acknowledged.store(word, Relaxed);
-                            let _ = envelope_tx.push((stamp, levels));
-                            meter.peak.fetch_max(peak.to_bits(), Relaxed);
-                            for frame in block {
-                                if tx.push((frame, stamp)).is_err() {
-                                    meter.dropped.fetch_add(1, Relaxed);
-                                }
+                            let count = tx.slots().min(BLOCK);
+                            if let Ok(chunk) = tx.write_chunk_uninit(count) {
+                                chunk.fill_from_iter(block.iter().map(|&frame| (frame, stamp)));
+                            }
+                            if count < BLOCK {
+                                meter.dropped.fetch_add((BLOCK - count) as u64, Relaxed);
                             }
                         }
                     });
@@ -169,6 +183,7 @@ impl Route {
         input_stream.play()?;
         output_stream.play()?;
         Ok(Self {
+            input_channels,
             controls,
             applied,
             processing: (settings.mixing, settings.active_noise_method()),
@@ -198,13 +213,18 @@ impl Route {
             && now.saturating_sub(self.counters.played_ms.load(Relaxed)) < 2000
     }
 
-    pub(super) fn update_controls(&mut self, settings: &Settings) {
+    pub(super) fn update_controls(&mut self, settings: &Settings, observed: bool) {
+        self.counters.metering.store(observed, Relaxed);
         self.controls.store(controls(settings), Relaxed);
         let _ = self.retired.pop();
         let requested = (settings.mixing, settings.active_noise_method());
-        if self.processing != requested
+        if (self.processing.1 != requested.1
+            || (self.input_channels > 1 && self.processing.0 != requested.0))
             && !self.replacements.is_full()
-            && self.replacements.push(Processor::new(settings)).is_ok()
+            && self
+                .replacements
+                .push(Processor::for_input(settings, self.input_channels))
+                .is_ok()
         {
             self.processing = requested;
         }

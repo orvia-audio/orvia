@@ -43,7 +43,6 @@ pub(super) struct Observation {
     samples: Consumer<Frame>,
     request: Arc<AtomicBool>,
     requested_at: Option<Instant>,
-    frames: Vec<Frame>,
     analyzer: Option<Analyzer>,
     latest: Option<(Instant, Spectrum)>,
 }
@@ -62,7 +61,6 @@ impl Observation {
                 samples,
                 request,
                 requested_at: None,
-                frames: vec![[0.; 2]; WINDOW],
                 analyzer: None,
                 latest: None,
             },
@@ -73,19 +71,22 @@ impl Observation {
     pub(super) fn poll(&mut self, visible: bool) -> Option<Spectrum> {
         const FRESH: Duration = Duration::from_millis(650);
         if let Some(start) = self.requested_at
-            && self.samples.pop_entire_slice(&mut self.frames).is_ok()
+            && let Ok(chunk) = self.samples.read_chunk(WINDOW)
         {
             self.requested_at = None;
             if visible && start.elapsed() <= FRESH {
+                let (first, second) = chunk.as_slices();
                 self.latest = self
                     .analyzer
                     .get_or_insert_with(Analyzer::new)
-                    .measure(&self.frames)
+                    .measure(first.iter().chain(second))
                     .map(|s| (start, s));
             }
+            chunk.commit_all();
         }
         if !visible {
             self.latest = None;
+            self.analyzer = None;
             return None;
         }
         if self.requested_at.is_none() {
@@ -123,10 +124,17 @@ impl Analyzer {
         }
     }
 
-    fn measure(&mut self, frames: &[Frame]) -> Option<Spectrum> {
+    fn measure<'a>(&mut self, frames: impl Iterator<Item = &'a Frame> + Clone) -> Option<Spectrum> {
         self.power.fill(0.);
-        for channel in 0..2 {
-            for ((sample, frame), weight) in self.input.iter_mut().zip(frames).zip(&self.hann) {
+        let channels = if frames.clone().all(|[l, r]| l == r) {
+            1
+        } else {
+            2
+        };
+        for channel in 0..channels {
+            for ((sample, frame), weight) in
+                self.input.iter_mut().zip(frames.clone()).zip(&self.hann)
+            {
                 *sample = frame[channel] * weight;
             }
             self.plan
@@ -200,7 +208,7 @@ mod tests {
                     [left * x, right * x]
                 })
                 .collect();
-            let s = analyzer.measure(&frames).unwrap();
+            let s = analyzer.measure(frames.iter()).unwrap();
             assert!(s.peak_hz.unwrap().abs_diff(hz as u16) <= 1);
             let band = ((hz / Spectrum::MIN_HZ).log10() / 3. * Spectrum::BANDS as f32) as usize;
             assert!((72..=74).contains(&s.bands[band]), "{hz} Hz: {:?}", s.bands);
@@ -211,7 +219,7 @@ mod tests {
     fn silence_and_dc_have_no_audible_peak() {
         let mut analyzer = Analyzer::new();
         for x in [0., 0.8] {
-            let s = analyzer.measure(&vec![[x; 2]; WINDOW]).unwrap();
+            let s = analyzer.measure(vec![[x; 2]; WINDOW].iter()).unwrap();
             assert!(s.peak_hz.is_none() && s.bands.iter().all(|&b| b == 0));
         }
     }
@@ -223,7 +231,7 @@ mod tests {
             let frames: Vec<_> = (0..WINDOW)
                 .map(|i| [(TAU * hz * i as f32 / SAMPLE_RATE as f32).sin(); 2])
                 .collect();
-            let readout = analyzer.measure(&frames).unwrap().peak_hz;
+            let readout = analyzer.measure(frames.iter()).unwrap().peak_hz;
             assert!(
                 readout.is_some_and(|peak| peak.abs_diff(hz.round() as u16) <= 1),
                 "{hz} Hz: {readout:?}"
@@ -245,5 +253,6 @@ mod tests {
         tap.capture(&block);
         assert!(observation.poll(true).is_some());
         assert!(observation.poll(false).is_none());
+        assert!(observation.analyzer.is_none());
     }
 }

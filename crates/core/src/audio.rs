@@ -50,7 +50,7 @@ pub struct BlockLevels {
 }
 
 /// Compact pre-gain measurements for the settings window.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SignalHistory {
     /// Pairs of input and filtered peaks, in 1 dB steps above −60 dBFS.
     /// Each pair spans 10 ms, with the earliest pair first.
@@ -113,6 +113,17 @@ impl Processor {
     /// Allocate one denoiser per independent channel when suppression is enabled.
     /// Call on the control thread before starting the audio callback.
     pub fn new(settings: &crate::Settings) -> Self {
+        Self::for_input(settings, 2)
+    }
+
+    /// Construct a processor for a negotiated capture format. A single-channel
+    /// source must supply duplicated stereo frames and needs only one filter history.
+    /// Multichannel sources use the first two channels and the selected mixing mode.
+    pub fn for_input(settings: &crate::Settings, input_channels: u16) -> Self {
+        let mut settings = settings.clone();
+        if input_channels == 1 {
+            settings.mixing = Mixing::Average;
+        }
         let channels = if settings.mixing == Mixing::Stereo {
             2
         } else {
@@ -152,8 +163,8 @@ impl Processor {
             Some(NoiseMethod::WebRtc | NoiseMethod::Rnnoise) => 1,
         };
         Self {
-            settings: settings.clone(),
             tone: crate::tone::ToneProcessor::new(settings.tone()),
+            settings,
             filters,
             delayed_levels: vec![(0., 0.); delay_blocks].into(),
         }
@@ -164,7 +175,7 @@ impl Processor {
     /// Non-finite input becomes silence. Gain is limited to 200% and the final
     /// signal is clipped to full scale.
     pub fn process(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> f32 {
-        self.process_with_levels(frames).0
+        self.process_block::<false>(frames).0
     }
 
     /// Change linear output gain without clearing filter history. 100 means unity.
@@ -201,6 +212,13 @@ impl Processor {
     /// Process one block and return its output peak and pre-gain filter measurements.
     /// The input envelope follows each filter's delay to the nearest 10 ms.
     pub fn process_with_levels(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> (f32, BlockLevels) {
+        self.process_block::<true>(frames)
+    }
+
+    fn process_block<const METER: bool>(
+        &mut self,
+        frames: &mut [[f32; 2]; BLOCK],
+    ) -> (f32, BlockLevels) {
         for frame in frames.iter_mut() {
             for sample in frame.iter_mut() {
                 *sample = if sample.is_finite() {
@@ -214,7 +232,12 @@ impl Processor {
                 Mixing::Average => [(frame[0] + frame[1]) * 0.5; 2],
             };
         }
-        let input_levels = levels(frames);
+        // Keep the delayed input aligned if metering resumes on the next block.
+        let input_levels = if METER || !self.delayed_levels.is_empty() {
+            levels(frames)
+        } else {
+            (0., 0.)
+        };
         for (channel, filter) in self.filters.iter_mut().enumerate() {
             let mut output = [0.; BLOCK];
             match filter {
@@ -247,7 +270,7 @@ impl Processor {
         }
         let (before, after) = if let Some(before) = self.delayed_levels.pop_front() {
             self.delayed_levels.push_back(input_levels);
-            (before, levels(frames))
+            (before, if METER { levels(frames) } else { (0., 0.) })
         } else {
             (input_levels, input_levels)
         };
@@ -268,6 +291,42 @@ impl Processor {
 mod tests {
     use super::*;
     use crate::Settings;
+
+    #[test]
+    fn mono_devices_preserve_stereo_samples_and_meter_history_when_observation_resumes() {
+        for method in [
+            NoiseMethod::DeepFilterNet3,
+            NoiseMethod::Rnnoise,
+            NoiseMethod::WebRtc,
+        ] {
+            let settings = Settings {
+                noise_method: method,
+                low_cut_hz: 80,
+                deep_filter_limit_db: 12,
+                ..Default::default()
+            };
+            let mut mono = Processor::for_input(&settings, 1);
+            let mut reference = Processor::new(&settings);
+            assert_eq!(mono.filters.len(), 1);
+            for index in 0..30 {
+                let mut frames =
+                    std::array::from_fn(|i| [((index * BLOCK + i) as f32 * 0.03).sin() * 0.08; 2]);
+                let mut expected = frames;
+                let (peak, history) = reference.process_with_levels(&mut expected);
+                if index < 20 {
+                    assert_eq!(mono.process(&mut frames), peak);
+                } else {
+                    let (output, levels) = mono.process_with_levels(&mut frames);
+                    assert_eq!(output, peak);
+                    assert_eq!(
+                        (levels.before_power, levels.after_power),
+                        (history.before_power, history.after_power)
+                    );
+                }
+                assert_eq!(frames, expected);
+            }
+        }
+    }
 
     #[test]
     fn maps_channels_then_applies_gain() {

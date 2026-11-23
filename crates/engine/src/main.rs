@@ -76,6 +76,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
             break;
         }
         let now = Instant::now();
+        let observed = recently_observed(&dir.join("observe"));
         let settings = Settings::load(&dir.join("settings.json"));
         if menu(settings.as_ref().ok().map(|s| s.language)) {
             break;
@@ -149,7 +150,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     if let Some(r) = &request {
                         r.target.apply(&mut s);
                     }
-                    route.update_controls(&s);
+                    route.update_controls(&s, observed);
                     audition = request
                         .filter(|_| route.controls_applied(&s))
                         .map(|r| r.started);
@@ -169,7 +170,6 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
             last_monitor = monitor;
         }
         // Persist diagnostics only while a settings window is observing the engine.
-        let observed = recently_observed(&dir.join("observe"));
         let spectrum = running.as_mut().and_then(|route| {
             route
                 .spectrum
@@ -202,7 +202,8 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
             let _ = fs::remove_file(dir.join("status.json"));
         }
         was_observed = observed;
-        thread::sleep(Duration::from_millis(200));
+        let idle = running.is_none() && !observed;
+        thread::sleep(Duration::from_millis(if idle { 500 } else { 200 }));
     }
     log.record(EngineEvent::Stopped);
     Ok(())

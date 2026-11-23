@@ -53,13 +53,48 @@ const fn max(a: usize, b: usize) -> usize {
     }
 }
 
+/// A constant input history can be described by one sample without copying the pitch buffer.
+#[derive(PartialEq, Eq)]
+pub(crate) struct SilenceHistory {
+    sample: u32,
+    high_pass: [u32; 2],
+    pitch: (usize, u32),
+}
+
 impl DenoiseFeatures {
+    pub(crate) fn silence_history(&self) -> Option<SilenceHistory> {
+        let sample = self.input_mem[0].to_bits();
+        self.input_mem
+            .iter()
+            .all(|value| value.to_bits() == sample)
+            .then(|| SilenceHistory {
+                sample,
+                high_pass: self.mem_hp_x.map(f32::to_bits),
+                pitch: self.pitch_finder.history(),
+            })
+    }
+
+    pub(crate) fn prepare_repeated_output(&mut self) {
+        // The next identical transform overlaps with the tail just saved by frame_synthesis.
+        for (sample, tail) in self.window_buf[..FRAME_SIZE]
+            .iter_mut()
+            .zip(&self.synthesis_mem)
+        {
+            *sample += tail;
+        }
+    }
+
+    pub(crate) fn repeated_output(&self) -> &[f32] {
+        &self.window_buf[..FRAME_SIZE]
+    }
+
     pub(crate) fn copy_history_from(&mut self, source: &Self) {
         self.input_mem = source.input_mem;
         self.cepstral_mem = source.cepstral_mem;
         self.mem_id = source.mem_id;
         self.mem_hp_x = source.mem_hp_x;
         self.synthesis_mem = source.synthesis_mem;
+        self.window_buf[..FRAME_SIZE].copy_from_slice(source.repeated_output());
         self.pitch_finder.copy_history_from(&source.pitch_finder);
     }
 

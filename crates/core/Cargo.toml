@@ -16,5 +16,9 @@ sys-locale = "0.3"
 sonora = { version = "0.3.0", path = "../../vendor/sonora" }
 dfn3_rs = { version = "0.1.2", path = "../../vendor/dfn3_rs" }
 
+[dev-dependencies]
+# Independent reference for bit-exact DSP parity across target-specific FFT implementations.
+nnnoiseless-reference = { package = "nnnoiseless", version = "=0.5.2", default-features = false }
+
 [lints]
 workspace = true

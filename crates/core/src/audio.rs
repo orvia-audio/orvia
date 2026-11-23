@@ -445,6 +445,42 @@ mod tests {
     }
 
     #[test]
+    fn rnnoise_preserves_silence_tails_and_resumed_speech() {
+        let mut reference = nnnoiseless_reference::DenoiseState::new();
+        let mut actual = DenoiseState::new();
+        let mut right = DenoiseState::new();
+        for block in 0..385 {
+            let input: [f32; BLOCK] = std::array::from_fn(|i| match block {
+                0..=10 | 31..=200 | 202..=350 => 0.0,
+                201 => f32::from_bits(17),
+                351..=360 => -0.0,
+                _ => ((block * BLOCK + i) as f32 * 0.173).sin() * 32000.0,
+            });
+            if block == 194 {
+                right.copy_stream_from(&actual);
+            }
+            let mut expected = [0.0; BLOCK];
+            let expected_vad = reference.process_frame(&mut expected, &input).to_bits();
+            let check = |channel: &mut DenoiseState<'_>| {
+                let mut out = [0.0; BLOCK];
+                assert_eq!(
+                    channel.process_frame(&mut out, &input).to_bits(),
+                    expected_vad
+                );
+                assert_eq!(
+                    out.map(f32::to_bits),
+                    expected.map(f32::to_bits),
+                    "block {block}"
+                );
+            };
+            check(&mut actual);
+            if block >= 194 {
+                check(&mut right);
+            }
+        }
+    }
+
+    #[test]
     fn maps_channels_then_applies_gain() {
         for (mixing, expected) in [(Mixing::Stereo, [1., -0.5]), (Mixing::Average, [0.5; 2])] {
             let mut frames = [[0.75, -0.25]; BLOCK];

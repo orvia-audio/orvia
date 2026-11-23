@@ -35,6 +35,7 @@ use crate::{RnnModel, FRAME_SIZE, FREQ_SIZE, NB_BANDS};
 /// ```
 #[derive(Clone)]
 pub struct DenoiseState<'model> {
+    repeats_silence: bool,
     /// Most recent gains that we applied.
     lastg: [f32; crate::NB_BANDS],
     rnn: crate::rnn::RnnState<'model>,
@@ -68,6 +69,7 @@ impl<'model> DenoiseState<'model> {
     ///
     /// Call between frames when two previously identical channels first diverge.
     pub fn copy_stream_from(&mut self, source: &Self) {
+        self.repeats_silence = source.repeats_silence;
         self.lastg = source.lastg;
         self.rnn.copy_history_from(&source.rnn);
         self.feat.copy_history_from(&source.feat);
@@ -84,6 +86,7 @@ impl<'model> DenoiseState<'model> {
 
     pub(crate) fn from_model_owned(model: Cow<'model, RnnModel>) -> DenoiseState<'model> {
         DenoiseState {
+            repeats_silence: false,
             lastg: [0.0; NB_BANDS],
             rnn: crate::rnn::RnnState::new(model),
             feat: crate::features::DenoiseFeatures::new(),
@@ -101,7 +104,22 @@ impl<'model> DenoiseState<'model> {
     /// The current output of `process_frame` depends on the current input, but also on the
     /// preceding inputs. Because of this, you might prefer to discard the very first output; it
     /// will contain some fade-in artifacts.
+    ///
+    /// Consecutive all-zero frames reuse their exact overlap-add output once the filter history
+    /// stops changing. Any nonzero input immediately resumes ordinary processing.
     pub fn process_frame(&mut self, output: &mut [f32], input: &[f32]) -> f32 {
+        let digital_silence = input.len() == FRAME_SIZE && input.iter().all(|x| x.to_bits() == 0);
+        if digital_silence && self.repeats_silence {
+            output[..FRAME_SIZE].copy_from_slice(self.feat.repeated_output());
+            return 0.0;
+        }
+        self.repeats_silence = false;
+        let previous_history = if digital_silence {
+            self.feat.silence_history()
+        } else {
+            None
+        };
+
         let mut g = [0.0; NB_BANDS];
         let mut gf = [1.0; FREQ_SIZE];
         let mut vad_prob = [0.0];
@@ -121,6 +139,14 @@ impl<'model> DenoiseState<'model> {
         }
 
         self.feat.frame_synthesis(output);
+        // A silent frame leaves the cepstral and recurrent state untouched. If the input,
+        // high-pass and pitch histories also repeat exactly, future zero frames run the same
+        // transform. Save its next overlap-add result in the disposable FFT scratch.
+        if silence && previous_history.is_some() && previous_history == self.feat.silence_history()
+        {
+            self.feat.prepare_repeated_output();
+            self.repeats_silence = true;
+        }
         vad_prob[0]
     }
 }

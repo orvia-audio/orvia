@@ -4140,6 +4140,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "nnnoiseless"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "805d5964d1e7a0006a7fdced7dae75084d66d18b35f1dfe81bd76929b1f8da0c"
+dependencies = [
+ "easyfft",
+ "once_cell",
+]
+
+[[package]]
 name = "no_std_io2"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4710,7 +4720,8 @@ version = "0.1.6-snapshot.5"
 dependencies = [
  "dfn3_rs",
  "fs2",
- "nnnoiseless",
+ "nnnoiseless 0.5.2",
+ "nnnoiseless 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sonora",

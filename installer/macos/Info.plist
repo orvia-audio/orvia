@@ -6,7 +6,7 @@
     <key>CFBundleExecutable</key><string>orvia</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleIconFile</key><string>Orvia</string>
-    <key>CFBundleVersion</key><string>18</string>
+    <key>CFBundleVersion</key><string>19</string>
     <key>CFBundleShortVersionString</key><string>0.1.6</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>

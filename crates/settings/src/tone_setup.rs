@@ -2,7 +2,7 @@
 use super::*;
 use auto_adjust::Trial;
 use orvia_core::{AuditionTarget, Tone, calibration::SampleError};
-use orvia_engine::mic_test::{self, Clip, Playback, Recording, RoomRecording};
+use orvia_engine::mic_test::{self, Clip, Playback, Recording, RoomRecording, TonePreview};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 #[derive(Clone, Copy)]
@@ -14,7 +14,7 @@ pub(super) enum Action {
     Apply,
 }
 
-type Comparison = (Tone, [Clip; 2]);
+type Comparison = (Tone, [TonePreview; 2]);
 
 enum Stage {
     Intro,
@@ -204,7 +204,7 @@ impl Setup {
                     let (tx, rx) = mpsc::channel();
                     cx.background_executor()
                         .spawn(async move {
-                            let _ = tx.send(room.tone_previews(&voice, current));
+                            let _ = tx.send(room.into_tone_previews(voice, current));
                         })
                         .detach();
                     self.stage = Stage::Analyzing(rx);

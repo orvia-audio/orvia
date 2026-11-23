@@ -1,6 +1,6 @@
 //! Physical output playback for in-memory previews and disk-backed microphone tests.
 
-use super::{Clip, Frame, RECORDING_FILE, errors};
+use super::{Clip, Frame, RECORDING_FILE, TonePreview, errors};
 use crate::{
     formats::{Port, config, stream_config},
     host, is_virtual_cable,
@@ -115,6 +115,21 @@ pub(super) fn checked_reader(file: File) -> Result<Wav> {
 }
 
 impl Playback {
+    pub(super) fn from_tone(preview: &TonePreview, id: Option<&str>) -> Result<Self> {
+        let mut render = preview.clone().reader();
+        let (frames, errors) = Frames::read_ahead::<{ 4 * orvia_core::BLOCK }>(
+            orvia_core::SAMPLE_RATE,
+            move |output| Ok(render(output)),
+        )?;
+        Self::start(
+            id,
+            orvia_core::SAMPLE_RATE,
+            preview.len(),
+            frames,
+            Some(errors),
+        )
+    }
+
     pub(super) fn from_clip(clip: &Clip, id: Option<&str>) -> Result<Self> {
         Self::start(
             id,
@@ -194,12 +209,8 @@ impl Frames {
         reader: Arc<Mutex<Wav>>,
         rate: u32,
     ) -> Result<(Self, mpsc::Receiver<hound::Error>)> {
-        const CHUNK: usize = 2048;
-        let (mut tx, queue) = RingBuffer::new(CHUNK * 4);
-        let (errors, read_errors) = mpsc::channel();
         let mut position = 0;
-        let mut buffer = [[0.; 2]; CHUNK];
-        let mut read = move |buffer: &mut [Frame]| -> hound::Result<usize> {
+        Self::read_ahead::<2048>(rate, move |buffer| {
             // Rapid replays can briefly overlap the previous reader. Each reads the same open take.
             let mut reader = reader.lock().unwrap_or_else(|e| e.into_inner());
             if reader.len() as usize - reader.samples::<f32>().len() != position as usize * 2 {
@@ -220,8 +231,17 @@ impl Frames {
             }
             position += buffer.len() as u32;
             Ok(buffer.len())
-        };
-        // Prime the first callback before opening the stream. The worker owns subsequent disk I/O.
+        })
+    }
+
+    fn read_ahead<const CHUNK: usize>(
+        rate: u32,
+        mut read: impl FnMut(&mut [Frame]) -> hound::Result<usize> + Send + 'static,
+    ) -> Result<(Self, mpsc::Receiver<hound::Error>)> {
+        let (mut tx, queue) = RingBuffer::new(CHUNK * 4);
+        let (errors, read_errors) = mpsc::channel();
+        let mut buffer = [[0.; 2]; CHUNK];
+        // Prime the first callback before opening the stream. The worker prepares subsequent audio.
         let refill_interval = Duration::from_secs_f64(CHUNK as f64 / (2. * f64::from(rate)));
         let first = read(&mut buffer)?;
         tx.push_entire_slice(&buffer[..first])

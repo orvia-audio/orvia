@@ -22,6 +22,8 @@ use std::{
 mod file_recording;
 pub use file_recording::FileRecording;
 use file_recording::PendingWav;
+mod tone_preview;
+pub use tone_preview::TonePreview;
 mod room;
 pub use room::RoomRecording;
 mod playback;
@@ -358,13 +360,28 @@ impl Clip {
         phrases: [&Self; 2],
         mixing: Mixing,
     ) -> Result<Recommendation, SampleError> {
-        let room = self.model_frames();
-        let [first, second] = phrases.map(Self::model_frames);
-        calibration::recommend(&room, [&first, &second], mixing)
+        self.clone()
+            .recommend_owned(phrases.map(Clone::clone), mixing)
     }
 
-    /// Build current and recommended headphone previews from the same neutral receiver recording.
-    /// The room segment precedes the reading so low-frequency noise remains audible in the comparison.
+    /// Analyze two guided phrases, releasing each native-rate take as soon as it has been converted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sample error if the recordings cannot support a recommendation.
+    pub fn recommend_owned(
+        self,
+        [first, second]: [Self; 2],
+        mixing: Mixing,
+    ) -> Result<Recommendation, SampleError> {
+        let room = self.into_model_rate()?;
+        let first = first.into_model_rate()?;
+        let second = second.into_model_rate()?;
+        calibration::recommend(&room.frames, [&first.frames, &second.frames], mixing)
+    }
+
+    /// Render both tone settings into complete clips for callers that need the processed PCM.
+    /// For headphone playback, [`Self::into_tone_previews`] shares the neutral recording.
     ///
     /// # Errors
     ///
@@ -374,45 +391,63 @@ impl Clip {
         voice: &Self,
         current: orvia_core::Tone,
     ) -> Result<(orvia_core::Tone, [Self; 2]), SampleError> {
-        let room = self.model_frames();
-        let voice = voice.model_frames();
-        // Keep the strongest room sound near the start of each preview even when the user waits before reading.
-        let room = room::loudest_excerpt(&room);
-        let recommended = orvia_core::tone::recommend(room, &voice)?;
-        let render = |tone| {
-            let mut processor = orvia_core::tone::ToneProcessor::new(tone);
-            let gap = SAMPLE_RATE as usize / 4;
-            let mut frames = Vec::with_capacity(room.len() + gap + voice.len());
-            frames.extend_from_slice(room);
-            frames.resize(room.len() + gap, [0.; 2]);
-            frames.extend_from_slice(&voice);
-            for block in frames.chunks_mut(orvia_core::BLOCK) {
-                processor.process(block);
-            }
-            Self {
-                frames: frames.into(),
-                rate: SAMPLE_RATE,
-            }
-        };
-        let before = render(current);
+        let (recommended, [before, after]) =
+            self.clone().into_tone_previews(voice.clone(), current)?;
+        let before = before.render();
         let after = if current == recommended {
             before.clone()
         } else {
-            render(recommended)
+            after.render()
         };
         Ok((recommended, [before, after]))
     }
 
-    fn model_frames(&self) -> std::borrow::Cow<'_, [Frame]> {
+    /// Prepare current and recommended headphone previews sharing the same neutral receiver audio.
+    /// Each playback applies its tone settings to the room excerpt, a pause, and the full reading.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sample error for incomplete, clipped, or indistinct speech.
+    pub fn into_tone_previews(
+        self,
+        voice: Self,
+        current: orvia_core::Tone,
+    ) -> Result<(orvia_core::Tone, [TonePreview; 2]), SampleError> {
+        let room = {
+            let whole = self.into_model_rate()?.frames;
+            let excerpt = room::loudest_excerpt(&whole);
+            if excerpt.len() == whole.len() {
+                whole
+            } else {
+                Arc::new(excerpt.to_vec())
+            }
+        };
+        let voice = voice.into_model_rate()?.frames;
+        let recommended = orvia_core::tone::recommend(&room, &voice)?;
+        Ok((
+            recommended,
+            TonePreview::pair(room, voice, current, recommended),
+        ))
+    }
+
+    fn into_model_rate(self) -> Result<Self, SampleError> {
         if self.rate == SAMPLE_RATE {
-            return (&self.frames[..]).into();
+            return Ok(self);
         }
-        let mut rate = InputRate::new(self.rate);
+        let count =
+            (self.frames.len() as u128 * u128::from(SAMPLE_RATE)).div_ceil(u128::from(self.rate));
         let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(usize::try_from(count).map_err(|_| SampleError::Incomplete)?)
+            .map_err(|_| SampleError::Incomplete)?;
+        let mut rate = InputRate::new(self.rate);
         for &frame in self.frames.iter() {
             rate.push(frame, |f| frames.push(f));
         }
-        frames.into()
+        Ok(Self {
+            rate: SAMPLE_RATE,
+            frames: frames.into(),
+        })
     }
 
     /// Store the current take in the microphone test directory, creating it if necessary.
@@ -485,6 +520,31 @@ impl Clip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_conversion_matches_the_live_input_clock_and_reuses_native_48_khz_audio() {
+        let source = Arc::new(
+            (0..5_357)
+                .map(|i| [i as f32 * 0.001, (i as f32 * 0.02).sin()])
+                .collect::<Vec<_>>(),
+        );
+        for rate in [8_000, 32_000, 44_100, SAMPLE_RATE] {
+            let converted = Clip {
+                rate,
+                frames: source.clone(),
+            }
+            .into_model_rate()
+            .unwrap();
+            let mut live = InputRate::new(rate);
+            let mut expected = Vec::new();
+            for &frame in source.iter() {
+                live.push(frame, |f| expected.push(f));
+            }
+            assert_eq!(converted.rate, SAMPLE_RATE);
+            assert_eq!(*converted.frames, expected);
+            assert_eq!(Arc::ptr_eq(&converted.frames, &source), rate == SAMPLE_RATE);
+        }
+    }
 
     #[test]
     fn tone_previews_use_the_same_receiver_take_and_the_live_processor() {

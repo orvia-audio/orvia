@@ -197,7 +197,7 @@ impl Stage {
                 let mixing = settings.mixing;
                 cx.background_executor()
                     .spawn(async move {
-                        let _ = tx.send(room.recommend([&first, &phrase], mixing));
+                        let _ = tx.send(room.recommend_owned([first, phrase], mixing));
                     })
                     .detach();
                 Ok(Self::Analyzing(rx))

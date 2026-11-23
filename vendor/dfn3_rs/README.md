@@ -1,6 +1,6 @@
 # dfn3_rs
 
-Orvia vendors [upstream 0.1.2](https://github.com/TanixLu/dfn3_rs/tree/d65d0d12227dc8076ee9ac33b4ff52b1c2e7f1bb). Orvia processes two active channels together on AVX2 CPUs to share model weight reads. It also optimizes the portable matrix kernel, reuses identical channel histories, shares scratch buffers between non-overlapping encoder and decoder stages, and mixes delayed dry audio in blocks. The embedded model checksum is recorded in NOTICE.
+Orvia vendors [upstream 0.1.2](https://github.com/TanixLu/dfn3_rs/tree/d65d0d12227dc8076ee9ac33b4ff52b1c2e7f1bb). Orvia processes two active channels together on AVX2 CPUs to share model weight reads. It also optimizes the portable matrix kernel, reuses identical channel histories, shares scratch buffers between non-overlapping encoder and decoder stages, and mixes delayed dry audio in blocks. The five-tap deep filter keeps the original low-frequency bins while the full target spectrum is reused for synthesis. The embedded model checksum is recorded in NOTICE.
 
 A standalone Rust library for streaming speech enhancement, derived from
 [DeepFilterNet3](https://github.com/Rikorose/DeepFilterNet) and optimized for

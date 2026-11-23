@@ -34,9 +34,10 @@ pub const SAMPLE_RATE: u32 = 48_000;
 /// Samples consumed and produced per call (10 ms).
 pub const FRAME_SIZE: usize = HOP;
 /// STFT delay plus two frames of model lookahead (30 ms).
-pub const ALGORITHM_DELAY: usize = dsp::FFT - HOP + 2 * HOP;
-/// Spectra kept for deep filtering: two past, the target, and two lookahead frames.
+pub const ALGORITHM_DELAY: usize = dsp::FFT - HOP + LOOKAHEAD * HOP;
 const LOOKAHEAD: usize = 2;
+const FULL_FRAMES: usize = LOOKAHEAD + 1;
+const LOW_BAND_FRAMES: usize = DF_ORDER - LOOKAHEAD;
 const _: () = assert!(ALGORITHM_DELAY.is_multiple_of(FRAME_SIZE));
 // Drain analysis history, all DF taps and synthesis overlap before sleeping.
 const TAIL_FRAMES: usize = DF_ORDER + 1;
@@ -55,8 +56,10 @@ pub struct Denoiser {
     stft: Stft,
     features: Features,
     net: Box<Network>,
-    spectra: [[Complex32; BINS]; DF_ORDER], // oldest first; the target is LOOKAHEAD frames old
-    enhanced: [Complex32; BINS],
+    // The target becomes synthesis scratch after its original low bins have been saved.
+    spectra: [[Complex32; BINS]; FULL_FRAMES],
+    // Original low bins of the two past frames and the target, oldest first.
+    low_history: [[Complex32; NB_DF]; LOW_BAND_FRAMES],
     gains: [f32; NB_ERB],
     coefs: [f32; NB_DF * DF_ORDER * 2],
     attenuation: Ramp,
@@ -88,8 +91,8 @@ impl Denoiser {
             stft: Stft::new(),
             features: Features::new(),
             net: Box::new(Network::new(model)),
-            spectra: [[Complex32::default(); BINS]; DF_ORDER],
-            enhanced: [Complex32::default(); BINS],
+            spectra: [[Complex32::default(); BINS]; FULL_FRAMES],
+            low_history: [[Complex32::default(); NB_DF]; LOW_BAND_FRAMES],
             gains: [0.0; NB_ERB],
             coefs: [0.0; NB_DF * DF_ORDER * 2],
             attenuation: Ramp::new(1.0),
@@ -122,7 +125,9 @@ impl Denoiser {
         self.stft.copy_history_from(&source.stft);
         self.features.copy_history_from(&source.features);
         self.net.copy_history_from(&source.net);
-        self.spectra = source.spectra;
+        // Target/synthesis scratch is overwritten on the next analysis.
+        self.spectra[1..].copy_from_slice(&source.spectra[1..]);
+        self.low_history = source.low_history;
         self.attenuation = source.attenuation;
         self.recovery = source.recovery;
         self.dry = source.dry;
@@ -136,7 +141,8 @@ impl Denoiser {
         self.stft.reset();
         self.features.reset();
         self.net.reset();
-        self.spectra = [[Complex32::default(); BINS]; DF_ORDER];
+        self.spectra = [[Complex32::default(); BINS]; FULL_FRAMES];
+        self.low_history = [[Complex32::default(); NB_DF]; LOW_BAND_FRAMES];
     }
 
     /// Sets `atten-lim-db` immediately, cancelling any parameter transition.
@@ -274,13 +280,16 @@ impl Denoiser {
             self.net.df_decode(&mut self.coefs);
             self.apply_deep_filter();
         }
-        self.stft.synthesize(&mut self.enhanced, output);
+        self.stft.synthesize(&mut self.spectra[0], output);
         lsnr
     }
 
     fn analyze(&mut self, input: &[f32; FRAME_SIZE]) {
         self.spectra.copy_within(1.., 0);
-        let newest = &mut self.spectra[DF_ORDER - 1];
+        // Preserve the original low bins even when this frame skips the deep filter.
+        self.low_history.copy_within(1.., 0);
+        self.low_history[LOW_BAND_FRAMES - 1].copy_from_slice(&self.spectra[0][..NB_DF]);
+        let newest = &mut self.spectra[FULL_FRAMES - 1];
         self.stft.analyze(input, newest);
         self.features.compute(newest);
     }
@@ -293,24 +302,25 @@ impl Denoiser {
     }
 
     fn apply_mask(&mut self, lsnr: f32) {
-        let target = &self.spectra[DF_ORDER - 1 - LOOKAHEAD];
         if self.needs_mask(lsnr) {
-            let mut bins = self.enhanced.iter_mut().zip(target);
-            for (&n, &g) in self.features.erb_widths.iter().zip(&self.gains) {
-                bins.by_ref().take(n).for_each(|(e, &x)| *e = x * g);
+            let mut bins = self.spectra[0].iter_mut();
+            for (&width, &gain) in self.features.erb_widths.iter().zip(&self.gains) {
+                bins.by_ref().take(width).for_each(|bin| *bin *= gain);
             }
         } else if lsnr < self.thresholds[0] {
-            self.enhanced.fill(Complex32::default());
-        } else {
-            self.enhanced.copy_from_slice(target);
+            self.spectra[0].fill(Complex32::default());
         }
     }
 
     fn apply_deep_filter(&mut self) {
-        for (f, e) in self.enhanced[..NB_DF].iter_mut().enumerate() {
+        let [target, next, newest] = &mut self.spectra;
+        let [oldest, previous, original] = &self.low_history;
+        let taps: [&[Complex32]; DF_ORDER] =
+            [oldest, previous, original, &next[..NB_DF], &newest[..NB_DF]];
+        for (f, bin) in target[..NB_DF].iter_mut().enumerate() {
             let c = &self.coefs[f * DF_ORDER * 2..];
-            *e = (0..DF_ORDER).fold(Complex32::default(), |sum, o| {
-                sum + self.spectra[o][f] * Complex32::new(c[o * 2], c[o * 2 + 1])
+            *bin = (0..DF_ORDER).fold(Complex32::default(), |sum, o| {
+                sum + taps[o][f] * Complex32::new(c[o * 2], c[o * 2 + 1])
             });
         }
     }
@@ -380,7 +390,7 @@ impl Denoiser {
             if channel.needs_deep_filter(snr) {
                 channel.apply_deep_filter();
             }
-            channel.stft.synthesize(&mut channel.enhanced, output);
+            channel.stft.synthesize(&mut channel.spectra[0], output);
             channel.mix_dry(input, output, true);
         }
     }
@@ -398,6 +408,37 @@ fn wet_mix(db: f32) -> f32 {
 #[cfg(all(test, feature = "embedded-model"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_deep_filter_tap_reads_original_bins_after_in_place_synthesis() {
+        let mut denoiser = Denoiser::new();
+        let mut reference = Stft::new();
+        let mut full_history = [[Complex32::default(); BINS]; DF_ORDER];
+        denoiser.gains.fill(0.25);
+        for frame in 0..4 * DF_ORDER {
+            let input = std::array::from_fn(|i| ((frame * FRAME_SIZE + i) as f32 * 0.071).sin());
+            full_history.copy_within(1.., 0);
+            reference.analyze(&input, &mut full_history[DF_ORDER - 1]);
+            denoiser.analyze(&input);
+            assert_eq!(denoiser.spectra[0], full_history[DF_ORDER - 1 - LOOKAHEAD]);
+
+            // Alternate pass-through, muting and deep filtering. Each FIR tap is selected in turn.
+            let snr = [50.0, -15.0, 0.0][frame % 3];
+            denoiser.apply_mask(snr);
+            if denoiser.needs_deep_filter(snr) {
+                let tap = frame % DF_ORDER;
+                for coefs in denoiser.coefs.chunks_exact_mut(2 * DF_ORDER) {
+                    coefs.fill(0.0);
+                    coefs[2 * tap] = 1.0;
+                }
+                denoiser.apply_deep_filter();
+                assert_eq!(denoiser.spectra[0][..NB_DF], full_history[tap][..NB_DF]);
+            }
+            denoiser
+                .stft
+                .synthesize(&mut denoiser.spectra[0], &mut [0.0; FRAME_SIZE]);
+        }
+    }
 
     #[test]
     fn paired_streams_match_independent_filters_through_stage_changes_and_silence() {

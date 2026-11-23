@@ -18,7 +18,9 @@ mod state;
 pub mod tone;
 pub use tone::Tone;
 
-pub use audio::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, SignalHistory};
+pub use audio::{
+    BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, SignalHistory, SignalWindow,
+};
 pub use events::{ENGINE_LOG, ENGINE_LOG_TEXT, EngineEvent, LogEntry};
 pub use state::{
     AUDITION_FILE, Audition, AuditionTarget, EngineStatus, Language, Settings, data_dir, read_json,

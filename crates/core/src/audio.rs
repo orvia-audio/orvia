@@ -59,21 +59,89 @@ pub struct SignalHistory {
     pub attenuation_db: Option<f32>,
 }
 
+const HISTORY_BLOCKS: usize = 200;
+const ENERGY_BLOCKS: usize = 50;
+
+#[derive(Clone, Copy)]
+struct HistoryBlock {
+    peaks: [u8; 2],
+    before_power: f32,
+    after_power: f32,
+}
+
+impl From<BlockLevels> for HistoryBlock {
+    fn from(block: BlockLevels) -> Self {
+        let scale = |v: f32| (60. + 20. * v.max(0.001).log10()).clamp(0., 60.).round() as u8;
+        Self {
+            peaks: [scale(block.before_peak), scale(block.after_peak)],
+            before_power: block.before_power,
+            after_power: block.after_power,
+        }
+    }
+}
+
+/// Two seconds of metered audio, with display peaks scaled once on the control thread.
+pub struct SignalWindow {
+    blocks: std::collections::VecDeque<(u64, HistoryBlock)>,
+}
+
+impl Default for SignalWindow {
+    fn default() -> Self {
+        Self {
+            blocks: std::collections::VecDeque::with_capacity(HISTORY_BLOCKS),
+        }
+    }
+}
+
+impl SignalWindow {
+    /// Append new 10 ms blocks in capture order and expire history older than two seconds.
+    /// All timestamps are in milliseconds since the audio route started.
+    pub fn update(&mut self, now: u64, incoming: impl Iterator<Item = (u64, BlockLevels)>) {
+        for (timestamp, levels) in incoming {
+            if self.blocks.len() == HISTORY_BLOCKS {
+                self.blocks.pop_front();
+            }
+            self.blocks.push_back((timestamp, levels.into()));
+        }
+        while self
+            .blocks
+            .front()
+            .is_some_and(|(t, _)| now.saturating_sub(*t) > 2000)
+        {
+            self.blocks.pop_front();
+        }
+    }
+
+    /// Return the chronological peaks and the attenuation over the newest half second.
+    pub fn history(&self) -> SignalHistory {
+        SignalHistory::from_newest(self.blocks.iter().rev().map(|&(_, block)| block))
+    }
+}
+
 impl SignalHistory {
     /// Summarize up to two seconds of consecutive blocks without retaining PCM.
     pub fn from_blocks<'a>(blocks: impl DoubleEndedIterator<Item = &'a BlockLevels>) -> Self {
-        let mut peaks = Vec::with_capacity(200);
+        Self::from_newest(
+            blocks
+                .rev()
+                .take(HISTORY_BLOCKS)
+                .copied()
+                .map(HistoryBlock::from),
+        )
+    }
+
+    fn from_newest(blocks: impl Iterator<Item = HistoryBlock>) -> Self {
+        let mut peaks = Vec::with_capacity(blocks.size_hint().1.unwrap_or(HISTORY_BLOCKS));
         let (mut before, mut after) = (0., 0.);
-        let to_scale = |v: f32| (60. + 20. * v.max(0.001).log10()).clamp(0., 60.).round() as u8;
-        for (i, b) in blocks.rev().take(200).enumerate() {
-            peaks.push([to_scale(b.before_peak), to_scale(b.after_peak)]);
-            if i < 50 {
+        for (i, b) in blocks.enumerate() {
+            peaks.push(b.peaks);
+            if i < ENERGY_BLOCKS {
                 before += b.before_power;
                 after += b.after_power;
             }
         }
         peaks.reverse();
-        let count = peaks.len().min(50) as f32;
+        let count = peaks.len().min(ENERGY_BLOCKS) as f32;
         let attenuation_db = (count > 0. && before > 1e-8 * count)
             .then(|| 10. * (before / after.max(1e-12 * count)).log10());
         Self {
@@ -705,6 +773,44 @@ mod tests {
                 .attenuation_db
                 .is_none()
         );
+    }
+
+    #[test]
+    fn cached_history_keeps_capture_order_and_expires_only_past_two_seconds() {
+        let blocks: Vec<_> = (0..217)
+            .map(|i| {
+                let before = (i % 61) as f32 / 60.;
+                let after = before * (i % 17) as f32 / 17.;
+                BlockLevels {
+                    before_peak: before,
+                    after_peak: after,
+                    before_power: before * before,
+                    after_power: after * after,
+                }
+            })
+            .collect();
+        let mut window = SignalWindow::default();
+        for (i, &block) in blocks.iter().enumerate() {
+            let stamp = i as u64 * 10;
+            window.update(stamp, std::iter::once((stamp, block)));
+            assert_eq!(
+                window.history(),
+                SignalHistory::from_blocks(blocks[..=i].iter())
+            );
+        }
+        // At 2500 ms the block stamped 500 ms is still part of the waveform.
+        for (now, first) in [
+            (2500, 50),
+            (2501, 51),
+            (4100, 210),
+            (4160, 216),
+            (4161, 217),
+        ] {
+            window.update(now, std::iter::empty());
+            let history = window.history();
+            assert_eq!(history, SignalHistory::from_blocks(blocks[first..].iter()));
+            assert_eq!(window.history(), history);
+        }
     }
 
     #[test]

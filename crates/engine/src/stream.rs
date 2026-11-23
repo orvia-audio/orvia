@@ -4,14 +4,15 @@ use cpal::{
     Device, DeviceId, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use orvia_core::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings};
+use orvia_core::{
+    BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings, SignalWindow,
+};
 use orvia_engine::{
     formats::{InputRate, Port, config, stream_config, stream_continues},
     host, is_virtual_cable, label,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
-    collections::VecDeque,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed},
@@ -67,7 +68,7 @@ pub(super) struct Route {
     retired: Consumer<Processor>,
     incoming_levels: Consumer<(u64, BlockLevels)>,
     pub(super) spectrum: crate::spectrum::Observation,
-    levels: VecDeque<(u64, BlockLevels)>,
+    levels: SignalWindow,
     monitor: Monitor,
     output: Device,
     _streams: (Stream, Stream),
@@ -180,7 +181,7 @@ impl Route {
             retired,
             incoming_levels,
             spectrum,
-            levels: VecDeque::with_capacity(200),
+            levels: SignalWindow::default(),
             monitor,
             output,
             _streams: (input_stream, output_stream),
@@ -226,24 +227,13 @@ impl Route {
             self.processing = requested;
         }
         let now = self.start.elapsed().as_millis() as u64;
-        while let Ok(entry) = self.incoming_levels.pop() {
-            if self.levels.len() == 200 {
-                self.levels.pop_front();
-            }
-            self.levels.push_back(entry);
-        }
-        while self
-            .levels
-            .front()
-            .is_some_and(|(t, _)| now.saturating_sub(*t) > 2000)
-        {
-            self.levels.pop_front();
-        }
+        self.levels
+            .update(now, std::iter::from_fn(|| self.incoming_levels.pop().ok()));
         self.update_monitor(settings);
     }
 
     pub(super) fn envelopes(&self) -> orvia_core::SignalHistory {
-        orvia_core::SignalHistory::from_blocks(self.levels.iter().map(|(_, levels)| levels))
+        self.levels.history()
     }
 
     pub(super) fn update_monitor(&mut self, settings: &Settings) {

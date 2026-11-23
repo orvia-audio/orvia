@@ -57,6 +57,8 @@ fn controls(settings: &Settings) -> u64 {
 }
 
 pub(super) struct Route {
+    host: cpal::Host,
+    input_id: DeviceId,
     input_channels: u16,
     controls: Arc<AtomicU64>,
     applied: Arc<AtomicU64>,
@@ -69,14 +71,9 @@ pub(super) struct Route {
     monitor: Monitor,
     output: Device,
     _streams: (Stream, Stream),
-    pub(super) input_id: DeviceId,
     pub(super) name: String,
     counters: Arc<Counters>,
     start: Instant,
-}
-
-pub(super) fn default_input_id() -> Option<DeviceId> {
-    host().ok()?.default_input_device()?.id().ok()
 }
 
 impl Route {
@@ -173,6 +170,8 @@ impl Route {
         input_stream.play()?;
         output_stream.play()?;
         Ok(Self {
+            host,
+            input_id,
             input_channels,
             controls,
             applied,
@@ -186,10 +185,18 @@ impl Route {
             output,
             _streams: (input_stream, output_stream),
             counters,
-            input_id,
             name,
             start,
         })
+    }
+
+    /// Query the live host so a default-device check can reuse its sound server connection.
+    pub(super) fn default_input_changed(&self) -> bool {
+        self.host
+            .default_input_device()
+            .and_then(|device| device.id().ok())
+            .as_ref()
+            != Some(&self.input_id)
     }
 
     pub(super) fn controls_applied(&self, settings: &Settings) -> bool {

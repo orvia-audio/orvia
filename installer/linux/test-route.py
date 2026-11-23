@@ -352,6 +352,20 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     assert take.read_bytes() == second
     (state / "close-window").touch()
     assert mixer.wait(timeout=10) == 0
+    # Follow default changes through a live server connection even when both inputs stay online.
+    run("pactl", "load-module", "module-remap-source", "master=test_input.monitor",
+        "source_name=test_alternate", "source_properties=device.description=OrviaAlternate")
+    run("pactl", "set-default-source", "test_alternate")
+    set_controls(input=None)
+
+    def streaming_from(name):
+        (state / "observe-summary").touch()
+        return status.exists() and f"Streaming · {name} →" in json.loads(status.read_text())["message"]
+
+    wait_for(lambda: streaming_from("OrviaAlternate"), "The engine did not open the default input")
+    run("pactl", "set-default-source", "test_microphone")
+    mic_name = next(d["description"] for d in pulse_devices("sources") if d["name"] == "test_microphone")
+    wait_for(lambda: streaming_from(mic_name), "The engine did not follow the new default input")
     assert engine.poll() is None
     (state / f"stop-engine-{engine.pid}").touch()
     assert engine.wait(timeout=10) == 0

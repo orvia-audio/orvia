@@ -127,7 +127,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     last_default_check = now;
                     running
                         .as_ref()
-                        .is_some_and(|r| Some(&r.input_id) != stream::default_input_id().as_ref())
+                        .is_some_and(stream::Route::default_input_changed)
                 } else {
                     false
                 };

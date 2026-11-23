@@ -632,13 +632,14 @@ impl AudioProcessingImpl {
             hpf.process(capture_buffer, true);
         }
 
-        // Phase 6: Noise suppression analysis (before echo cancellation).
-        if !self
-            .config
-            .noise_suppression
-            .as_ref()
-            .is_some_and(|ns| ns.analyze_linear_aec_output_when_available)
-        {
+        // Analyze separately when echo cancellation will change the signal before suppression.
+        let analyze_before_echo = self.submodules.echo_controller.is_some()
+            && !self
+                .config
+                .noise_suppression
+                .as_ref()
+                .is_some_and(|ns| ns.analyze_linear_aec_output_when_available);
+        if analyze_before_echo {
             for (ch, ns) in self.submodules.noise_suppressors.iter_mut().enumerate() {
                 let capture_buffer = self.capture.capture_audio.as_ref().unwrap();
                 let band0 = capture_buffer.split_band(ch, 0);
@@ -659,29 +660,17 @@ impl AudioProcessingImpl {
             ec.process_capture(capture_buffer, None, echo_path_gain_change);
         }
 
-        // Phase 7b: NS analysis on linear AEC output (if configured).
-        if self
-            .config
-            .noise_suppression
-            .as_ref()
-            .is_some_and(|ns| ns.analyze_linear_aec_output_when_available)
-        {
-            for (ch, ns) in self.submodules.noise_suppressors.iter_mut().enumerate() {
-                let capture_buffer = self.capture.capture_audio.as_ref().unwrap();
-                let band0 = capture_buffer.split_band(ch, 0);
-                if let Ok(frame) = <&[f32; 160]>::try_from(band0) {
-                    ns.analyze(frame);
-                }
-            }
-        }
-
-        // Phase 7c: Noise suppression processing.
+        // Noise suppression uses the current capture signal unless it was analyzed before AEC.
         // Process band 0 for each channel (updates Wiener filter + computes upper band gain).
         for (ch, ns) in self.submodules.noise_suppressors.iter_mut().enumerate() {
             let capture_buffer = self.capture.capture_audio.as_mut().unwrap();
             let band0 = capture_buffer.split_band_mut(ch, 0);
             if let Ok(frame) = <&mut [f32; 160]>::try_from(band0) {
-                ns.process(frame);
+                if analyze_before_echo {
+                    ns.process(frame);
+                } else {
+                    ns.analyze_and_process(frame);
+                }
             }
         }
 

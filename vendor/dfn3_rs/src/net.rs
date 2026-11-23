@@ -114,13 +114,10 @@ pub(crate) struct Network {
     emb: [f32; 512],
     tmp: [f32; NB_DF * C],
     tmp2: [f32; 32 * C],
-    c1: [f32; 48 * C],
     v512: [f32; 512],
     v256: [f32; 256],
     gi: [f32; 768],
     gh: [f32; 768],
-    convp: [f32; NB_DF * 16],
-    df_out: [f32; 15 * 60 + 64],
 }
 
 /// Depthwise 1x3 conv over frequency, zero padded: `out[f] = Σ_k w[k] * x[f*stride + k - 1]`.
@@ -191,13 +188,10 @@ impl Network {
             emb: [0.0; 512],
             tmp: [0.0; NB_DF * C],
             tmp2: [0.0; 32 * C],
-            c1: [0.0; 48 * C],
             v512: [0.0; 512],
             v256: [0.0; 256],
             gi: [0.0; 768],
             gh: [0.0; 768],
-            convp: [0.0; NB_DF * 16],
-            df_out: [0.0; 15 * 60 + 64],
         }
     }
 
@@ -431,22 +425,24 @@ impl Network {
             c0,
             C,
         );
-        depthwise(c0, NB_DF, w.df1.taps, 2, &mut self.tmp);
+        // The stride-two layer halves the row count, so its input and output fit together.
+        let (df1_input, c1) = self.tmp.split_at_mut(NB_DF / 2 * C);
+        depthwise(c0, NB_DF, w.df1.taps, 2, df1_input);
         s.gemm(
-            48,
-            &self.tmp,
+            NB_DF / 2,
+            df1_input,
             C,
             &w.df1.mat,
             Some(w.df1.bias),
             false,
             true,
-            &mut self.c1,
+            c1,
             C,
         );
 
         // Embedding: e3 (flattened [F][C]) + relu(df_fc_emb(c1)), then the squeezed GRU.
         self.emb.copy_from_slice(&self.e3);
-        Self::grouped(s, &w.df_fc_emb, &self.c1, &mut self.v512, 16, false, true);
+        Self::grouped(s, &w.df_fc_emb, c1, &mut self.v512, 16, false, true);
         self.emb
             .iter_mut()
             .zip(&self.v512)
@@ -557,19 +553,17 @@ impl Network {
             );
         }
         let ready = &mut self.pending[self.c0_head];
-        for (i, out) in self.convp.iter_mut().enumerate() {
-            *out = (ready[i] + bias[i % 16]).max(0.0);
+        // Groups are written in ascending order; each overwrites the previous group's padding.
+        // The preceding convolutions have finished. Reuse their scratch for the padded output.
+        let df_out = &mut self.tmp;
+        Self::grouped(s, &w.df_out, &self.v256, df_out, 60, false, false);
+        s.tanh(&mut df_out[..NB_DF * 10]);
+        for (f, c) in coefs.as_chunks_mut::<10>().0.iter_mut().enumerate() {
+            for (j, c) in c.iter_mut().enumerate() {
+                *c = df_out[f * 10 + j] + (ready[f * 16 + j] + bias[j]).max(0.0);
+            }
         }
         ready.fill(0.0);
         self.c0_head = (self.c0_head + 1) % DF_ORDER;
-
-        // Groups are written in ascending order; each overwrites the previous group's padding.
-        Self::grouped(s, &w.df_out, &self.v256, &mut self.df_out, 60, false, false);
-        s.tanh(&mut self.df_out[..NB_DF * 10]);
-        for (f, c) in coefs.as_chunks_mut::<10>().0.iter_mut().enumerate() {
-            for (j, c) in c.iter_mut().enumerate() {
-                *c = self.df_out[f * 10 + j] + self.convp[f * 16 + j];
-            }
-        }
     }
 }

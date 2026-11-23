@@ -170,7 +170,8 @@ enum Filter {
 /// Construct a fresh processor after a discontinuity to discard model history.
 /// Mono sources duplicate each sample into both channels. See the [crate example](crate).
 pub struct Processor {
-    settings: crate::Settings,
+    mixing: Mixing,
+    deep_filter_limit_db: u16,
     filters: Vec<Filter>,
     linked_stereo: bool,
     tone: crate::tone::ToneProcessor,
@@ -188,15 +189,12 @@ impl Processor {
     /// source must supply duplicated stereo frames and needs only one filter history.
     /// Multichannel sources use the first two channels and the selected mixing mode.
     pub fn for_input(settings: &crate::Settings, input_channels: u16) -> Self {
-        let mut settings = settings.clone();
-        if input_channels == 1 {
-            settings.mixing = Mixing::Average;
-        }
-        let channels = if settings.mixing == Mixing::Stereo {
-            2
+        let mixing = if input_channels == 1 {
+            Mixing::Average
         } else {
-            1
+            settings.mixing
         };
+        let channels = if mixing == Mixing::Stereo { 2 } else { 1 };
         let filters = if settings.suppress_noise {
             (0..channels)
                 .map(|_| match settings.noise_method {
@@ -220,7 +218,8 @@ impl Processor {
         Self {
             tone: crate::tone::ToneProcessor::new(settings.tone()),
             linked_stereo: channels == 2 && settings.suppress_noise,
-            settings,
+            mixing,
+            deep_filter_limit_db: settings.deep_filter_limit_db,
             filters,
             delayed_levels: vec![(0., 0.); delay_blocks].into(),
         }
@@ -244,23 +243,22 @@ impl Processor {
     pub fn set_gain(&mut self, percent: u16) {
         self.set_tone(crate::Tone {
             gain_percent: percent,
-            ..self.settings.tone()
+            ..self.tone.settings()
         });
     }
 
     /// Update output processing at a block boundary while preserving noise filter history.
     pub fn set_tone(&mut self, tone: crate::Tone) {
-        self.settings.set_tone(tone);
         self.tone.configure(tone);
     }
 
     /// Ramp DeepFilterNet3 to a new attenuation limit over 20 ms while preserving
     /// its history and delay. Call between blocks. Other filters ignore the limit.
     pub fn set_deep_filter_limit(&mut self, db: u16) {
-        if db == self.settings.deep_filter_limit_db {
+        if db == self.deep_filter_limit_db {
             return;
         }
-        self.settings.deep_filter_limit_db = db;
+        self.deep_filter_limit_db = db;
         for filter in &mut self.filters {
             if let Filter::DeepFilterNet3(denoiser) = filter {
                 denoiser.set_attenuation_limit_smooth(
@@ -289,7 +287,7 @@ impl Processor {
                     0.
                 };
             }
-            *frame = match self.settings.mixing {
+            *frame = match self.mixing {
                 Mixing::Stereo => *frame,
                 Mixing::Average => [(frame[0] + frame[1]) * 0.5; 2],
             };
@@ -317,6 +315,8 @@ impl Processor {
             } else {
                 input_levels.0
             }
+        } else if self.mixing == Mixing::Average {
+            self.tone.process_channels::<OUTPUT_PEAK, true>(frames)
         } else {
             self.tone.process_block::<OUTPUT_PEAK>(frames)
         };
@@ -357,7 +357,7 @@ impl Processor {
             }
             return;
         }
-        let mirror = self.linked_stereo || self.settings.mixing != Mixing::Stereo;
+        let mirror = self.linked_stereo || self.mixing != Mixing::Stereo;
         for (channel, filter) in self
             .filters
             .iter_mut()

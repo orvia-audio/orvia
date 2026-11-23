@@ -22,6 +22,8 @@ use std::{
 mod file_recording;
 pub use file_recording::FileRecording;
 use file_recording::PendingWav;
+mod room;
+pub use room::RoomRecording;
 mod playback;
 pub use playback::{Playback, SavedClip};
 use playback::{checked_reader, latest_path};
@@ -224,6 +226,27 @@ impl Recording {
     ///
     /// Reports device loss, queue overflow or insufficient memory for the take.
     pub fn collect(&mut self) -> Result<&[[f32; 2]]> {
+        let count = self.pending()?;
+        if count > 0 {
+            self.frames.try_reserve(count)?;
+            self.frames.extend(self.rx.read_chunk(count)?);
+        }
+        Ok(&self.frames)
+    }
+
+    fn drain(&mut self, mut consume: impl FnMut(&[Frame]) -> Result<()>) -> Result<()> {
+        let count = self.pending()?;
+        if count > 0 {
+            let chunk = self.rx.read_chunk(count)?;
+            let (first, second) = chunk.as_slices();
+            consume(first)?;
+            consume(second)?;
+            chunk.commit_all();
+        }
+        Ok(())
+    }
+
+    fn pending(&self) -> Result<usize> {
         if let Some(e) = self.error() {
             return Err(e.into());
         }
@@ -232,11 +255,7 @@ impl Recording {
             count < self.rx.buffer().capacity(),
             "The recording device queue overflowed"
         );
-        if count > 0 {
-            self.frames.try_reserve(count)?;
-            self.frames.extend(self.rx.read_chunk(count)?);
-        }
-        Ok(&self.frames)
+        Ok(count)
     }
 
     /// Discard analyzed frames from the beginning of a take, keeping the active input stream open.
@@ -358,20 +377,7 @@ impl Clip {
         let room = self.model_frames();
         let voice = voice.model_frames();
         // Keep the strongest room sound near the start of each preview even when the user waits before reading.
-        let room_window = 2 * SAMPLE_RATE as usize;
-        let loudest = room
-            .chunks(orvia_core::BLOCK)
-            .enumerate()
-            .max_by(|(_, a), (_, b)| {
-                let energy =
-                    |block: &[[f32; 2]]| block.iter().flatten().map(|s| s * s).sum::<f32>();
-                energy(a).total_cmp(&energy(b))
-            })
-            .map_or(0, |(i, _)| i * orvia_core::BLOCK);
-        let start = loudest
-            .saturating_sub(room_window / 2)
-            .min(room.len().saturating_sub(room_window));
-        let room = &room[start..(start + room_window).min(room.len())];
+        let room = room::loudest_excerpt(&room);
         let recommended = orvia_core::tone::recommend(room, &voice)?;
         let render = |tone| {
             let mut processor = orvia_core::tone::ToneProcessor::new(tone);
@@ -447,7 +453,7 @@ impl Clip {
     ///
     /// Returns an error for unreadable, malformed, truncated or unsupported recordings.
     pub fn load(path: &Path) -> Result<Self> {
-        let mut reader = checked_reader(path)?;
+        let mut reader = checked_reader(std::fs::File::open(path)?)?;
         let spec = reader.spec();
         let mut frames = Vec::new();
         frames.try_reserve_exact(reader.duration() as usize)?;

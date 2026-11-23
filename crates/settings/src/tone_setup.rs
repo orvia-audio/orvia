@@ -2,7 +2,7 @@
 use super::*;
 use auto_adjust::Trial;
 use orvia_core::{AuditionTarget, Tone, calibration::SampleError};
-use orvia_engine::mic_test::{self, Clip, Playback, Recording};
+use orvia_engine::mic_test::{self, Clip, Playback, Recording, RoomRecording};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 #[derive(Clone, Copy)]
@@ -19,7 +19,7 @@ type Comparison = (Tone, [Clip; 2]);
 enum Stage {
     Intro,
     Opening,
-    Room(Recording, Instant),
+    Room(RoomRecording, Instant),
     Reading(Clip, Recording, reading::Reader),
     Analyzing(Receiver<Result<Comparison, SampleError>>),
     Ready(Comparison),
@@ -172,7 +172,7 @@ impl Setup {
         match &mut self.stage {
             Stage::Opening => {
                 self.stage = Stage::Room(
-                    Recording::start(&self.receiver).map_err(audio_error)?,
+                    RoomRecording::start(&self.receiver).map_err(audio_error)?,
                     Instant::now(),
                 );
             }

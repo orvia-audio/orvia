@@ -1,6 +1,6 @@
 //! Session-scoped controls for recording and replaying the virtual microphone.
 use super::*;
-use orvia_engine::mic_test::{self, Clip, FileRecording, Playback, SavedClip};
+use orvia_engine::mic_test::{self, FileRecording, Playback, SavedClip};
 
 /// The operation shown on a microphone test button when it was rendered.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -24,28 +24,6 @@ impl TestAction {
     }
 }
 
-pub(super) enum Take {
-    Saved(SavedClip),
-    Preview(Clip),
-}
-
-impl Take {
-    pub(super) fn duration(&self) -> Duration {
-        match self {
-            Self::Saved(saved) => saved.duration(),
-            Self::Preview(clip) => clip.duration(),
-        }
-    }
-
-    fn play(&self, id: Option<&str>) -> Result<Playback, String> {
-        match self {
-            Self::Saved(saved) => saved.play(id),
-            Self::Preview(clip) => clip.play(id),
-        }
-        .map_err(|e| e.to_string())
-    }
-}
-
 #[derive(Default)]
 pub(super) struct MicTest {
     pub(super) sources: Vec<(String, String)>,
@@ -53,7 +31,7 @@ pub(super) struct MicTest {
     pub(super) speaker: Option<String>,
     pub(super) recording: Option<FileRecording>,
     pub(super) reader: reading::Reader,
-    pub(super) clip: Option<Take>,
+    pub(super) clip: Option<SavedClip>,
     pub(super) playback: Option<Playback>,
     pub(super) adjust: Option<super::auto_adjust::AutoAdjust>,
     #[cfg(test)]
@@ -99,7 +77,7 @@ impl Panel {
         self.test.source = mic_test::routed_source(&self.prefs).ok();
         self.test.speaker = self.prefs.monitor.clone();
         match SavedClip::latest(&self.dir.join("mic-test")) {
-            Ok(clip) => self.test.clip = clip.map(Take::Saved),
+            Ok(clip) => self.test.clip = clip,
             Err(error) => self.test_error(error),
         }
     }
@@ -148,7 +126,7 @@ impl Panel {
         };
         self.test.recording_route = None;
         match recording.finish() {
-            Ok(clip) => self.test.clip = Some(Take::Saved(clip)),
+            Ok(clip) => self.test.clip = Some(clip),
             Err(e) => self.test_error(e),
         }
     }

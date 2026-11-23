@@ -12,6 +12,7 @@ use cpal::{
 };
 use rtrb::{Consumer, RingBuffer};
 use std::{
+    fs::File,
     io::{BufReader, Seek},
     path::{Path, PathBuf},
     sync::{
@@ -39,8 +40,17 @@ impl SavedClip {
         latest_path(dir)?.map(|path| Self::open(&path)).transpose()
     }
 
-    pub(super) fn open(path: &Path) -> Result<Self> {
-        let reader = checked_reader(path)?;
+    /// Open the header of a saved stereo float WAV for buffered playback.
+    ///
+    /// # Errors
+    ///
+    /// Reports an inaccessible file or an unsupported recording.
+    pub fn open(path: &Path) -> Result<Self> {
+        Self::from_file(File::open(path)?)
+    }
+
+    pub(super) fn from_file(file: File) -> Result<Self> {
+        let reader = checked_reader(file)?;
         Ok(Self {
             frames: reader.duration(),
             rate: reader.spec().sample_rate,
@@ -84,8 +94,9 @@ pub(super) fn latest_path(dir: &Path) -> Result<Option<PathBuf>> {
 
 type Wav = hound::WavReader<BufReader<std::fs::File>>;
 
-pub(super) fn checked_reader(path: &Path) -> Result<Wav> {
-    let mut file = BufReader::new(std::fs::File::open(path)?);
+pub(super) fn checked_reader(file: File) -> Result<Wav> {
+    let mut file = BufReader::new(file);
+    file.rewind()?;
     let (spec, frames) = {
         let header = hound::WavReader::new(&mut file)?;
         (header.spec(), header.duration())
@@ -377,6 +388,43 @@ mod tests {
             SavedClip::latest(dir.path()).unwrap().unwrap().duration(),
             saved.duration()
         );
+    }
+
+    #[test]
+    fn anonymous_preview_survives_replay_without_replacing_the_saved_take() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = Clip {
+            rate: 48_000,
+            frames: vec![[0.22, -0.15]; 25].into(),
+        };
+        original.save_latest(dir.path()).unwrap();
+        let frames: Vec<Frame> = (0..16_223).map(|i| [i as f32 / 32_000., -0.02]).collect();
+        let mut wav = super::super::file_recording::PendingWav::preview(48_000).unwrap();
+        for chunk in frames.chunks(397) {
+            wav.append(chunk).unwrap();
+        }
+        let clip = wav.publish(SavedClip::from_file).unwrap();
+        let (mut first, _) = Frames::buffered(clip.reader.clone(), clip.rate).unwrap();
+        let (mut replay, _) = Frames::buffered(clip.reader.clone(), clip.rate).unwrap();
+        drop(clip);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        for i in 0..frames.len() {
+            for stream in [&mut first, &mut replay] {
+                let pair = loop {
+                    if let Some(pair) = stream.pair(i, frames.len()) {
+                        break pair;
+                    }
+                    assert!(std::time::Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                assert_eq!(pair, [frames[i], frames[(i + 1).min(frames.len() - 1)]]);
+            }
+        }
+        assert_eq!(
+            Clip::load_latest(dir.path()).unwrap().unwrap().frames,
+            original.frames
+        );
+        assert_eq!(dir.path().read_dir().unwrap().count(), 1);
     }
 
     #[test]

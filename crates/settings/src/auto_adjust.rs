@@ -5,7 +5,7 @@ use orvia_core::{
     calibration::{Recommendation, SampleError},
     write_json,
 };
-use orvia_engine::mic_test::{self, Clip, Recording};
+use orvia_engine::mic_test::{self, Clip, FileRecording, Recording, SavedClip};
 use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
     time::SystemTime,
@@ -23,13 +23,13 @@ pub(super) enum Stage {
     Auditioning {
         result: Recommendation,
         trial: Trial,
-        recording: Option<Box<(Recording, Recording)>>,
+        recording: Option<Box<(Recording, FileRecording)>>,
         reader: reading::Reader,
         ending: Option<Instant>,
     },
     Restoring {
         result: Recommendation,
-        clip: Clip,
+        clip: SavedClip,
         issued: SystemTime,
         since: Instant,
     },
@@ -245,7 +245,7 @@ impl Stage {
                     Some(_) if !acknowledged => return Err(changed(l)),
                     Some(mut streams) => {
                         let (microphone, receiver) = &mut *streams;
-                        receiver.collect().map_err(|e| e.to_string())?;
+                        receiver.drain().map_err(|e| e.to_string())?;
                         if let Some(stop) = ending {
                             if stop.elapsed() >= Duration::from_millis(350) {
                                 let (_, receiver) = *streams;
@@ -269,7 +269,8 @@ impl Stage {
                         Some(streams)
                     }
                     None if acknowledged => {
-                        let receiver = Recording::start(source).map_err(|e| e.to_string())?;
+                        let receiver =
+                            FileRecording::start_preview(source).map_err(|e| e.to_string())?;
                         let microphone = Recording::start_microphone(settings.input.as_deref())
                             .map_err(|e| e.to_string())?;
                         Some(Box::new((microphone, receiver)))
@@ -301,7 +302,7 @@ impl Stage {
                     .as_ref()
                     .is_some_and(|s| s.audition != Some(issued))
                 {
-                    panel.test.clip = Some(microphone_test::Take::Preview(clip));
+                    panel.test.clip = Some(clip);
                     panel.play_test();
                     Ok(Self::Ready(result))
                 } else if since.elapsed() > Duration::from_secs(4) {

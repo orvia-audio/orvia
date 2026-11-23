@@ -10,8 +10,8 @@ use std::{
 
 pub(super) struct PendingWav {
     writer: hound::WavWriter<BufWriter<File>>,
-    temporary: tempfile::TempPath,
-    destination: PathBuf,
+    reader: File,
+    replacement: Option<(tempfile::TempPath, PathBuf)>,
 }
 
 impl PendingWav {
@@ -19,6 +19,18 @@ impl PendingWav {
         let (file, temporary) =
             tempfile::NamedTempFile::new_in(path.parent().context("Missing recording directory")?)?
                 .into_parts();
+        Self::with_file(file, Some((temporary, path.to_owned())), rate)
+    }
+
+    pub(super) fn preview(rate: u32) -> Result<Self> {
+        Self::with_file(tempfile::tempfile()?, None, rate)
+    }
+
+    fn with_file(
+        file: File,
+        replacement: Option<(tempfile::TempPath, PathBuf)>,
+        rate: u32,
+    ) -> Result<Self> {
         let spec = hound::WavSpec {
             channels: 2,
             sample_rate: rate,
@@ -26,9 +38,9 @@ impl PendingWav {
             sample_format: hound::SampleFormat::Float,
         };
         Ok(Self {
-            writer: hound::WavWriter::new(BufWriter::new(file), spec)?,
-            temporary,
-            destination: path.to_owned(),
+            writer: hound::WavWriter::new(BufWriter::new(file.try_clone()?), spec)?,
+            reader: file,
+            replacement,
         })
     }
 
@@ -45,12 +57,15 @@ impl PendingWav {
         Ok(())
     }
 
-    pub(super) fn publish<T>(self, open: impl FnOnce(&Path) -> Result<T>) -> Result<T> {
+    pub(super) fn publish<T>(self, open: impl FnOnce(File) -> Result<T>) -> Result<T> {
         self.writer.finalize()?;
-        let value = open(&self.temporary)?;
+        let value = open(self.reader)?;
+        let Some((temporary, destination)) = self.replacement else {
+            return Ok(value);
+        };
         // Windows permits this rename while another window is playing the old file.
-        let staging = self.temporary.keep()?;
-        if let Err(error) = std::fs::rename(&staging, self.destination) {
+        let staging = temporary.keep()?;
+        if let Err(error) = std::fs::rename(&staging, destination) {
             let _ = std::fs::remove_file(staging);
             return Err(error.into());
         }
@@ -78,6 +93,18 @@ impl FileRecording {
         Ok(Self { capture, take })
     }
 
+    /// Record the virtual microphone for replay during the current session.
+    /// The OS removes the temporary audio after the last reader closes.
+    ///
+    /// # Errors
+    ///
+    /// Reports capture device or temporary file creation failures.
+    pub fn start_preview(id: &str) -> Result<Self> {
+        let capture = Recording::start(id)?;
+        let take = PendingWav::preview(capture.rate)?;
+        Ok(Self { capture, take })
+    }
+
     /// Sample rate of the recording device in Hz.
     pub fn rate(&self) -> u32 {
         self.capture.rate
@@ -101,6 +128,16 @@ impl FileRecording {
         Ok(frames)
     }
 
+    /// Write the device queue directly to disk when another stream supplies speech detection.
+    ///
+    /// # Errors
+    ///
+    /// Reports capture errors, a full device queue or a failed disk write.
+    pub fn drain(&mut self) -> Result<()> {
+        self.capture.frames.clear();
+        self.capture.drain(|frames| self.take.append(frames))
+    }
+
     /// Remove analyzed frames from memory. The WAV keeps every sample returned by collect.
     pub fn discard_prefix(&mut self, count: usize) -> usize {
         self.capture.discard_prefix(count)
@@ -120,7 +157,7 @@ impl FileRecording {
             "The microphone returned no audio frames"
         );
         // Open the completed inode before another window can replace the destination.
-        self.take.publish(SavedClip::open)
+        self.take.publish(SavedClip::from_file)
     }
 }
 
@@ -136,7 +173,7 @@ mod tests {
         let mut tx = PendingWav::new(&path, 48_000).unwrap();
         tx.append(&[[0.2, 0.1]]).unwrap();
         tx.append(&[[-0.5, 0.3], [0., -0.25]]).unwrap();
-        let clip = tx.publish(SavedClip::open).unwrap();
+        let clip = tx.publish(SavedClip::from_file).unwrap();
         assert_eq!(clip.duration(), Duration::from_secs_f64(3. / 48_000.));
         let original = Clip::load(&path).unwrap();
         for cancel in [true, false] {

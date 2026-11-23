@@ -105,6 +105,7 @@ enum Filter {
 pub struct Processor {
     settings: crate::Settings,
     filters: Vec<Filter>,
+    linked_stereo: bool,
     tone: crate::tone::ToneProcessor,
     delayed_levels: std::collections::VecDeque<(f32, f32)>,
 }
@@ -164,6 +165,8 @@ impl Processor {
         };
         Self {
             tone: crate::tone::ToneProcessor::new(settings.tone()),
+            linked_stereo: channels == 2
+                && settings.active_noise_method() == Some(NoiseMethod::DeepFilterNet3),
             settings,
             filters,
             delayed_levels: vec![(0., 0.); delay_blocks].into(),
@@ -244,7 +247,52 @@ impl Processor {
         } else {
             (0., 0.)
         };
-        for (channel, filter) in self.filters.iter_mut().enumerate() {
+        self.suppress(frames);
+        let (before, after) = if let Some(before) = self.delayed_levels.pop_front() {
+            self.delayed_levels.push_back(input_levels);
+            (before, if METER { levels(frames) } else { (0., 0.) })
+        } else {
+            (input_levels, input_levels)
+        };
+        let peak = self.tone.process_block::<OUTPUT_PEAK>(frames);
+        (
+            peak,
+            BlockLevels {
+                before_peak: before.0,
+                before_power: before.1,
+                after_peak: after.0,
+                after_power: after.1,
+            },
+        )
+    }
+
+    fn suppress(&mut self, frames: &mut [[f32; 2]; BLOCK]) {
+        // Identical stereo input has identical recurrent history until the first differing sample.
+        // Once split, equal samples alone cannot establish that the two histories match again.
+        if let [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] =
+            self.filters.as_mut_slice()
+        {
+            if self.linked_stereo && frames.iter().any(|[l, r]| l.to_bits() != r.to_bits()) {
+                right.copy_stream_from(left);
+                self.linked_stereo = false;
+            }
+            if !self.linked_stereo {
+                let inputs = std::array::from_fn(|ch| std::array::from_fn(|i| frames[i][ch]));
+                let mut outputs = [[0.; BLOCK]; 2];
+                dfn3_rs::Denoiser::process_pair(left, right, &inputs, &mut outputs);
+                for (i, frame) in frames.iter_mut().enumerate() {
+                    *frame = [outputs[0][i], outputs[1][i]];
+                }
+                return;
+            }
+        }
+        let mirror = self.linked_stereo || self.settings.mixing != Mixing::Stereo;
+        for (channel, filter) in self
+            .filters
+            .iter_mut()
+            .take(if mirror { 1 } else { 2 })
+            .enumerate()
+        {
             let mut output = [0.; BLOCK];
             match filter {
                 Filter::Rnnoise(f) => {
@@ -269,27 +317,11 @@ impl Processor {
             }
             for (frame, sample) in frames.iter_mut().zip(output) {
                 frame[channel] = sample;
-                if self.settings.mixing != Mixing::Stereo {
+                if mirror {
                     frame[1] = frame[0];
                 }
             }
         }
-        let (before, after) = if let Some(before) = self.delayed_levels.pop_front() {
-            self.delayed_levels.push_back(input_levels);
-            (before, if METER { levels(frames) } else { (0., 0.) })
-        } else {
-            (input_levels, input_levels)
-        };
-        let peak = self.tone.process_block::<OUTPUT_PEAK>(frames);
-        (
-            peak,
-            BlockLevels {
-                before_peak: before.0,
-                before_power: before.1,
-                after_peak: after.0,
-                after_power: after.1,
-            },
-        )
     }
 }
 
@@ -332,6 +364,45 @@ mod tests {
                     );
                 }
                 assert_eq!(frames, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn identical_stereo_can_split_during_a_ramp_and_resume_independent_speech() {
+        for split in [0_usize, 11, 20, 31, 45] {
+            let settings = Settings {
+                deep_filter_limit_db: 12,
+                ..Settings::default()
+            };
+            let mut linked = Processor::new(&settings);
+            let mut independent = Processor::new(&settings);
+            independent.linked_stereo = false;
+            for n in 0..64 {
+                if n == split.saturating_sub(1_usize) {
+                    linked.set_deep_filter_limit(35);
+                    independent.set_deep_filter_limit(35);
+                }
+                let mut frame = std::array::from_fn(|i| {
+                    let left = if (10..28).contains(&n) {
+                        0.
+                    } else {
+                        ((n * BLOCK + i) as f32 * 0.055).sin() * 0.1
+                    };
+                    let right = if n == split && i == BLOCK - 1 {
+                        left + 0.002
+                    } else {
+                        left
+                    };
+                    [left, right]
+                });
+                let mut expected = frame;
+                independent.process_unmetered(&mut expected);
+                linked.process_unmetered(&mut frame);
+                assert_eq!(linked.linked_stereo, n < split);
+                for (i, (actual, expected)) in frame.iter().zip(expected).enumerate() {
+                    assert_eq!(*actual, expected, "split at {split}, block {n}, sample {i}");
+                }
             }
         }
     }

@@ -163,8 +163,10 @@ pub fn recommend(
     }
     let mut blocks = vec![Energy::default(); second.end];
     let channels = if mixing == Mixing::Stereo { 2 } else { 1 };
+    // The complete guide is available here, so identical stereo channels need only one inference pass.
+    let duplicate = channels == 2 && chunks().flatten().all(|f| f[0].to_bits() == f[1].to_bits());
     let delay = dfn3_rs::ALGORITHM_DELAY / BLOCK;
-    for ch in 0..channels {
+    for ch in 0..if duplicate { 1 } else { channels } {
         let sample = |frame: &[f32; 2]| match mixing {
             Mixing::Stereo => frame[ch],
             Mixing::Average => (frame[0] + frame[1]) * 0.5,
@@ -184,11 +186,14 @@ pub fn recommend(
             if i >= delay
                 && let Some((dry, energy)) = aligned.next()
             {
-                for (frame, wet) in dry.iter().zip(enhanced) {
-                    let (a, b) = (f64::from(sample(frame)), f64::from(wet));
-                    energy.dry += a * a;
-                    energy.wet += b * b;
-                    energy.cross += a * b;
+                // Preserve the original order of f64 additions at recommendation thresholds.
+                for _ in 0..if duplicate { 2 } else { 1 } {
+                    for (frame, wet) in dry.iter().zip(enhanced) {
+                        let (a, b) = (f64::from(sample(frame)), f64::from(wet));
+                        energy.dry += a * a;
+                        energy.wet += b * b;
+                        energy.cross += a * b;
+                    }
                 }
             }
         }

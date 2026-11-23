@@ -161,7 +161,8 @@ impl ToneProcessor {
             && gain == self.gain
         {
             if self.settings.low_cut_hz != 0 {
-                if self.highpass.state == [[0.; 2]; 2] && frames.iter().flatten().all(|&s| s == 0.)
+                if self.highpass.state == [[0.; 2]; 2]
+                    && frames.iter().flatten().all(|s| s.to_bits() == 0)
                 {
                     return 0.;
                 }
@@ -553,6 +554,24 @@ mod tests {
             block.map(|f| f.map(f32::to_bits)),
             quiet.map(|f| f.map(f32::to_bits))
         );
+    }
+
+    #[test]
+    fn settled_low_cut_preserves_the_filtered_sign_of_zero() {
+        let settings = Tone {
+            low_cut_hz: 80,
+            ..Tone::default()
+        };
+        let mut processor = ToneProcessor::new(settings);
+        let mut reference = HighPass::new(settings.low_cut_hz);
+        let mut frames = std::array::from_fn::<_, BLOCK, _>(|i| match i % 3 {
+            0 => [0., -0.],
+            1 => [-0., 0.],
+            _ => [-0., -0.],
+        });
+        let expected = frames.map(|f| reference.frame::<false>(f).map(f32::to_bits));
+        processor.process_unmetered(&mut frames);
+        assert_eq!(frames.map(|f| f.map(f32::to_bits)), expected);
     }
 
     #[test]

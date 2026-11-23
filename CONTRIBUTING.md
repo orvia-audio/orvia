@@ -8,10 +8,15 @@ Write code comments, Rustdoc and commits in English. Keep each commit focused. D
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --locked
+cargo test --locked -p dfn3_rs
 cargo doc --workspace --no-deps --locked
 ```
 
 The Linux build resolves `xattr 0.2.3` through GPUI's `zed-async-tar` dependency. It uses the Linux `libc::ENOATTR` alias removed in libc 0.2.190. Keep libc at 0.2.189 and mio at 1.2.4 while this dependency remains. Mio 1.2.5 requires libc 0.2.190 or newer.
+
+## Updating dependency forks
+
+The [orvia-audio forks](https://github.com/orgs/orvia-audio/repositories?type=fork) keep Orvia's changes on the `orvia` branch. To update a dependency, bring the upstream release into its fork, review the remaining changes, then update the pinned commit in Cargo.toml and refresh Cargo.lock. The RNNoise comparison tests use a separate crates.io dependency as their reference.
 
 ## UI snapshots
 

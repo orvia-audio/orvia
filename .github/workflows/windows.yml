@@ -41,6 +41,8 @@ jobs:
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test audio processing and documentation examples
         run: cargo test --workspace --locked
+      - name: Test the pinned DeepFilterNet implementation
+        run: cargo test --locked -p dfn3_rs
       - name: Build Rustdoc
         run: cargo doc --workspace --no-deps --locked
       - name: Install packaging tools

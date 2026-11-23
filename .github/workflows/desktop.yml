@@ -49,6 +49,7 @@ jobs:
         run: |
           cargo clippy --workspace --all-targets --locked -- -D warnings
           cargo test --workspace --locked
+          cargo test --locked -p dfn3_rs
       - name: Compare desktop UI snapshots
         if: runner.os == 'Linux'
         run: sh tests/ui/run.sh

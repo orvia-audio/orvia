@@ -7,14 +7,14 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-nnnoiseless = { version = "0.5.2", path = "../../vendor/nnnoiseless", default-features = false }
+nnnoiseless = { git = "https://github.com/orvia-audio/nnnoiseless.git", rev = "5974c997bbfc782267fbc09b676ba30cc7b44029", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 fs2 = "0.4"
 sys-locale = "0.3"
-sonora = { version = "0.3.0", path = "../../vendor/sonora" }
-dfn3_rs = { version = "0.1.2", path = "../../vendor/dfn3_rs" }
+sonora = { git = "https://github.com/orvia-audio/sonora.git", rev = "037cad0e6d2203619909b3af9aeb0fcb98aceb64" }
+dfn3_rs = { git = "https://github.com/orvia-audio/dfn3_rs.git", rev = "cb653a82b5e1fcf53266d70d624200de2823eeea" }
 
 [dev-dependencies]
 # Independent reference for bit-exact DSP parity across target-specific FFT implementations.

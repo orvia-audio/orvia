@@ -1606,6 +1606,7 @@ dependencies = [
 [[package]]
 name = "dfn3_rs"
 version = "0.1.2"
+source = "git+https://github.com/orvia-audio/dfn3_rs.git?rev=cb653a82b5e1fcf53266d70d624200de2823eeea#cb653a82b5e1fcf53266d70d624200de2823eeea"
 dependencies = [
  "realfft",
 ]
@@ -4133,6 +4134,8 @@ dependencies = [
 [[package]]
 name = "nnnoiseless"
 version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "805d5964d1e7a0006a7fdced7dae75084d66d18b35f1dfe81bd76929b1f8da0c"
 dependencies = [
  "easyfft",
  "once_cell",
@@ -4141,8 +4144,7 @@ dependencies = [
 [[package]]
 name = "nnnoiseless"
 version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805d5964d1e7a0006a7fdced7dae75084d66d18b35f1dfe81bd76929b1f8da0c"
+source = "git+https://github.com/orvia-audio/nnnoiseless.git?rev=5974c997bbfc782267fbc09b676ba30cc7b44029#5974c997bbfc782267fbc09b676ba30cc7b44029"
 dependencies = [
  "easyfft",
  "once_cell",
@@ -4722,8 +4724,8 @@ version = "0.1.6"
 dependencies = [
  "dfn3_rs",
  "fs2",
- "nnnoiseless 0.5.2",
  "nnnoiseless 0.5.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "nnnoiseless 0.5.2 (git+https://github.com/orvia-audio/nnnoiseless.git?rev=5974c997bbfc782267fbc09b676ba30cc7b44029)",
  "serde",
  "serde_json",
  "sonora",
@@ -5151,6 +5153,7 @@ dependencies = [
 [[package]]
 name = "pulseaudio"
 version = "0.3.2"
+source = "git+https://github.com/orvia-audio/pulseaudio-rs.git?rev=85dfd0f3834adc8f533bb0b0d8775729e35e3d32#85dfd0f3834adc8f533bb0b0d8775729e35e3d32"
 dependencies = [
  "bitflags 2.13.2",
  "byteorder",
@@ -6226,6 +6229,7 @@ dependencies = [
 [[package]]
 name = "sonora"
 version = "0.3.0"
+source = "git+https://github.com/orvia-audio/sonora.git?rev=037cad0e6d2203619909b3af9aeb0fcb98aceb64#037cad0e6d2203619909b3af9aeb0fcb98aceb64"
 dependencies = [
  "sonora-aec3",
  "sonora-agc2",
@@ -6238,8 +6242,7 @@ dependencies = [
 [[package]]
 name = "sonora-aec3"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2809c3fda13f71deac22d0ddb6c02c493f254d3da2afe59a7e256a8f15bcffe"
+source = "git+https://github.com/orvia-audio/sonora.git?rev=037cad0e6d2203619909b3af9aeb0fcb98aceb64#037cad0e6d2203619909b3af9aeb0fcb98aceb64"
 dependencies = [
  "sonora-common-audio",
  "sonora-fft",
@@ -6249,8 +6252,7 @@ dependencies = [
 [[package]]
 name = "sonora-agc2"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "501b5dd3f8bdc8c983dc64a131cef22a429f3ff879d6f0007b8bfe46ec7b96aa"
+source = "git+https://github.com/orvia-audio/sonora.git?rev=037cad0e6d2203619909b3af9aeb0fcb98aceb64#037cad0e6d2203619909b3af9aeb0fcb98aceb64"
 dependencies = [
  "bytemuck",
  "derive_more 2.1.1",
@@ -6263,6 +6265,7 @@ dependencies = [
 [[package]]
 name = "sonora-common-audio"
 version = "0.3.0"
+source = "git+https://github.com/orvia-audio/sonora.git?rev=037cad0e6d2203619909b3af9aeb0fcb98aceb64#037cad0e6d2203619909b3af9aeb0fcb98aceb64"
 dependencies = [
  "derive_more 2.1.1",
  "sonora-simd",
@@ -6271,8 +6274,7 @@ dependencies = [
 [[package]]
 name = "sonora-fft"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec3529f2cf748f1acc85d9403ffa08a3fe69dec6bf22383910b3bd21aca2fd26"
+source = "git+https://github.com/orvia-audio/sonora.git?rev=037cad0e6d2203619909b3af9aeb0fcb98aceb64#037cad0e6d2203619909b3af9aeb0fcb98aceb64"
 dependencies = [
  "sonora-simd",
 ]
@@ -6280,6 +6282,7 @@ dependencies = [
 [[package]]
 name = "sonora-ns"
 version = "0.3.0"
+source = "git+https://github.com/orvia-audio/sonora.git?rev=037cad0e6d2203619909b3af9aeb0fcb98aceb64#037cad0e6d2203619909b3af9aeb0fcb98aceb64"
 dependencies = [
  "sonora-fft",
 ]
@@ -6287,8 +6290,7 @@ dependencies = [
 [[package]]
 name = "sonora-simd"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f939d8e63a2a0baa7555294d7b09c5e3d382f28358755b920e13ad527658c8fa"
+source = "git+https://github.com/orvia-audio/sonora.git?rev=037cad0e6d2203619909b3af9aeb0fcb98aceb64#037cad0e6d2203619909b3af9aeb0fcb98aceb64"
 dependencies = [
  "cpufeatures 0.3.1",
 ]
@@ -7201,6 +7203,7 @@ dependencies = [
 [[package]]
 name = "tray-item"
 version = "0.10.0"
+source = "git+https://github.com/orvia-audio/tray-item-rs.git?rev=529412f75b6a754a72e5c6e20faf0ce38f5c0389#529412f75b6a754a72e5c6e20faf0ce38f5c0389"
 dependencies = [
  "cocoa 0.25.0",
  "core-graphics 0.23.2",

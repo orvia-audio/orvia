@@ -124,6 +124,14 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     wait_for(window_visible, "The installed mixer window did not appear", timeout=45)
     window = run("xdotool", "search", "--onlyvisible", "--name", "^Orvia$").splitlines()[0]
     run("xdotool", "windowsize", window, "830", "610")
+    def waveform_visible():
+        return status.exists() and bool(json.loads(status.read_text())["signal"]["peaks"])
+
+    wait_for(waveform_visible, "The mixer did not request waveform samples")
+    run("xdotool", "windowunmap", "--sync", window)
+    wait_for(lambda: not status.exists(), "The hidden mixer kept its observer active", timeout=10)
+    run("xdotool", "windowmap", "--sync", window)
+    wait_for(waveform_visible, "The restored mixer did not resume waveform observation", timeout=4)
     opened = Path(tmp, "opened-file")
 
     def open_log_from_preferences():

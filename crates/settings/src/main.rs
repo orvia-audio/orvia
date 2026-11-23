@@ -152,26 +152,72 @@ impl Panel {
         let poll_dir = dir.clone();
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
+            let prefs_path = poll_dir.join("settings.json");
+            let status_path = poll_dir.join("status.json");
             let mut heartbeat = Instant::now() - Duration::from_secs(3);
             let mut last_poll = heartbeat;
+            let mut last_prefs = heartbeat;
             let mut last_observer = None;
+            let frame_seen = std::rc::Rc::new(std::cell::Cell::new(true));
+            let mut last_frame = Instant::now();
+            let mut was_visible = true;
             loop {
-                // A newly started recording or live graph picks up on the next 250 ms tick.
-                // Static pages only need an occasional settings and engine liveness check.
-                if last_poll.elapsed() < Duration::from_secs(1) {
-                    let Ok(live) = this.read_with(cx, |p, _| {
-                        p.polling_audio()
-                            || (p.live_mixer()
-                                && p.status
-                                    .as_ref()
-                                    .is_some_and(|s| s.message.starts_with("Streaming")))
-                    }) else {
+                // GPUI receives compositor frames for visible windows even without keyboard focus.
+                // Keep one callback pending while minimized, without requesting a repaint.
+                if frame_seen.replace(false) {
+                    last_frame = Instant::now();
+                    let seen = frame_seen.clone();
+                    if handle
+                        .update(cx, |_, window, _| {
+                            window.on_next_frame(move |_, _| seen.set(true));
+                        })
+                        .is_err()
+                    {
                         break;
-                    };
-                    if !live {
-                        Timer::after(Duration::from_millis(250)).await;
-                        continue;
                     }
+                }
+                let visible = last_frame.elapsed() < Duration::from_secs(1);
+                let restored = visible && !was_visible;
+                was_visible = visible;
+                let Ok((observer, live, audio)) = this.read_with(cx, |p, _| {
+                    let audio = p.polling_audio();
+                    if !visible && !audio {
+                        return (None, false, false);
+                    }
+                    let mixer = visible && p.live_mixer();
+                    let spectrum = mixer && p.show_spectrum;
+                    let legacy = p
+                        .status
+                        .as_ref()
+                        .is_none_or(|s| s.version != env!("CARGO_PKG_VERSION"));
+                    let observer = if legacy {
+                        "observe"
+                    } else if spectrum {
+                        orvia_core::spectrum::OBSERVER_FILE
+                    } else if mixer {
+                        "observe"
+                    } else {
+                        orvia_core::SUMMARY_OBSERVER
+                    };
+                    let streaming = p
+                        .status
+                        .as_ref()
+                        .is_some_and(|s| s.message.starts_with("Streaming"));
+                    (
+                        Some((observer, spectrum && legacy)),
+                        audio || (mixer && streaming),
+                        audio,
+                    )
+                }) else {
+                    break;
+                };
+                if !live
+                    && !restored
+                    && observer == last_observer
+                    && last_poll.elapsed() < Duration::from_secs(1)
+                {
+                    Timer::after(Duration::from_millis(250)).await;
+                    continue;
                 }
                 last_poll = Instant::now();
                 if !test_only && fs::remove_file(poll_dir.join("close-window")).is_ok() {
@@ -184,44 +230,32 @@ impl Panel {
                         w.activate_window();
                     });
                 }
-                let Ok((observer, legacy_spectrum)) = this.read_with(cx, |p, _| {
-                    let spectrum = p.live_mixer() && p.show_spectrum;
-                    let legacy = p
-                        .status
-                        .as_ref()
-                        .is_none_or(|s| s.version != env!("CARGO_PKG_VERSION"));
-                    let observer = if legacy {
-                        "observe"
-                    } else if spectrum {
-                        orvia_core::spectrum::OBSERVER_FILE
-                    } else if p.live_mixer() {
-                        "observe"
-                    } else {
-                        orvia_core::SUMMARY_OBSERVER
-                    };
-                    (observer, spectrum && legacy)
-                }) else {
-                    break;
-                };
-                let refresh = last_observer != Some((observer, legacy_spectrum))
-                    || heartbeat.elapsed() >= Duration::from_secs(2);
-                if refresh {
+                if let Some((name, legacy_spectrum)) = observer
+                    && (last_observer != observer || heartbeat.elapsed() >= Duration::from_secs(2))
+                {
                     // Older engines require both heartbeats to publish a spectrum.
-                    let _ = fs::write(poll_dir.join(observer), b"1");
+                    let _ = fs::write(poll_dir.join(name), b"1");
                     if legacy_spectrum {
                         let _ = fs::write(poll_dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
                     }
-                    last_observer = Some((observer, legacy_spectrum));
                     heartbeat = Instant::now();
                 }
-                let status = read_json::<EngineStatus>(&poll_dir.join("status.json"))
-                    .ok()
+                last_observer = observer;
+                let status = observer
+                    .and_then(|_| read_json::<EngineStatus>(&status_path).ok())
                     .filter(|s| {
                         s.observed
                             .elapsed()
                             .is_ok_and(|age| age < Duration::from_secs(2))
                     });
-                let prefs = Settings::load(&poll_dir.join("settings.json")).ok();
+                // Local edits update the panel immediately. Active recordings and auditions
+                // also check external edits on every poll to detect route changes.
+                let prefs = if audio || restored || last_prefs.elapsed() >= Duration::from_secs(1) {
+                    last_prefs = Instant::now();
+                    Settings::load(&prefs_path).ok()
+                } else {
+                    None
+                };
                 if this
                     .update(cx, |p, cx| {
                         let retain = status.is_none()
@@ -250,7 +284,7 @@ impl Panel {
                             p.check_for_updates(cx);
                             redraw = true;
                         }
-                        if redraw {
+                        if visible && (redraw || restored) {
                             cx.notify();
                         }
                     })

@@ -69,15 +69,23 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
     let mut last_attempt = Instant::now() - Duration::from_secs(2);
     let mut last_default_check = last_attempt;
     let mut message = String::new();
-    let mut was_observed = false;
+    let mut published: Option<EngineStatus> = None;
+    let mut last_publish = last_attempt;
+    let status_path = dir.join("status.json");
+    let settings_path = dir.join("settings.json");
+    let audition_path = dir.join(AUDITION_FILE);
+    let mixer_path = dir.join("observe");
+    let summary_path = dir.join(orvia_core::SUMMARY_OBSERVER);
+    let spectrum_path = dir.join(orvia_core::spectrum::OBSERVER_FILE);
     loop {
         if stop_request.exists() {
             let _ = fs::remove_file(&stop_request);
             break;
         }
         let now = Instant::now();
-        let observed = recently_observed(&dir.join("observe"));
-        let settings = Settings::load(&dir.join("settings.json"));
+        let metering = recently_observed(&mixer_path);
+        let observed = metering || recently_observed(&summary_path);
+        let settings = Settings::load(&settings_path);
         if menu(settings.as_ref().ok().map(|s| s.language)) {
             break;
         }
@@ -144,13 +152,13 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     }
                 }
                 if let Some(route) = &mut running {
-                    let request = read_json::<Audition>(&dir.join(AUDITION_FILE))
+                    let request = read_json::<Audition>(&audition_path)
                         .ok()
                         .filter(|r| r.active(&s, SystemTime::now()));
                     if let Some(r) = &request {
                         r.target.apply(&mut s);
                     }
-                    route.update_controls(&s, observed);
+                    route.update_controls(&s, metering);
                     audition = request
                         .filter(|_| route.controls_applied(&s))
                         .map(|r| r.started);
@@ -173,9 +181,19 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
         let spectrum = running.as_mut().and_then(|route| {
             route
                 .spectrum
-                .poll(observed && recently_observed(&dir.join(orvia_core::spectrum::OBSERVER_FILE)))
+                .poll(metering && recently_observed(&spectrum_path))
         });
-        if observed {
+        let changed = published.as_ref().is_none_or(|last| {
+            last.message != message
+                || last.audition != audition
+                || last.monitoring != last_monitor.0
+                || last.monitor_error != last_monitor.1
+        });
+        if observed
+            && (changed
+                || (metering && running.is_some())
+                || last_publish.elapsed() >= Duration::from_secs(1))
+        {
             let (peak, missing_frames, dropped_frames) = running
                 .as_ref()
                 .map(stream::Route::metrics)
@@ -184,6 +202,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                 spectrum,
                 signal: running
                     .as_ref()
+                    .filter(|_| metering)
                     .map(stream::Route::envelopes)
                     .unwrap_or_default(),
                 monitoring: last_monitor.0,
@@ -197,13 +216,14 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                 dropped_frames,
             };
             // A busy diagnostics file must not interrupt the audio streams.
-            let _ = write_json(&dir.join("status.json"), &status);
-        } else if was_observed {
-            let _ = fs::remove_file(dir.join("status.json"));
+            if write_json(&status_path, &status).is_ok() {
+                published = Some(status);
+                last_publish = now;
+            }
+        } else if !observed && published.take().is_some() {
+            let _ = fs::remove_file(&status_path);
         }
-        was_observed = observed;
-        let idle = running.is_none() && !observed;
-        thread::sleep(Duration::from_millis(if idle { 500 } else { 200 }));
+        thread::sleep(Duration::from_millis(if observed { 200 } else { 500 }));
     }
     log.record(EngineEvent::Stopped);
     Ok(())

@@ -25,6 +25,9 @@ pub use state::{
     write_json,
 };
 
+/// Request route health and audition acknowledgements without collecting mixer waveforms.
+pub const SUMMARY_OBSERVER: &str = "observe-summary";
+
 /// Adapter friendly name for the stereo, 48 kHz WASAPI transport.
 /// Incompatible wire formats must use a different transport identity.
 pub const ADAPTER: &str = "Orvia Audio v1";

@@ -99,6 +99,16 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         snapshot = json.loads(status.read_text()) if status.exists() else {}
         snapshot.pop("signal", None)
         raise AssertionError(f"440 Hz amplitude {amplitude:.0f} in {len(captured)} samples; engine {snapshot}")
+    # Summary observers receive fresh route health without collecting waveform samples.
+    (state / "observe-summary").touch()
+    (state / "observe").unlink(missing_ok=True)
+    def summary_only():
+        if not status.exists():
+            return False
+        report = json.loads(status.read_text())
+        return ("Streaming" in report["message"] and not report["signal"]["peaks"]
+                and report.get("spectrum") is None)
+    wait_for(summary_only, "Summary observer kept collecting mixer diagnostics", timeout=4)
     # Stand in for the desktop text viewer inside this isolated X11 session.
     opener = Path(tmp, "xdg-open")
     opener.write_text('#!/bin/sh\nprintf "%s" "$1" > "$XDG_RUNTIME_DIR/opened-file"\n')

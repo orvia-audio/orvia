@@ -154,13 +154,14 @@ impl Panel {
         cx.spawn(async move |this, cx| {
             let mut heartbeat = Instant::now() - Duration::from_secs(3);
             let mut last_poll = heartbeat;
+            let mut last_observer = None;
             loop {
                 // A newly started recording or live graph picks up on the next 250 ms tick.
                 // Static pages only need an occasional settings and engine liveness check.
                 if last_poll.elapsed() < Duration::from_secs(1) {
                     let Ok(live) = this.read_with(cx, |p, _| {
                         p.polling_audio()
-                            || (p.page == Page::Mixer
+                            || (p.live_mixer()
                                 && p.status
                                     .as_ref()
                                     .is_some_and(|s| s.message.starts_with("Streaming")))
@@ -183,10 +184,25 @@ impl Panel {
                         w.activate_window();
                     });
                 }
-                let refresh = heartbeat.elapsed() >= Duration::from_secs(2);
+                let Ok(observer) = this.read_with(cx, |p, _| {
+                    if p.live_mixer()
+                        || p.status
+                            .as_ref()
+                            .is_none_or(|s| s.version != env!("CARGO_PKG_VERSION"))
+                    {
+                        "observe"
+                    } else {
+                        orvia_core::SUMMARY_OBSERVER
+                    }
+                }) else {
+                    break;
+                };
+                let refresh = last_observer != Some(observer)
+                    || heartbeat.elapsed() >= Duration::from_secs(2);
                 if refresh {
                     // An empty rewrite can leave the previous modification time on Windows.
-                    let _ = fs::write(poll_dir.join("observe"), b"1");
+                    let _ = fs::write(poll_dir.join(observer), b"1");
+                    last_observer = Some(observer);
                     heartbeat = Instant::now();
                 }
                 let status = read_json::<EngineStatus>(&poll_dir.join("status.json"))
@@ -259,8 +275,21 @@ impl Panel {
         panel
     }
 
+    fn live_mixer(&self) -> bool {
+        self.page == Page::Mixer && self.tone_setup.is_none()
+    }
+
     fn polling_audio(&self) -> bool {
-        self.tone_setup.is_some() || self.test.busy() || self.test.adjust.is_some()
+        self.tone_setup
+            .as_ref()
+            .is_some_and(tone_setup::Setup::polling_audio)
+            || self.test.busy()
+            || self.test.adjust.as_ref().is_some_and(|a| {
+                !matches!(
+                    a.stage,
+                    auto_adjust::Stage::Ready(_) | auto_adjust::Stage::Failed(_)
+                )
+            })
     }
 
     /// Compare the diagnostics drawn on this page. Heartbeats update liveness without
@@ -271,6 +300,7 @@ impl Panel {
         };
         match self.page {
             Page::Devices => false,
+            Page::Mixer if !self.live_mixer() => false,
             Page::Preferences => old.version != new.version,
             Page::MicTest => old.message != new.message || old.version != new.version,
             Page::Mixer => {

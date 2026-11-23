@@ -48,6 +48,14 @@ pub(super) enum Screen<'a> {
 }
 
 impl Setup {
+    pub(super) fn polling_audio(&self) -> bool {
+        self.playback.is_some()
+            || !matches!(
+                self.stage,
+                Stage::Intro | Stage::Ready(_) | Stage::Failed(_)
+            )
+    }
+
     pub(super) fn screen(&self) -> Screen<'_> {
         match &self.stage {
             Stage::Intro => Screen::Intro,

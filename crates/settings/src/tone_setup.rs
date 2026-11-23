@@ -2,8 +2,10 @@
 use super::*;
 use auto_adjust::Trial;
 use orvia_core::{AuditionTarget, Tone, calibration::SampleError};
-use orvia_engine::mic_test::{self, Clip, Playback, Recording, RoomRecording, TonePreview};
-use std::sync::mpsc::{self, Receiver, TryRecvError};
+use orvia_engine::mic_test::{
+    self, Clip, GuidedRecording, Playback, Recording, RoomRecording, TonePreview,
+};
+use std::sync::mpsc::TryRecvError;
 
 #[derive(Clone, Copy)]
 pub(super) enum Action {
@@ -20,8 +22,8 @@ enum Stage {
     Intro,
     Opening,
     Room(RoomRecording, Instant),
-    Reading(Clip, Recording, reading::Reader),
-    Analyzing(Receiver<Result<Comparison, SampleError>>),
+    Reading(Clip, GuidedRecording, reading::Reader),
+    Analyzing(reading::Analysis<Result<Comparison, SampleError>>),
     Ready(Comparison),
     Failed(String),
 }
@@ -117,7 +119,7 @@ impl Setup {
         if let Stage::Room(recording, _) = std::mem::replace(&mut self.stage, Stage::Opening) {
             let room = recording.finish().map_err(|e| e.to_string())?;
             let reading = Recording::start(&self.receiver).map_err(|e| e.to_string())?;
-            self.stage = Stage::Reading(room, reading, Default::default());
+            self.stage = Stage::Reading(room, GuidedRecording::new(reading), Default::default());
         }
         Ok(())
     }
@@ -190,9 +192,7 @@ impl Setup {
                 }
             }
             Stage::Reading(_, recording, reader) => {
-                if !reader.listen(recording, l)? {
-                    reader.trim_waiting(recording);
-                } else {
+                if reader.listen_guided(recording, l)? {
                     let Stage::Reading(room, recording, _) =
                         std::mem::replace(&mut self.stage, Stage::Opening)
                     else {
@@ -201,16 +201,12 @@ impl Setup {
                     let voice = recording.finish().map_err(audio_error)?;
                     self.trial = None;
                     let current = prefs.tone();
-                    let (tx, rx) = mpsc::channel();
-                    cx.background_executor()
-                        .spawn(async move {
-                            let _ = tx.send(room.into_tone_previews(voice, current));
-                        })
-                        .detach();
-                    self.stage = Stage::Analyzing(rx);
+                    self.stage = Stage::Analyzing(reading::Analysis::start(cx, move |cancelled| {
+                        room.guided_tone_previews(voice, current, cancelled)
+                    }));
                 }
             }
-            Stage::Analyzing(rx) => match rx.try_recv() {
+            Stage::Analyzing(rx) => match rx.result.try_recv() {
                 Ok(Ok(comparison)) => {
                     self.stage = Stage::Ready(comparison);
                     self.play(1, prefs.monitor.as_deref());

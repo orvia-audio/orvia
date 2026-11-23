@@ -4735,6 +4735,7 @@ name = "orvia-engine"
 version = "0.1.6-snapshot.10"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "cpal",
  "embed-resource",
  "fs2",

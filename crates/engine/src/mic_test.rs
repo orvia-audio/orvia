@@ -1,11 +1,11 @@
 //! Microphone recordings with local preview playback.
 use crate::{
-    formats::{InputRate, Port, config, stream_config, stream_continues},
+    formats::{InputRate, Port, config, stream_continues},
     host, is_virtual_cable, label,
 };
-use anyhow::{Context, Result, anyhow, ensure};
+use anyhow::{Context, Result, ensure};
 use cpal::{
-    Device, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
+    Device, Stream,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
 use orvia_core::{
@@ -15,13 +15,21 @@ use orvia_core::{
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
     path::Path,
-    sync::{Arc, mpsc},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::Duration,
 };
 
+mod capture;
+use capture::CaptureQueue;
 mod file_recording;
+mod guided;
 pub use file_recording::FileRecording;
 use file_recording::PendingWav;
+pub use guided::{GuideClip, GuidedRecording};
 mod tone_preview;
 pub use tone_preview::TonePreview;
 mod room;
@@ -282,7 +290,8 @@ fn errors() -> (
 pub struct Recording {
     stream: Stream,
     frames: Vec<Frame>,
-    rx: Consumer<Frame>,
+    rx: CaptureQueue,
+    overflow: Arc<AtomicBool>,
     errors: mpsc::Receiver<cpal::Error>,
     rate: u32,
 }
@@ -323,18 +332,21 @@ impl Recording {
     fn open(device: &Device, port: Port) -> Result<Self> {
         let format = config(device, port)?;
         let rate = format.sample_rate();
-        let (tx, rx) = RingBuffer::new(rate as usize * QUEUE_DURATION.as_secs() as usize);
         let (error, errors) = errors();
-        let stream = match format.sample_format() {
-            SampleFormat::F32 => capture::<f32>(device, &format, tx, error),
-            SampleFormat::I16 => capture::<i16>(device, &format, tx, error),
-            other => return Err(anyhow!("Unsupported recording format: {other}")),
-        }?;
+        let overflow = Arc::new(AtomicBool::new(false));
+        let (stream, rx) = CaptureQueue::open(
+            device,
+            &format,
+            rate as usize * QUEUE_DURATION.as_secs() as usize,
+            overflow.clone(),
+            error,
+        )?;
         stream.play()?;
         Ok(Self {
             frames: Vec::new(),
             stream,
             rx,
+            overflow,
             errors,
             rate,
         })
@@ -358,26 +370,14 @@ impl Recording {
 
     fn drain(&mut self, mut consume: impl FnMut(&[Frame]) -> Result<()>) -> Result<()> {
         let count = self.pending()?;
-        if count > 0 {
-            let chunk = self.rx.read_chunk(count)?;
-            let (first, second) = chunk.as_slices();
-            consume(first)?;
-            consume(second)?;
-            chunk.commit_all();
-        }
-        Ok(())
+        self.rx.drain(count, &mut consume)
     }
 
     fn pending(&self) -> Result<usize> {
         if let Some(e) = self.error() {
             return Err(e.into());
         }
-        let count = self.rx.slots();
-        ensure!(
-            count < self.rx.buffer().capacity(),
-            "The recording device queue overflowed"
-        );
-        Ok(count)
+        pending(&self.rx, &self.overflow, self.rate)
     }
 
     /// Discard analyzed frames from the beginning of a take, keeping the active input stream open.
@@ -420,54 +420,36 @@ impl Recording {
     fn stop(mut self) -> Result<Vec<Frame>> {
         self.collect()?;
         drop(self.stream);
-        let count = self.rx.slots();
-        ensure!(
-            count < self.rx.buffer().capacity(),
-            "The recording device queue overflowed"
-        );
+        let count = pending(&self.rx, &self.overflow, self.rate)?;
         append_captured(&mut self.frames, &mut self.rx, count)?;
         Ok(self.frames)
     }
+
+    fn stop_and_drain(mut self, mut consume: impl FnMut(&[Frame]) -> Result<()>) -> Result<()> {
+        self.drain(&mut consume)?;
+        drop(self.stream);
+        let count = pending(&self.rx, &self.overflow, self.rate)?;
+        self.rx.drain(count, consume)
+    }
+}
+
+fn pending(queue: &CaptureQueue, overflow: &AtomicBool, rate: u32) -> Result<usize> {
+    let count = queue.slots();
+    ensure!(
+        !overflow.load(Ordering::Acquire)
+            && count < rate as usize * QUEUE_DURATION.as_secs() as usize,
+        "The recording device queue overflowed"
+    );
+    Ok(count)
 }
 
 /// Append both contiguous parts of the capture queue before returning them to the device.
-fn append_captured(frames: &mut Vec<Frame>, rx: &mut Consumer<Frame>, count: usize) -> Result<()> {
-    if count > 0 {
-        frames.try_reserve(count)?;
-        let chunk = rx.read_chunk(count)?;
-        let (first, second) = chunk.as_slices();
-        frames.extend_from_slice(first);
-        frames.extend_from_slice(second);
-        chunk.commit_all();
-    }
-    Ok(())
-}
-
-fn capture<T: SizedSample>(
-    device: &Device,
-    format: &SupportedStreamConfig,
-    mut tx: Producer<Frame>,
-    error: impl FnMut(cpal::Error) + Send + 'static,
-) -> Result<Stream, cpal::Error>
-where
-    f32: FromSample<T>,
-{
-    let channels = usize::from(format.channels());
-    device.build_input_stream(
-        stream_config(format),
-        move |data: &[T], _| {
-            let frames = data.chunks_exact(channels);
-            let count = tx.slots().min(frames.len());
-            if let Ok(chunk) = tx.write_chunk_uninit(count) {
-                chunk.fill_from_iter(frames.map(|frame| {
-                    let left = frame[0].to_sample();
-                    [left, frame.get(1).map_or(left, |s| s.to_sample())]
-                }));
-            }
-        },
-        error,
-        None,
-    )
+fn append_captured(frames: &mut Vec<Frame>, rx: &mut CaptureQueue, count: usize) -> Result<()> {
+    frames.try_reserve(count)?;
+    rx.drain(count, |batch| {
+        frames.extend_from_slice(batch);
+        Ok(())
+    })
 }
 
 /// Stereo audio from a microphone test, stored at its original capture rate.
@@ -523,11 +505,11 @@ impl Clip {
     ) -> Result<(orvia_core::Tone, [Self; 2]), SampleError> {
         let (recommended, [before, after]) =
             self.clone().into_tone_previews(voice.clone(), current)?;
-        let before = before.render();
+        let before = before.render()?;
         let after = if current == recommended {
             before.clone()
         } else {
-            after.render()
+            after.render()?
         };
         Ok((recommended, [before, after]))
     }
@@ -543,21 +525,9 @@ impl Clip {
         voice: Self,
         current: orvia_core::Tone,
     ) -> Result<(orvia_core::Tone, [TonePreview; 2]), SampleError> {
-        let room = {
-            let whole = self.into_model_rate()?.frames;
-            let excerpt = room::loudest_excerpt(&whole);
-            if excerpt.len() == whole.len() {
-                whole
-            } else {
-                Arc::new(excerpt.to_vec())
-            }
-        };
+        let room = self.room_excerpt()?;
         let voice = voice.into_model_rate()?.frames;
-        let recommended = orvia_core::tone::recommend(&room, &voice)?;
-        Ok((
-            recommended,
-            TonePreview::pair(room, voice, current, recommended),
-        ))
+        GuideClip::memory(voice).tone_previews(room, current, &|| false)
     }
 
     fn into_model_rate(self) -> Result<Self, SampleError> {
@@ -571,9 +541,7 @@ impl Clip {
             .try_reserve_exact(usize::try_from(count).map_err(|_| SampleError::Incomplete)?)
             .map_err(|_| SampleError::Incomplete)?;
         let mut rate = InputRate::new(self.rate);
-        for &frame in self.frames.iter() {
-            rate.push(frame, |f| frames.push(f));
-        }
+        rate.push_batch(self.frames.iter().copied(), |f| frames.push(f));
         Ok(Self {
             rate: SAMPLE_RATE,
             frames: frames.into(),
@@ -619,16 +587,16 @@ impl Clip {
     /// Returns an error for unreadable, malformed, truncated or unsupported recordings.
     pub fn load(path: &Path) -> Result<Self> {
         let mut reader = checked_reader(std::fs::File::open(path)?)?;
-        let spec = reader.spec();
         let mut frames = Vec::new();
-        frames.try_reserve_exact(reader.duration() as usize)?;
-        let mut samples = reader.samples::<f32>();
-        while let Some(left) = samples.next() {
-            frames.push([left?, samples.next().context("Missing right channel")??]);
+        frames.try_reserve_exact(reader.frames as usize)?;
+        let mut buffer = [[0.; 2]; 2048];
+        while frames.len() < reader.frames as usize {
+            let count = reader.read(frames.len() as u32, &mut buffer)?;
+            frames.extend_from_slice(&buffer[..count]);
         }
         Ok(Self {
             frames: frames.into(),
-            rate: spec.sample_rate,
+            rate: reader.rate,
         })
     }
 
@@ -653,7 +621,8 @@ mod tests {
 
     #[test]
     fn collecting_a_wrapped_recording_preserves_the_previous_tail_and_frame_order() {
-        let (mut tx, mut rx) = RingBuffer::new(5);
+        let (mut tx, rx) = RingBuffer::new(5);
+        let mut rx = CaptureQueue::Float(rx);
         tx.push_entire_slice(&[[0., 1.], [2., 3.], [4., 5.]])
             .unwrap();
         let mut frames = vec![[-2., -1.]];

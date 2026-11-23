@@ -38,7 +38,10 @@ impl PendingWav {
             sample_format: hound::SampleFormat::Float,
         };
         Ok(Self {
-            writer: hound::WavWriter::new(BufWriter::new(file.try_clone()?), spec)?,
+            writer: hound::WavWriter::new(
+                BufWriter::with_capacity(64 * 1024, file.try_clone()?),
+                spec,
+            )?,
             reader: file,
             replacement,
         })
@@ -149,9 +152,8 @@ impl FileRecording {
     ///
     /// Reports an empty recording, device loss or a file finalization error.
     pub fn finish(mut self) -> Result<SavedClip> {
-        let saved = self.capture.frames.len();
-        let tail = self.capture.stop()?;
-        self.take.append(&tail[saved..])?;
+        self.capture
+            .stop_and_drain(|frames| self.take.append(frames))?;
         ensure!(
             self.take.writer.duration() > 0,
             "The microphone returned no audio frames"

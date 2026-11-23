@@ -11,6 +11,7 @@ rust-version.workspace = true
 orvia-core = { path = "../core" }
 cpal = "0.18.2"
 anyhow = "1"
+bytemuck = "1"
 fs2 = "0.4"
 rtrb = "0.4.1"
 realfft = "3.5.1"

@@ -72,6 +72,7 @@ fn populate(panel: &mut Panel, scene: &str, language: Language) {
     panel.test.source.clone_from(&panel.prefs.receiver);
     panel.test.speaker.clone_from(&panel.prefs.monitor);
     panel.status = Some(EngineStatus {
+        window_observers: true,
         spectrum: None,
         observed: std::time::SystemTime::UNIX_EPOCH,
         version: panel.installed.to_string(),

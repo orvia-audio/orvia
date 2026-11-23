@@ -67,14 +67,21 @@ impl MicTest {
 
 impl Panel {
     pub(super) fn open_mic_test(&mut self) {
-        match mic_test::sources() {
-            Ok(sources) => self.test.sources = sources,
-            Err(e) => self.error = e.to_string(),
+        if let Ok(devices) = mic_test::DeviceChoices::discover(&self.prefs) {
+            self.test.sources = devices.sources;
+            self.monitors = devices.monitors;
+            self.test.source = devices.routed_source;
+        } else {
+            // A transient enumeration failure can still leave one direction available.
+            match mic_test::sources() {
+                Ok(sources) => self.test.sources = sources,
+                Err(e) => self.error = e.to_string(),
+            }
+            if let Ok(devices) = orvia_engine::monitors() {
+                self.monitors = devices;
+            }
+            self.test.source = mic_test::routed_source(&self.prefs).ok();
         }
-        if let Ok(devices) = orvia_engine::monitors() {
-            self.monitors = devices;
-        }
-        self.test.source = mic_test::routed_source(&self.prefs).ok();
         self.test.speaker = self.prefs.monitor.clone();
         match SavedClip::latest(&self.dir.join("mic-test")) {
             Ok(clip) => self.test.clip = clip,

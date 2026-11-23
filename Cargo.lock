@@ -4710,6 +4710,7 @@ dependencies = [
  "rust-embed",
  "semver",
  "serde",
+ "serde_json",
  "sysinfo",
  "tempfile",
  "ureq",

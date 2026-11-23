@@ -8,6 +8,7 @@ use tone_view::tone_labels;
 
 #[path = "mixer.rs"]
 mod mixer;
+pub(super) use mixer::MixerViews;
 #[path = "picker.rs"]
 mod picker;
 #[path = "spectrum.rs"]
@@ -50,10 +51,71 @@ fn note(s: impl Into<SharedString>) -> gpui::Div {
 }
 
 /// The visible instruction for the current microphone reading.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum ReadingCue {
     Measuring,
     Read,
+}
+
+/// Values that can change visibly during an audio poll. The engine and reader
+/// continue polling while a displayed instruction or playback label is steady.
+#[derive(PartialEq, Eq)]
+pub(super) enum AudioDisplay {
+    Idle,
+    Opening,
+    Room,
+    Read(u8, ReadingCue),
+    Analyzing,
+    Preview(Option<ReadingCue>),
+    Restoring,
+    Ready(Option<usize>),
+    Failed,
+    Test(TestAction, ReadingCue, Option<String>),
+}
+
+impl Panel {
+    pub(super) fn audio_display(&self) -> AudioDisplay {
+        use tone_setup::Screen;
+        if let Some(setup) = &self.tone_setup {
+            return match setup.screen() {
+                Screen::Intro => AudioDisplay::Idle,
+                Screen::Opening => AudioDisplay::Opening,
+                Screen::Room => AudioDisplay::Room,
+                Screen::Reading(cue) => AudioDisplay::Read(1, cue),
+                Screen::Analyzing => AudioDisplay::Analyzing,
+                Screen::Ready(_, playing) => AudioDisplay::Ready(playing),
+                Screen::Failed(_) => AudioDisplay::Failed,
+            };
+        }
+        if self.page != Page::MicTest {
+            return AudioDisplay::Idle;
+        }
+        if let Some(adjust) = &self.test.adjust {
+            return match (&adjust.stage).into() {
+                AdjustmentScreen::Room => AudioDisplay::Room,
+                AdjustmentScreen::Phrase(take, cue) => AudioDisplay::Read(take, cue),
+                AdjustmentScreen::Analyzing => AudioDisplay::Analyzing,
+                AdjustmentScreen::Preview(cue) => AudioDisplay::Preview(cue),
+                AdjustmentScreen::Restoring => AudioDisplay::Restoring,
+                AdjustmentScreen::Ready(_) => {
+                    AudioDisplay::Ready(self.test.playback.as_ref().map(|_| 0))
+                }
+                AdjustmentScreen::Failed(_) => AudioDisplay::Failed,
+            };
+        }
+        AudioDisplay::Test(
+            self.test.primary_action(),
+            (&self.test.reader).into(),
+            self.test
+                .recording
+                .as_ref()
+                .map(|r| recording_length(r.duration())),
+        )
+    }
+}
+
+fn recording_length(duration: Duration) -> String {
+    format!("{:.1} s", duration.as_secs_f32())
 }
 
 impl From<&reading::Reader> for ReadingCue {
@@ -417,7 +479,7 @@ impl Panel {
                         Control::Test(action),
                         cx,
                     ))
-                    .child(note(format!("{:.1} s", length.as_secs_f32())))
+                    .child(note(recording_length(length)))
                     .child(div().flex_1())
                     .when(self.test.clip.is_some(), |d| {
                         d.child(self.button(
@@ -796,7 +858,7 @@ impl Render for Panel {
                     l.text("Tone setup", "音質調整の自動設定"),
                     self.tone_page(screen, cx),
                 ),
-                None => (l.text("Mixer", "ミキサー"), self.mixer(cx)),
+                None => (l.text("Mixer", "ミキサー"), self.mixer(window, cx)),
             },
             Page::MicTest => (l.text("Mic test", "マイクテスト"), self.mic_test_page(cx)),
             Page::Devices => (l.text("Devices", "デバイス"), self.devices(cx)),

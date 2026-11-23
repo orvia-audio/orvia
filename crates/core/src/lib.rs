@@ -30,6 +30,19 @@ pub use state::{
 /// Request route health and audition acknowledgements without collecting mixer waveforms.
 pub const SUMMARY_OBSERVER: &str = "observe-summary";
 
+/// Exclusive heartbeat files for the mixer and the separately launchable microphone test.
+/// Older clients and external diagnostic tools use the original shared observer files.
+pub mod observer {
+    /// The main window is displaying the waveform.
+    pub const WAVEFORM: &str = "observe-window-waveform";
+    /// The main window is displaying the frequency spectrum.
+    pub const SPECTRUM: &str = "observe-window-spectrum";
+    /// The main window needs only engine health and route changes.
+    pub const SUMMARY: &str = "observe-window-summary";
+    /// The standalone mic test needs engine health and audition acknowledgments.
+    pub const MIC_TEST: &str = "observe-test-summary";
+}
+
 /// Adapter friendly name for the stereo, 48 kHz WASAPI transport.
 /// Incompatible wire formats must use a different transport identity.
 pub const ADAPTER: &str = "Orvia Audio v1";

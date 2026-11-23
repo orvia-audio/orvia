@@ -120,6 +120,15 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     message = error;
                 }
             }
+            #[cfg(not(windows))]
+            Ok(s) if s.output.is_none() => {
+                // Device discovery cannot resolve an unselected output on these platforms.
+                let prompt = orvia_engine::mic_test::CHOOSE_OUTPUT;
+                if message != prompt {
+                    message = prompt.to_owned();
+                    log.record(EngineEvent::RouteError(message.clone()));
+                }
+            }
             Ok(mut s) => {
                 let default_changed = if s.input.is_none()
                     && last_default_check.elapsed() >= Duration::from_secs(2)

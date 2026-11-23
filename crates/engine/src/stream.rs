@@ -79,7 +79,7 @@ pub(super) struct Route {
 impl Route {
     pub(super) fn open(settings: &Settings) -> Result<Self> {
         let host = host()?;
-        let output = orvia_engine::mic_test::virtual_output(settings.output.as_deref())?;
+        let output = orvia_engine::mic_test::virtual_output_on(&host, settings.output.as_deref())?;
         let input = match &settings.input {
             Some(id) => host
                 .device_by_id(&id.parse()?)

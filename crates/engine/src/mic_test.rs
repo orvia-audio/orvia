@@ -65,24 +65,35 @@ pub fn sources() -> Result<Vec<(String, String)>, cpal::Error> {
         .collect())
 }
 
+/// Device-selection prompt used when a route requires an explicit virtual output.
+pub const CHOOSE_OUTPUT: &str = "Choose a virtual output in microphone settings";
+
 /// Open the selected playback side of the cable used by the live mixer.
 ///
 /// # Errors
 ///
 /// Returns an error if no supported virtual output is available.
 pub fn virtual_output(id: Option<&str>) -> Result<Device> {
-    let host = host()?;
+    virtual_output_on(&host()?, id)
+}
+
+/// Resolve a supported virtual playback device using an already connected host.
+///
+/// # Errors
+///
+/// Returns an error if the selected output is unavailable or unsupported.
+pub fn virtual_output_on(host: &cpal::Host, id: Option<&str>) -> Result<Device> {
     let output = match id {
         Some(id) => host
             .device_by_id(&id.parse()?)
             .context("Selected virtual output is disconnected")?,
         #[cfg(not(windows))]
-        None => anyhow::bail!("Choose a virtual output in microphone settings"),
+        None => anyhow::bail!(CHOOSE_OUTPUT),
         #[cfg(windows)]
         None => host
             .output_devices()?
             .find(crate::is_orvia)
-            .context("Choose a virtual output in microphone settings")?,
+            .context(CHOOSE_OUTPUT)?,
     };
     ensure!(
         output.description()?.supports_output() && is_virtual_cable(&output),

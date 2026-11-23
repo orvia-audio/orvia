@@ -40,6 +40,15 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         processes.callback(stop)
         return process
 
+    # An unconfigured engine can report the selection prompt before a sound server exists.
+    state = Path(tmp, "orvia")
+    state.mkdir()
+    (state / "observe").touch()
+    engine = start("orvia-engine")
+    status = state / "status.json"
+    wait_for(lambda: status.exists() and json.loads(status.read_text())["message"]
+             == "Choose a virtual output in microphone settings",
+             "An unset output should wait for device selection")
     start("pipewire")
     wait_for(lambda: Path(tmp, "pipewire-0").is_socket(), "PipeWire did not start")
     start("wireplumber")
@@ -55,15 +64,11 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     run("pactl", "load-module", "module-remap-source", "master=test_input.monitor",
         "source_name=test_microphone")
     run("pactl", "load-module", "module-null-sink", "sink_name=test_headphones", "rate=48000")
-    state = Path(tmp, "orvia")
-    state.mkdir()
     (state / "settings.json").write_text(json.dumps({
         "input": "pulseaudio:test_microphone", "output": "pulseaudio:orvia_output",
         "gain_percent": 100, "suppress_noise": False, "monitor": "pulseaudio:test_headphones",
     }))
     (state / "observe").touch()
-    engine = start("orvia-engine")
-    status = state / "status.json"
     wait_for(lambda: status.exists() and "Streaming" in json.loads(status.read_text())["message"],
              "Orvia did not start streaming")
     samples = array.array("h", (int(8000 * math.sin(2 * math.pi * 440 * i / 48000))

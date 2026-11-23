@@ -8,6 +8,7 @@ use gpui::{
 use microphone_test::TestAction;
 use orvia_core::{EngineStatus, Language, Mixing, NoiseMethod, Settings, data_dir, read_json};
 use semver::Version;
+use slider::{Slider, SliderDrag};
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -67,14 +68,6 @@ enum Control {
     Releases,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Slider {
-    Gain,
-    Suppression,
-    LowCut,
-    Compression,
-}
-
 /// Geometry and keyboard focus of a measured control in the scrolling page.
 struct ControlAnchor {
     bounds: std::rc::Rc<std::cell::Cell<Bounds<gpui::Pixels>>>,
@@ -100,7 +93,7 @@ struct Panel {
     dir: PathBuf,
     root: FocusHandle,
     slider_anchors: [ControlAnchor; 4],
-    dragging_slider: Option<Slider>,
+    dragging_slider: Option<SliderDrag>,
     prefs: Settings,
     inputs: Vec<(String, String)>,
     outputs: Vec<(String, String)>,
@@ -141,7 +134,7 @@ impl Panel {
             );
             Settings::default()
         });
-        if !test_only && let Err(e) = engine_control::start() {
+        if !test_only && let Err(e) = engine_control::start(&dir) {
             error = format!(
                 "{} · {e}",
                 prefs
@@ -152,8 +145,74 @@ impl Panel {
         let poll_dir = dir.clone();
         let handle = window.window_handle();
         cx.spawn(async move |this, cx| {
+            let prefs_path = poll_dir.join("settings.json");
+            let status_path = poll_dir.join("status.json");
             let mut heartbeat = Instant::now() - Duration::from_secs(3);
+            let mut last_poll = heartbeat;
+            let mut last_prefs = heartbeat;
+            let mut last_observer = None;
+            let frame_seen = std::rc::Rc::new(std::cell::Cell::new(true));
+            let mut last_frame = Instant::now();
+            let mut was_visible = true;
             loop {
+                // GPUI receives compositor frames for visible windows even without keyboard focus.
+                // Keep one callback pending while minimized, without requesting a repaint.
+                if frame_seen.replace(false) {
+                    last_frame = Instant::now();
+                    let seen = frame_seen.clone();
+                    if handle
+                        .update(cx, |_, window, _| {
+                            window.on_next_frame(move |_, _| seen.set(true));
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                let visible = last_frame.elapsed() < Duration::from_secs(1);
+                let restored = visible && !was_visible;
+                was_visible = visible;
+                let Ok((observer, live, audio)) = this.read_with(cx, |p, _| {
+                    let audio = p.polling_audio();
+                    if !visible && !audio {
+                        return (None, false, false);
+                    }
+                    let mixer = visible && p.live_mixer();
+                    let spectrum = mixer && p.show_spectrum;
+                    let legacy = p
+                        .status
+                        .as_ref()
+                        .is_none_or(|s| s.version != env!("CARGO_PKG_VERSION"));
+                    let observer = if legacy {
+                        "observe"
+                    } else if spectrum {
+                        orvia_core::spectrum::OBSERVER_FILE
+                    } else if mixer {
+                        "observe"
+                    } else {
+                        orvia_core::SUMMARY_OBSERVER
+                    };
+                    let streaming = p
+                        .status
+                        .as_ref()
+                        .is_some_and(|s| s.message.starts_with("Streaming"));
+                    (
+                        Some((observer, spectrum && legacy)),
+                        audio || (mixer && streaming),
+                        audio,
+                    )
+                }) else {
+                    break;
+                };
+                if !live
+                    && !restored
+                    && observer == last_observer
+                    && last_poll.elapsed() < Duration::from_secs(1)
+                {
+                    Timer::after(Duration::from_millis(250)).await;
+                    continue;
+                }
+                last_poll = Instant::now();
                 if !test_only && fs::remove_file(poll_dir.join("close-window")).is_ok() {
                     let _ = handle.update(cx, |_, w, _| w.remove_window());
                     break;
@@ -164,48 +223,63 @@ impl Panel {
                         w.activate_window();
                     });
                 }
-                let refresh = heartbeat.elapsed() >= Duration::from_secs(2);
-                if refresh {
-                    // An empty rewrite can leave the previous modification time on Windows.
-                    let _ = fs::write(poll_dir.join("observe"), b"1");
+                if let Some((name, legacy_spectrum)) = observer
+                    && (last_observer != observer || heartbeat.elapsed() >= Duration::from_secs(2))
+                {
+                    // Older engines require both heartbeats to publish a spectrum.
+                    let _ = fs::write(poll_dir.join(name), b"1");
+                    if legacy_spectrum {
+                        let _ = fs::write(poll_dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
+                    }
                     heartbeat = Instant::now();
                 }
-                let status = read_json::<EngineStatus>(&poll_dir.join("status.json"))
-                    .ok()
+                last_observer = observer;
+                let status = observer
+                    .and_then(|_| read_json::<EngineStatus>(&status_path).ok())
                     .filter(|s| {
                         s.observed
                             .elapsed()
                             .is_ok_and(|age| age < Duration::from_secs(2))
                     });
-                let prefs = Settings::load(&poll_dir.join("settings.json")).ok();
+                // Local edits update the panel immediately. Active recordings and auditions
+                // also check external edits on every poll to detect route changes.
+                let prefs = if audio || restored || last_prefs.elapsed() >= Duration::from_secs(1) {
+                    last_prefs = Instant::now();
+                    Settings::load(&prefs_path).ok()
+                } else {
+                    None
+                };
                 if this
                     .update(cx, |p, cx| {
-                        if refresh
-                            && p.page == Page::Mixer
-                            && p.tone_setup.is_none()
-                            && p.show_spectrum
-                        {
-                            let _ =
-                                fs::write(poll_dir.join(orvia_core::spectrum::OBSERVER_FILE), b"1");
-                        }
-                        p.status = status.or_else(|| {
-                            p.status.take().filter(|s| {
+                        let retain = status.is_none()
+                            && p.status.as_ref().is_some_and(|s| {
                                 s.observed
                                     .elapsed()
                                     .is_ok_and(|age| age < Duration::from_secs(2))
-                            })
-                        });
-                        if let Some(prefs) = prefs {
-                            p.prefs = prefs;
+                            });
+                        let mut redraw = false;
+                        if !retain {
+                            redraw = p.status_changed(status.as_ref());
+                            p.status = status;
                         }
+                        if let Some(prefs) = prefs
+                            && p.prefs != prefs
+                        {
+                            p.prefs = prefs;
+                            redraw = true;
+                        }
+                        redraw |= p.polling_audio();
                         p.poll_tone_setup(cx);
                         if p.page == Page::MicTest {
                             p.poll_mic_test(cx);
                         }
                         if !p.test_only && p.prefs.check_updates_automatically && p.updates.due() {
                             p.check_for_updates(cx);
+                            redraw = true;
                         }
-                        cx.notify();
+                        if visible && (redraw || restored) {
+                            cx.notify();
+                        }
                     })
                     .is_err()
                 {
@@ -215,24 +289,67 @@ impl Panel {
             }
         })
         .detach();
-        let mut panel = Self::empty(dir, installed, test_only, cx);
+        let mut panel = Self::empty(dir, installed, test_only, window, cx);
         window.focus(&panel.root);
         panel.updates = updates::Updates::load(&panel.dir);
         panel.prefs = prefs;
         panel.error = error;
-        panel.inputs = orvia_engine::inputs().unwrap_or_default();
-        panel.outputs = orvia_engine::outputs().unwrap_or_default();
-        panel.receivers = orvia_engine::mic_test::sources().unwrap_or_default();
-        panel.monitors = orvia_engine::monitors().unwrap_or_default();
         if test_only {
             panel.page = Page::MicTest;
             panel.open_mic_test();
+        } else {
+            panel.monitors = orvia_engine::monitors().unwrap_or_default();
         }
         panel
     }
 
+    fn live_mixer(&self) -> bool {
+        self.page == Page::Mixer && self.tone_setup.is_none()
+    }
+
+    fn polling_audio(&self) -> bool {
+        self.tone_setup
+            .as_ref()
+            .is_some_and(tone_setup::Setup::polling_audio)
+            || self.test.busy()
+            || self.test.adjust.as_ref().is_some_and(|a| {
+                !matches!(
+                    a.stage,
+                    auto_adjust::Stage::Ready(_) | auto_adjust::Stage::Failed(_)
+                )
+            })
+    }
+
+    /// Compare the diagnostics drawn on this page. Heartbeats update liveness without
+    /// repainting a static page or redrawing an unchanged signal.
+    fn status_changed(&self, next: Option<&EngineStatus>) -> bool {
+        let (Some(old), Some(new)) = (&self.status, next) else {
+            return self.status.is_some() != next.is_some();
+        };
+        match self.page {
+            Page::Devices => false,
+            Page::Mixer if !self.live_mixer() => false,
+            Page::Preferences => old.version != new.version,
+            Page::MicTest => old.message != new.message || old.version != new.version,
+            Page::Mixer => Self::mixer_status_changed(
+                old,
+                new,
+                self.show_spectrum,
+                self.prefs.active_noise_method().is_some(),
+            ),
+        }
+    }
+
     /// Construct the window state before attaching audio devices and background tasks.
-    fn empty(dir: PathBuf, installed: Version, test_only: bool, cx: &Context<Self>) -> Self {
+    fn empty(
+        dir: PathBuf,
+        installed: Version,
+        test_only: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let slider_anchors = std::array::from_fn(|_| ControlAnchor::new(cx));
+        Self::observe_slider_focus(&slider_anchors, window, cx);
         Self {
             updates: Default::default(),
             show_spectrum: false,
@@ -241,7 +358,7 @@ impl Panel {
             show_update_feedback: false,
             dir,
             root: cx.focus_handle(),
-            slider_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
+            slider_anchors,
             picker_anchors: std::array::from_fn(|_| ControlAnchor::new(cx)),
             picker_cursor: 0,
             picker_scroll: gpui::ScrollHandle::new(),
@@ -289,6 +406,7 @@ impl Panel {
     }
 
     fn activate(&mut self, control: Control, cx: &mut Context<Self>) {
+        self.finish_slider();
         match control {
             Control::ShowSpectrum(on) => {
                 self.show_spectrum = on;
@@ -306,6 +424,11 @@ impl Panel {
                     }
                     if page == Page::MicTest {
                         self.open_mic_test();
+                    } else if page == Page::Devices {
+                        let devices = orvia_engine::RouteDevices::discover().unwrap_or_default();
+                        self.inputs = devices.inputs;
+                        self.outputs = devices.outputs;
+                        self.receivers = devices.receivers;
                     }
                 }
                 self.show_update_feedback = false;
@@ -444,29 +567,32 @@ impl Panel {
                             settings.noise_method = method;
                         }
                     }
-                    Control::Slide(Slider::Gain, percent) => settings.gain_percent = percent,
-                    Control::Slide(Slider::LowCut, hz) => settings.low_cut_hz = hz,
-                    Control::Slide(Slider::Compression, step) => {
-                        settings.compressor_ratio = step + 1
-                    }
-                    Control::Slide(Slider::Suppression, db) => settings.deep_filter_limit_db = db,
+                    Control::Slide(slider, value) => slider.set(settings, value),
                     _ => unreachable!(),
-                })
-                .map(|saved| self.prefs = saved);
-                self.error = result
-                    .err()
-                    .map(|e| {
-                        format!(
-                            "{} · {e}",
-                            self.prefs
-                                .language
-                                .text("Cannot save settings", "設定を保存できません")
-                        )
-                    })
-                    .unwrap_or_default();
+                });
+                self.settings_saved(result);
             }
         }
         cx.notify();
+    }
+
+    fn settings_saved(&mut self, result: io::Result<Settings>) -> bool {
+        match result {
+            Ok(saved) => {
+                self.prefs = saved;
+                self.error.clear();
+                true
+            }
+            Err(error) => {
+                self.error = format!(
+                    "{} · {error}",
+                    self.prefs
+                        .language
+                        .text("Cannot save settings", "設定を保存できません")
+                );
+                false
+            }
+        }
     }
 }
 
@@ -475,6 +601,7 @@ mod engine_control;
 mod icons;
 mod microphone_test;
 mod reading;
+mod slider;
 mod tone_setup;
 mod view;
 

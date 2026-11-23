@@ -1,6 +1,7 @@
 //! Resident audio process. Closing the settings window leaves its streams running.
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod control_files;
 mod log;
 mod spectrum;
 mod stream;
@@ -12,9 +13,7 @@ mod tray;
 
 use anyhow::Result;
 use fs2::FileExt;
-use orvia_core::{
-    AUDITION_FILE, Audition, EngineEvent, EngineStatus, Settings, data_dir, read_json, write_json,
-};
+use orvia_core::{EngineEvent, EngineStatus, Settings, data_dir, write_json};
 use std::{
     fs, io,
     path::Path,
@@ -51,16 +50,8 @@ fn stop_request(dir: &Path) -> std::path::PathBuf {
     dir.join(format!("stop-engine-{}", std::process::id()))
 }
 
-fn recently_observed(path: &Path) -> bool {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age < Duration::from_secs(5))
-}
-
 fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> bool) -> Result<()> {
-    let stop_request = stop_request(dir);
+    let mut controls = control_files::ControlFiles::new(dir);
     let mut log = log::EngineLog::open(dir);
     log.record(EngineEvent::Started(env!("CARGO_PKG_VERSION").into()));
     let mut last_monitor = (false, None);
@@ -69,14 +60,22 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
     let mut last_attempt = Instant::now() - Duration::from_secs(2);
     let mut last_default_check = last_attempt;
     let mut message = String::new();
-    let mut was_observed = false;
+    let mut published: Option<EngineStatus> = None;
+    let mut last_publish = last_attempt;
+    let status_path = dir.join("status.json");
+    let settings_path = dir.join("settings.json");
     loop {
-        if stop_request.exists() {
-            let _ = fs::remove_file(&stop_request);
+        let requests = controls.poll();
+        if requests.stop {
+            let _ = fs::remove_file(&controls.stop);
             break;
         }
         let now = Instant::now();
-        let settings = Settings::load(&dir.join("settings.json"));
+        let metering = requests.metering;
+        let spectrum_requested = requests.spectrum;
+        let live = metering || spectrum_requested;
+        let observed = live || requests.summary;
+        let settings = Settings::load(&settings_path);
         if menu(settings.as_ref().ok().map(|s| s.language)) {
             break;
         }
@@ -109,6 +108,15 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     message = error;
                 }
             }
+            #[cfg(not(windows))]
+            Ok(s) if s.output.is_none() => {
+                // Device discovery cannot resolve an unselected output on these platforms.
+                let prompt = orvia_engine::mic_test::CHOOSE_OUTPUT;
+                if message != prompt {
+                    message = prompt.to_owned();
+                    log.record(EngineEvent::RouteError(message.clone()));
+                }
+            }
             Ok(mut s) => {
                 let default_changed = if s.input.is_none()
                     && last_default_check.elapsed() >= Duration::from_secs(2)
@@ -116,7 +124,7 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     last_default_check = now;
                     running
                         .as_ref()
-                        .is_some_and(|r| Some(&r.input_id) != stream::default_input_id().as_ref())
+                        .is_some_and(stream::Route::default_input_changed)
                 } else {
                     false
                 };
@@ -143,13 +151,13 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
                     }
                 }
                 if let Some(route) = &mut running {
-                    let request = read_json::<Audition>(&dir.join(AUDITION_FILE))
-                        .ok()
+                    let request = controls
+                        .audition(&requests)
                         .filter(|r| r.active(&s, SystemTime::now()));
                     if let Some(r) = &request {
                         r.target.apply(&mut s);
                     }
-                    route.update_controls(&s);
+                    route.update_controls(&s, metering);
                     audition = request
                         .filter(|_| route.controls_applied(&s))
                         .map(|r| r.started);
@@ -169,40 +177,59 @@ fn supervise(dir: &Path, mut menu: impl FnMut(Option<orvia_core::Language>) -> b
             last_monitor = monitor;
         }
         // Persist diagnostics only while a settings window is observing the engine.
-        let observed = recently_observed(&dir.join("observe"));
-        let spectrum = running.as_mut().and_then(|route| {
-            route
-                .spectrum
-                .poll(observed && recently_observed(&dir.join(orvia_core::spectrum::OBSERVER_FILE)))
+        let spectrum = running
+            .as_mut()
+            .and_then(|route| route.spectrum.poll(spectrum_requested));
+        let changed = published.as_ref().is_none_or(|last| {
+            last.message != message
+                || last.audition != audition
+                || last.monitoring != last_monitor.0
+                || last.monitor_error != last_monitor.1
         });
-        if observed {
+        let heartbeat = last_publish.elapsed() >= Duration::from_secs(1);
+        if observed && (changed || heartbeat || (live && running.is_some())) {
             let (peak, missing_frames, dropped_frames) = running
                 .as_ref()
                 .map(stream::Route::metrics)
                 .unwrap_or_default();
-            let status = EngineStatus {
-                spectrum,
-                signal: running
-                    .as_ref()
-                    .map(stream::Route::envelopes)
-                    .unwrap_or_default(),
-                monitoring: last_monitor.0,
-                monitor_error: last_monitor.1.clone(),
-                audition,
-                observed: SystemTime::now(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                message: message.clone(),
-                peak,
-                missing_frames,
-                dropped_frames,
-            };
-            // A busy diagnostics file must not interrupt the audio streams.
-            let _ = write_json(&dir.join("status.json"), &status);
-        } else if was_observed {
-            let _ = fs::remove_file(dir.join("status.json"));
+            let signal = running
+                .as_ref()
+                .filter(|_| metering)
+                .map(stream::Route::envelopes)
+                .unwrap_or_default();
+            let audio_changed = published.as_ref().is_none_or(|last| {
+                last.signal != signal
+                    || last.spectrum != spectrum
+                    || last.peak != peak
+                    || last.missing_frames != missing_frames
+                    || last.dropped_frames != dropped_frames
+            });
+            // An unchanged graph only needs a liveness heartbeat. New audio and route
+            // events still reach observers on the next supervisor tick.
+            if changed || audio_changed || heartbeat {
+                let status = EngineStatus {
+                    spectrum,
+                    signal,
+                    monitoring: last_monitor.0,
+                    monitor_error: last_monitor.1.clone(),
+                    audition,
+                    observed: SystemTime::now(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                    message: message.clone(),
+                    peak,
+                    missing_frames,
+                    dropped_frames,
+                };
+                // A busy diagnostics file must not interrupt the audio streams.
+                if write_json(&status_path, &status).is_ok() {
+                    published = Some(status);
+                    last_publish = now;
+                }
+            }
+        } else if !observed && published.take().is_some() {
+            let _ = fs::remove_file(&status_path);
         }
-        was_observed = observed;
-        thread::sleep(Duration::from_millis(200));
+        thread::sleep(Duration::from_millis(if observed { 200 } else { 500 }));
     }
     log.record(EngineEvent::Stopped);
     Ok(())

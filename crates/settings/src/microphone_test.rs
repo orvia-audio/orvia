@@ -1,6 +1,6 @@
 //! Session-scoped controls for recording and replaying the virtual microphone.
 use super::*;
-use orvia_engine::mic_test::{self, Clip, Playback, Recording};
+use orvia_engine::mic_test::{self, FileRecording, Playback, SavedClip};
 
 /// The operation shown on a microphone test button when it was rendered.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -29,9 +29,9 @@ pub(super) struct MicTest {
     pub(super) sources: Vec<(String, String)>,
     pub(super) source: Option<String>,
     pub(super) speaker: Option<String>,
-    pub(super) recording: Option<Recording>,
+    pub(super) recording: Option<FileRecording>,
     pub(super) reader: reading::Reader,
-    pub(super) clip: Option<Clip>,
+    pub(super) clip: Option<SavedClip>,
     pub(super) playback: Option<Playback>,
     pub(super) adjust: Option<super::auto_adjust::AutoAdjust>,
     #[cfg(test)]
@@ -76,7 +76,7 @@ impl Panel {
         }
         self.test.source = mic_test::routed_source(&self.prefs).ok();
         self.test.speaker = self.prefs.monitor.clone();
-        match Clip::load_latest(&self.dir.join("mic-test")) {
+        match SavedClip::latest(&self.dir.join("mic-test")) {
             Ok(clip) => self.test.clip = clip,
             Err(error) => self.test_error(error),
         }
@@ -125,11 +125,7 @@ impl Panel {
             return;
         };
         self.test.recording_route = None;
-        let result = recording.finish().and_then(|clip| {
-            clip.save_latest(&self.dir.join("mic-test"))?;
-            Ok(clip)
-        });
-        match result {
+        match recording.finish() {
             Ok(clip) => self.test.clip = Some(clip),
             Err(e) => self.test_error(e),
         }
@@ -137,7 +133,7 @@ impl Panel {
 
     fn start_test_recording(&mut self) {
         if let Some(id) = &self.test.source {
-            match Recording::start(id) {
+            match FileRecording::start(id, &self.dir.join("mic-test")) {
                 Ok(recording) => {
                     self.error.clear();
                     self.test.recording = Some(recording);
@@ -202,7 +198,11 @@ impl Panel {
                     )
                     .into();
             } else {
-                match self.test.reader.listen(recording, self.prefs.language) {
+                match self
+                    .test
+                    .reader
+                    .listen_saved(recording, self.prefs.language)
+                {
                     Ok(true) => self.finish_test_recording(),
                     Ok(false) => {}
                     Err(e) => {

@@ -12,11 +12,19 @@ Find native packages in `dist/`. The macOS app is ad-hoc signed. If Gatekeeper b
 
 ## Audio routing checks
 
+Measure processing cost without opening an audio device with
+`cargo run --release --locked -p orvia-core --example runtime_cost -- mono-input`.
+Use `stereo-input` for two independent channels, `bypass` for suppression off,
+`quiet-compressor` for a 2:1 compressor below its threshold, or `calibration` for
+a guided suppression measurement. Compare the same case and toolchain across
+revisions. The live cases report median and p99 processing time per 10 ms block
+after warm-up.
+
 Under **Mixer → Tone → Auto setup**, start recording and stay quiet for two seconds. Tap your desk once to include its vibration if needed. Select **Continue to reading** and read the numbers at your usual distance. During capture, the engine bypasses low cut and compression and sets gain to 100%. The selected noise filter stays active if enabled. Listen to **Current** and **Recommended** on the same receiver recording, then choose **Apply settings** to save all three controls.
 
 Under **Mixer → DeepFilterNet3**, choose **Auto adjust**. Stay quiet for the room sample. When the numbers appear, say a few words at your usual distance. Each take ends after the sound returns near room level for 1.5 seconds. Repeat at the next prompt. For the final reading it temporarily auditions the suggested limit, records the receiving endpoint, restores the saved limit and plays what the virtual microphone received. Choose **Apply** to keep the suggestion.
 
-The suggestion aims for 9 dB of room noise reduction while keeping the first 150 ms of each phrase within 6 dB of the original in active 50 ms windows. The audition recording stays in memory for this session.
+The suggestion aims for 9 dB of room noise reduction while keeping the first 150 ms of each phrase within 6 dB of the original in active 50 ms windows. The session holds the audition in a temporary WAV.
 
 The headphone monitor listens to the receiving side of the selected virtual cable. If matching is ambiguous, set **Devices → Virtual microphone recording endpoint**.
 

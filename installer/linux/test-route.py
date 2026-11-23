@@ -40,6 +40,15 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         processes.callback(stop)
         return process
 
+    # An unconfigured engine can report the selection prompt before a sound server exists.
+    state = Path(tmp, "orvia")
+    state.mkdir()
+    (state / "observe").touch()
+    engine = start("orvia-engine")
+    status = state / "status.json"
+    wait_for(lambda: status.exists() and json.loads(status.read_text())["message"]
+             == "Choose a virtual output in microphone settings",
+             "An unset output should wait for device selection")
     start("pipewire")
     wait_for(lambda: Path(tmp, "pipewire-0").is_socket(), "PipeWire did not start")
     start("wireplumber")
@@ -55,15 +64,11 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     run("pactl", "load-module", "module-remap-source", "master=test_input.monitor",
         "source_name=test_microphone")
     run("pactl", "load-module", "module-null-sink", "sink_name=test_headphones", "rate=48000")
-    state = Path(tmp, "orvia")
-    state.mkdir()
     (state / "settings.json").write_text(json.dumps({
         "input": "pulseaudio:test_microphone", "output": "pulseaudio:orvia_output",
         "gain_percent": 100, "suppress_noise": False, "monitor": "pulseaudio:test_headphones",
     }))
     (state / "observe").touch()
-    engine = start("orvia-engine")
-    status = state / "status.json"
     wait_for(lambda: status.exists() and "Streaming" in json.loads(status.read_text())["message"],
              "Orvia did not start streaming")
     samples = array.array("h", (int(8000 * math.sin(2 * math.pi * 440 * i / 48000))
@@ -75,14 +80,15 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         time.sleep(0.5)
         tone = Path(tmp, "tone.raw")
         tone.write_bytes(samples.tobytes())
-        (state / "observe").touch()
         (state / "observe-spectrum").touch()
+        (state / "observe").unlink(missing_ok=True)
         with tone.open("rb") as source:
             player = start("pacat", "-d", "test_input", "--latency-msec=20", "--raw", "--format=s16le",
                            "--channels=1", "--rate=48000", stdin=source)
             def measured_tone():
-                hz = (json.loads(status.read_text()).get("spectrum") or {}).get("peak_hz")
-                return hz is not None and abs(hz - 440) <= 1
+                report = json.loads(status.read_text())
+                hz = (report.get("spectrum") or {}).get("peak_hz")
+                return not report["signal"]["peaks"] and hz is not None and abs(hz - 440) <= 1
             wait_for(measured_tone, "Output spectrum did not identify the 440 Hz test tone", timeout=4)
             assert player.wait(timeout=5) == 0
         time.sleep(0.5)
@@ -99,6 +105,42 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
         snapshot = json.loads(status.read_text()) if status.exists() else {}
         snapshot.pop("signal", None)
         raise AssertionError(f"440 Hz amplitude {amplitude:.0f} in {len(captured)} samples; engine {snapshot}")
+    # Equal spectrum frames need a heartbeat. Counter changes still publish immediately.
+    spectrum_lease = state / "observe-spectrum"
+    spectrum_lease.touch()
+    def quiet_spectrum():
+        if not status.exists():
+            return False
+        report = json.loads(status.read_text())
+        spectrum = report.get("spectrum")
+        return spectrum is not None and not any(spectrum["bands"])
+    wait_for(quiet_spectrum, "The spectrum did not settle after the tone", timeout=4)
+    previous_report = None
+    previous_time = 0
+    seen = 0
+    deadline = time.monotonic() + 2.6
+    spectrum_lease.touch()
+    while time.monotonic() < deadline:
+        report = json.loads(status.read_text())
+        stamp = report.pop("observed")
+        published = stamp["secs_since_epoch"] + stamp["nanos_since_epoch"] / 1e9
+        if published != previous_time:
+            if report == previous_report:
+                assert published - previous_time >= 0.9, "Repeated an unchanged live report before its heartbeat"
+            previous_report, previous_time = report, published
+            seen += 1
+        time.sleep(0.04)
+    assert seen >= 2, "The live spectrum lost its health heartbeat"
+    # Summary observers receive fresh route health without collecting waveform samples.
+    (state / "observe-summary").touch()
+    (state / "observe-spectrum").unlink(missing_ok=True)
+    def summary_only():
+        if not status.exists():
+            return False
+        report = json.loads(status.read_text())
+        return ("Streaming" in report["message"] and not report["signal"]["peaks"]
+                and report.get("spectrum") is None)
+    wait_for(summary_only, "Summary observer kept collecting mixer diagnostics", timeout=4)
     # Stand in for the desktop text viewer inside this isolated X11 session.
     opener = Path(tmp, "xdg-open")
     opener.write_text('#!/bin/sh\nprintf "%s" "$1" > "$XDG_RUNTIME_DIR/opened-file"\n')
@@ -113,6 +155,14 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     wait_for(window_visible, "The installed mixer window did not appear", timeout=45)
     window = run("xdotool", "search", "--onlyvisible", "--name", "^Orvia$").splitlines()[0]
     run("xdotool", "windowsize", window, "830", "610")
+    def waveform_visible():
+        return status.exists() and bool(json.loads(status.read_text())["signal"]["peaks"])
+
+    wait_for(waveform_visible, "The mixer did not request waveform samples")
+    run("xdotool", "windowunmap", "--sync", window)
+    wait_for(lambda: not status.exists(), "The hidden mixer kept its observer active", timeout=10)
+    run("xdotool", "windowmap", "--sync", window)
+    wait_for(waveform_visible, "The restored mixer did not resume waveform observation", timeout=4)
     opened = Path(tmp, "opened-file")
 
     def open_log_from_preferences():
@@ -177,9 +227,13 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     wait_for(recording, "Retake did not start a new recording")
     time.sleep(11)
     assert recording() and take.read_bytes() == first, "Silence before speech must not end a take"
+    draft, = (p for p in take.parent.iterdir() if p != take)
+    bytes_per_second = int.from_bytes(first[28:32], "little")
+    assert draft.stat().st_size >= 8 * bytes_per_second, "Waiting audio was not written incrementally"
     speak("orvia_output")
     wait_for(lambda: take.stat().st_size > len(first), "A short utterance did not finish after silence", timeout=15)
     second = take.read_bytes()
+    assert len(second) >= 11 * bytes_per_second and not draft.exists()
     run("xdotool", "key", "Return")
     wait_for(playing, "The primary button did not play the automatically stopped retake")
     assert take.read_bytes() == second and not recording()
@@ -303,6 +357,20 @@ with tempfile.TemporaryDirectory() as tmp, contextlib.ExitStack() as processes:
     assert take.read_bytes() == second
     (state / "close-window").touch()
     assert mixer.wait(timeout=10) == 0
+    # Follow default changes through a live server connection even when both inputs stay online.
+    run("pactl", "load-module", "module-remap-source", "master=test_input.monitor",
+        "source_name=test_alternate", "source_properties=device.description=OrviaAlternate")
+    run("pactl", "set-default-source", "test_alternate")
+    set_controls(input=None)
+
+    def streaming_from(name):
+        (state / "observe-summary").touch()
+        return status.exists() and f"Streaming · {name} →" in json.loads(status.read_text())["message"]
+
+    wait_for(lambda: streaming_from("OrviaAlternate"), "The engine did not open the default input")
+    run("pactl", "set-default-source", "test_microphone")
+    mic_name = next(d["description"] for d in pulse_devices("sources") if d["name"] == "test_microphone")
+    wait_for(lambda: streaming_from(mic_name), "The engine did not follow the new default input")
     assert engine.poll() is None
     (state / f"stop-engine-{engine.pid}").touch()
     assert engine.wait(timeout=10) == 0

@@ -5,7 +5,7 @@ use orvia_core::{
     calibration::{Recommendation, SampleError},
     write_json,
 };
-use orvia_engine::mic_test::{self, Clip, Recording};
+use orvia_engine::mic_test::{self, Clip, FileRecording, Recording, SavedClip};
 use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
     time::SystemTime,
@@ -23,13 +23,13 @@ pub(super) enum Stage {
     Auditioning {
         result: Recommendation,
         trial: Trial,
-        recording: Option<Box<(Recording, Recording)>>,
+        recording: Option<Box<(Recording, FileRecording)>>,
         reader: reading::Reader,
         ending: Option<Instant>,
     },
     Restoring {
         result: Recommendation,
-        clip: Clip,
+        clip: SavedClip,
         issued: SystemTime,
         since: Instant,
     },
@@ -176,6 +176,7 @@ impl Stage {
                     });
                 };
                 if !reader.listen(&mut recording, l)? {
+                    reader.trim_waiting(&mut recording);
                     return Ok(Self::Phrase {
                         room,
                         first,
@@ -196,7 +197,7 @@ impl Stage {
                 let mixing = settings.mixing;
                 cx.background_executor()
                     .spawn(async move {
-                        let _ = tx.send(room.recommend([&first, &phrase], mixing));
+                        let _ = tx.send(room.recommend_owned([first, phrase], mixing));
                     })
                     .detach();
                 Ok(Self::Analyzing(rx))
@@ -242,11 +243,12 @@ impl Stage {
                     .is_some_and(|s| s.audition == Some(trial.issued));
                 let recording = match recording {
                     Some(_) if !acknowledged => return Err(changed(l)),
-                    Some(streams) => {
-                        let (mut microphone, mut receiver) = *streams;
-                        receiver.collect().map_err(|e| e.to_string())?;
+                    Some(mut streams) => {
+                        let (microphone, receiver) = &mut *streams;
+                        receiver.drain().map_err(|e| e.to_string())?;
                         if let Some(stop) = ending {
                             if stop.elapsed() >= Duration::from_millis(350) {
+                                let (_, receiver) = *streams;
                                 let clip = receiver.finish().map_err(|e| e.to_string())?;
                                 let issued = trial.issued;
                                 drop(trial);
@@ -257,13 +259,18 @@ impl Stage {
                                     since: Instant::now(),
                                 });
                             }
-                        } else if reader.listen(&mut microphone, l)? {
-                            ending = Some(Instant::now());
+                        } else {
+                            let finished = reader.listen(microphone, l)?;
+                            reader.discard_checked(microphone);
+                            if finished {
+                                ending = Some(Instant::now());
+                            }
                         }
-                        Some(Box::new((microphone, receiver)))
+                        Some(streams)
                     }
                     None if acknowledged => {
-                        let receiver = Recording::start(source).map_err(|e| e.to_string())?;
+                        let receiver =
+                            FileRecording::start_preview(source).map_err(|e| e.to_string())?;
                         let microphone = Recording::start_microphone(settings.input.as_deref())
                             .map_err(|e| e.to_string())?;
                         Some(Box::new((microphone, receiver)))

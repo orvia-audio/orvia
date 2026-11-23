@@ -3,7 +3,7 @@ use orvia_core::{EngineStatus, read_json};
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    process::{Child, Command},
+    process::Command,
     thread,
     time::{Duration, Instant, SystemTime},
 };
@@ -13,8 +13,18 @@ fn executable() -> io::Result<PathBuf> {
         .with_file_name(format!("orvia-engine{}", std::env::consts::EXE_SUFFIX)))
 }
 
-pub(super) fn start() -> io::Result<Child> {
-    Command::new(executable()?).spawn()
+/// Start the per-user engine if its singleton lock has no owner.
+pub(super) fn start(dir: &Path) -> io::Result<()> {
+    if !engine_running(dir) {
+        Command::new(executable()?).spawn()?;
+    }
+    Ok(())
+}
+
+fn engine_running(dir: &Path) -> bool {
+    // Only a contended lock proves the engine is running. A stale file can survive a crash.
+    fs::File::open(dir.join("engine.lock"))
+        .is_ok_and(|file| matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)))
 }
 
 #[cfg(windows)]
@@ -100,4 +110,21 @@ pub(super) fn restart(dir: &Path) -> io::Result<()> {
         io::ErrorKind::TimedOut,
         "Audio engine has not reported its status",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fs2::FileExt;
+
+    #[test]
+    fn only_a_held_engine_lock_skips_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!engine_running(dir.path()));
+        let owner = fs::File::create(dir.path().join("engine.lock")).unwrap();
+        owner.try_lock_exclusive().unwrap();
+        assert!(engine_running(dir.path()));
+        drop(owner);
+        assert!(!engine_running(dir.path()));
+    }
 }

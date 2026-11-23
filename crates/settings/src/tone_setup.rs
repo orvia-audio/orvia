@@ -2,7 +2,7 @@
 use super::*;
 use auto_adjust::Trial;
 use orvia_core::{AuditionTarget, Tone, calibration::SampleError};
-use orvia_engine::mic_test::{self, Clip, Playback, Recording};
+use orvia_engine::mic_test::{self, Clip, Playback, Recording, RoomRecording, TonePreview};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 #[derive(Clone, Copy)]
@@ -14,12 +14,12 @@ pub(super) enum Action {
     Apply,
 }
 
-type Comparison = (Tone, [Clip; 2]);
+type Comparison = (Tone, [TonePreview; 2]);
 
 enum Stage {
     Intro,
     Opening,
-    Room(Recording, Instant),
+    Room(RoomRecording, Instant),
     Reading(Clip, Recording, reading::Reader),
     Analyzing(Receiver<Result<Comparison, SampleError>>),
     Ready(Comparison),
@@ -48,6 +48,14 @@ pub(super) enum Screen<'a> {
 }
 
 impl Setup {
+    pub(super) fn polling_audio(&self) -> bool {
+        self.playback.is_some()
+            || !matches!(
+                self.stage,
+                Stage::Intro | Stage::Ready(_) | Stage::Failed(_)
+            )
+    }
+
     pub(super) fn screen(&self) -> Screen<'_> {
         match &self.stage {
             Stage::Intro => Screen::Intro,
@@ -164,7 +172,7 @@ impl Setup {
         match &mut self.stage {
             Stage::Opening => {
                 self.stage = Stage::Room(
-                    Recording::start(&self.receiver).map_err(audio_error)?,
+                    RoomRecording::start(&self.receiver).map_err(audio_error)?,
                     Instant::now(),
                 );
             }
@@ -196,7 +204,7 @@ impl Setup {
                     let (tx, rx) = mpsc::channel();
                     cx.background_executor()
                         .spawn(async move {
-                            let _ = tx.send(room.tone_previews(&voice, current));
+                            let _ = tx.send(room.into_tone_previews(voice, current));
                         })
                         .detach();
                     self.stage = Stage::Analyzing(rx);

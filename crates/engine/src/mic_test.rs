@@ -14,28 +14,37 @@ use orvia_core::{
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
-    io::BufWriter,
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, mpsc},
     time::Duration,
 };
+
+mod file_recording;
+pub use file_recording::FileRecording;
+use file_recording::PendingWav;
+mod tone_preview;
+pub use tone_preview::TonePreview;
+mod room;
+pub use room::RoomRecording;
+mod playback;
+pub use playback::{Playback, SavedClip};
+use playback::{checked_reader, latest_path};
 
 /// Capacity of the queue between the device callback and the recorder.
 const QUEUE_DURATION: Duration = Duration::from_secs(10);
 const RECORDING_FILE: &str = "recording.wav";
 type Frame = [f32; 2];
 
+/// Only the packaged virtual source and its sink monitor can receive a Linux mix.
+#[cfg(target_os = "linux")]
+pub(super) fn is_receiver_id(id: &str) -> bool {
+    matches!(id, "orvia_microphone" | "orvia_output.monitor")
+}
+
 fn is_test_source(device: &Device) -> bool {
-    // PulseAudio also exposes a monitor for every physical speaker.
     #[cfg(target_os = "linux")]
     {
-        device
-            .id()
-            .is_ok_and(|id| matches!(id.id(), "orvia_microphone" | "orvia_output.monitor"))
+        device.id().is_ok_and(|id| is_receiver_id(id.id()))
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -56,24 +65,35 @@ pub fn sources() -> Result<Vec<(String, String)>, cpal::Error> {
         .collect())
 }
 
+/// Device-selection prompt used when a route requires an explicit virtual output.
+pub const CHOOSE_OUTPUT: &str = "Choose a virtual output in microphone settings";
+
 /// Open the selected playback side of the cable used by the live mixer.
 ///
 /// # Errors
 ///
 /// Returns an error if no supported virtual output is available.
 pub fn virtual_output(id: Option<&str>) -> Result<Device> {
-    let host = host()?;
+    virtual_output_on(&host()?, id)
+}
+
+/// Resolve a supported virtual playback device using an already connected host.
+///
+/// # Errors
+///
+/// Returns an error if the selected output is unavailable or unsupported.
+pub fn virtual_output_on(host: &cpal::Host, id: Option<&str>) -> Result<Device> {
     let output = match id {
         Some(id) => host
             .device_by_id(&id.parse()?)
             .context("Selected virtual output is disconnected")?,
         #[cfg(not(windows))]
-        None => anyhow::bail!("Choose a virtual output in microphone settings"),
+        None => anyhow::bail!(CHOOSE_OUTPUT),
         #[cfg(windows)]
         None => host
             .output_devices()?
             .find(crate::is_orvia)
-            .context("Choose a virtual output in microphone settings")?,
+            .context(CHOOSE_OUTPUT)?,
     };
     ensure!(
         output.description()?.supports_output() && is_virtual_cable(&output),
@@ -222,6 +242,24 @@ impl Recording {
     ///
     /// Reports device loss, queue overflow or insufficient memory for the take.
     pub fn collect(&mut self) -> Result<&[[f32; 2]]> {
+        let count = self.pending()?;
+        append_captured(&mut self.frames, &mut self.rx, count)?;
+        Ok(&self.frames)
+    }
+
+    fn drain(&mut self, mut consume: impl FnMut(&[Frame]) -> Result<()>) -> Result<()> {
+        let count = self.pending()?;
+        if count > 0 {
+            let chunk = self.rx.read_chunk(count)?;
+            let (first, second) = chunk.as_slices();
+            consume(first)?;
+            consume(second)?;
+            chunk.commit_all();
+        }
+        Ok(())
+    }
+
+    fn pending(&self) -> Result<usize> {
         if let Some(e) = self.error() {
             return Err(e.into());
         }
@@ -230,11 +268,7 @@ impl Recording {
             count < self.rx.buffer().capacity(),
             "The recording device queue overflowed"
         );
-        if count > 0 {
-            self.frames.try_reserve(count)?;
-            self.frames.extend(self.rx.read_chunk(count)?);
-        }
-        Ok(&self.frames)
+        Ok(count)
     }
 
     /// Discard analyzed frames from the beginning of a take, keeping the active input stream open.
@@ -260,22 +294,44 @@ impl Recording {
     /// # Errors
     ///
     /// Returns an error if capture failed or the device delivered no frames.
-    pub fn finish(mut self) -> Result<Clip> {
-        self.collect()?;
-        drop(self.stream);
-        let count = self.rx.slots();
-        if count > 0 {
-            self.frames.extend(self.rx.read_chunk(count)?);
-        }
+    pub fn finish(self) -> Result<Clip> {
+        let rate = self.rate;
+        let mut frames = self.stop()?;
+        frames.shrink_to_fit();
         ensure!(
-            !self.frames.is_empty(),
+            !frames.is_empty(),
             "The microphone returned no audio frames"
         );
         Ok(Clip {
-            frames: self.frames.into(),
-            rate: self.rate,
+            frames: frames.into(),
+            rate,
         })
     }
+
+    fn stop(mut self) -> Result<Vec<Frame>> {
+        self.collect()?;
+        drop(self.stream);
+        let count = self.rx.slots();
+        ensure!(
+            count < self.rx.buffer().capacity(),
+            "The recording device queue overflowed"
+        );
+        append_captured(&mut self.frames, &mut self.rx, count)?;
+        Ok(self.frames)
+    }
+}
+
+/// Append both contiguous parts of the capture queue before returning them to the device.
+fn append_captured(frames: &mut Vec<Frame>, rx: &mut Consumer<Frame>, count: usize) -> Result<()> {
+    if count > 0 {
+        frames.try_reserve(count)?;
+        let chunk = rx.read_chunk(count)?;
+        let (first, second) = chunk.as_slices();
+        frames.extend_from_slice(first);
+        frames.extend_from_slice(second);
+        chunk.commit_all();
+    }
+    Ok(())
 }
 
 fn capture<T: SizedSample>(
@@ -291,10 +347,13 @@ where
     device.build_input_stream(
         stream_config(format),
         move |data: &[T], _| {
-            for frame in data.chunks_exact(channels).take(tx.slots()) {
-                let left = frame[0].to_sample();
-                let right = frame.get(1).map_or(left, |s| s.to_sample());
-                let _ = tx.push([left, right]);
+            let frames = data.chunks_exact(channels);
+            let count = tx.slots().min(frames.len());
+            if let Ok(chunk) = tx.write_chunk_uninit(count) {
+                chunk.fill_from_iter(frames.map(|frame| {
+                    let left = frame[0].to_sample();
+                    [left, frame.get(1).map_or(left, |s| s.to_sample())]
+                }));
             }
         },
         error,
@@ -303,8 +362,9 @@ where
 }
 
 /// Stereo audio from a microphone test, stored at its original capture rate.
+#[derive(Clone)]
 pub struct Clip {
-    frames: Arc<[Frame]>,
+    frames: Arc<Vec<Frame>>,
     rate: u32,
 }
 
@@ -321,13 +381,28 @@ impl Clip {
         phrases: [&Self; 2],
         mixing: Mixing,
     ) -> Result<Recommendation, SampleError> {
-        let room = self.model_frames();
-        let [first, second] = phrases.map(Self::model_frames);
-        calibration::recommend(&room, [&first, &second], mixing)
+        self.clone()
+            .recommend_owned(phrases.map(Clone::clone), mixing)
     }
 
-    /// Build current and recommended headphone previews from the same neutral receiver recording.
-    /// The room segment precedes the reading so low-frequency noise remains audible in the comparison.
+    /// Analyze two guided phrases, releasing each native-rate take as soon as it has been converted.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sample error if the recordings cannot support a recommendation.
+    pub fn recommend_owned(
+        self,
+        [first, second]: [Self; 2],
+        mixing: Mixing,
+    ) -> Result<Recommendation, SampleError> {
+        let room = self.into_model_rate()?;
+        let first = first.into_model_rate()?;
+        let second = second.into_model_rate()?;
+        calibration::recommend(&room.frames, [&first.frames, &second.frames], mixing)
+    }
+
+    /// Render both tone settings into complete clips for callers that need the processed PCM.
+    /// For headphone playback, [`Self::into_tone_previews`] shares the neutral recording.
     ///
     /// # Errors
     ///
@@ -337,50 +412,63 @@ impl Clip {
         voice: &Self,
         current: orvia_core::Tone,
     ) -> Result<(orvia_core::Tone, [Self; 2]), SampleError> {
-        let room = self.model_frames();
-        let voice = voice.model_frames();
-        // Keep the strongest room sound near the start of each preview even when the user waits before reading.
-        let room_window = 2 * SAMPLE_RATE as usize;
-        let loudest = room
-            .chunks(orvia_core::BLOCK)
-            .enumerate()
-            .max_by(|(_, a), (_, b)| {
-                let energy =
-                    |block: &[[f32; 2]]| block.iter().flatten().map(|s| s * s).sum::<f32>();
-                energy(a).total_cmp(&energy(b))
-            })
-            .map_or(0, |(i, _)| i * orvia_core::BLOCK);
-        let start = loudest
-            .saturating_sub(room_window / 2)
-            .min(room.len().saturating_sub(room_window));
-        let room = &room[start..(start + room_window).min(room.len())];
-        let recommended = orvia_core::tone::recommend(room, &voice)?;
-        let clips = [current, recommended].map(|tone| {
-            let mut processor = orvia_core::tone::ToneProcessor::new(tone);
-            let mut frames = room.to_vec();
-            frames.extend(std::iter::repeat_n([0.; 2], SAMPLE_RATE as usize / 4));
-            frames.extend_from_slice(&voice);
-            for block in frames.chunks_mut(orvia_core::BLOCK) {
-                processor.process(block);
-            }
-            Self {
-                frames: frames.into(),
-                rate: SAMPLE_RATE,
-            }
-        });
-        Ok((recommended, clips))
+        let (recommended, [before, after]) =
+            self.clone().into_tone_previews(voice.clone(), current)?;
+        let before = before.render();
+        let after = if current == recommended {
+            before.clone()
+        } else {
+            after.render()
+        };
+        Ok((recommended, [before, after]))
     }
 
-    fn model_frames(&self) -> std::borrow::Cow<'_, [Frame]> {
+    /// Prepare current and recommended headphone previews sharing the same neutral receiver audio.
+    /// Each playback applies its tone settings to the room excerpt, a pause, and the full reading.
+    ///
+    /// # Errors
+    ///
+    /// Returns a sample error for incomplete, clipped, or indistinct speech.
+    pub fn into_tone_previews(
+        self,
+        voice: Self,
+        current: orvia_core::Tone,
+    ) -> Result<(orvia_core::Tone, [TonePreview; 2]), SampleError> {
+        let room = {
+            let whole = self.into_model_rate()?.frames;
+            let excerpt = room::loudest_excerpt(&whole);
+            if excerpt.len() == whole.len() {
+                whole
+            } else {
+                Arc::new(excerpt.to_vec())
+            }
+        };
+        let voice = voice.into_model_rate()?.frames;
+        let recommended = orvia_core::tone::recommend(&room, &voice)?;
+        Ok((
+            recommended,
+            TonePreview::pair(room, voice, current, recommended),
+        ))
+    }
+
+    fn into_model_rate(self) -> Result<Self, SampleError> {
         if self.rate == SAMPLE_RATE {
-            return (&self.frames[..]).into();
+            return Ok(self);
         }
-        let mut rate = InputRate::new(self.rate);
+        let count =
+            (self.frames.len() as u128 * u128::from(SAMPLE_RATE)).div_ceil(u128::from(self.rate));
         let mut frames = Vec::new();
+        frames
+            .try_reserve_exact(usize::try_from(count).map_err(|_| SampleError::Incomplete)?)
+            .map_err(|_| SampleError::Incomplete)?;
+        let mut rate = InputRate::new(self.rate);
         for &frame in self.frames.iter() {
             rate.push(frame, |f| frames.push(f));
         }
-        frames.into()
+        Ok(Self {
+            rate: SAMPLE_RATE,
+            frames: frames.into(),
+        })
     }
 
     /// Store the current take in the microphone test directory, creating it if necessary.
@@ -401,22 +489,7 @@ impl Clip {
     ///
     /// Returns an error if the saved recording cannot be located or decoded.
     pub fn load_latest(dir: &Path) -> Result<Option<Self>> {
-        let current = dir.join(RECORDING_FILE);
-        if current.try_exists()? {
-            return Self::load(&current).map(Some);
-        }
-        let mut previous = Vec::new();
-        for name in ["before.wav", "after.wav"] {
-            let path = dir.join(name);
-            if path.try_exists()? {
-                previous.push((path.metadata()?.modified()?, path));
-            }
-        }
-        previous
-            .into_iter()
-            .max_by_key(|(time, _)| *time)
-            .map(|(_, path)| Self::load(&path))
-            .transpose()
+        latest_path(dir)?.map(|path| Self::load(&path)).transpose()
     }
 
     /// Atomically save a stereo float WAV. A failed retake preserves the previous file.
@@ -425,21 +498,9 @@ impl Clip {
     ///
     /// Returns a filesystem or WAV encoding error. The parent directory must exist.
     pub fn save(&self, path: &Path) -> Result<()> {
-        let tmp =
-            tempfile::NamedTempFile::new_in(path.parent().context("Missing recording directory")?)?;
-        let spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: self.rate,
-            bits_per_sample: 32,
-            sample_format: hound::SampleFormat::Float,
-        };
-        let mut writer = hound::WavWriter::new(BufWriter::new(tmp.as_file()), spec)?;
-        for sample in self.frames.iter().flatten() {
-            writer.write_sample(*sample)?;
-        }
-        writer.finalize()?;
-        tmp.persist(path)?;
-        Ok(())
+        let mut take = PendingWav::new(path, self.rate)?;
+        take.append(&self.frames)?;
+        take.publish(|_| Ok(()))
     }
 
     /// Open a test WAV saved by this or a previous installation.
@@ -448,17 +509,8 @@ impl Clip {
     ///
     /// Returns an error for unreadable, malformed, truncated or unsupported recordings.
     pub fn load(path: &Path) -> Result<Self> {
-        let mut reader = hound::WavReader::open(path)?;
+        let mut reader = checked_reader(std::fs::File::open(path)?)?;
         let spec = reader.spec();
-        ensure!(
-            spec.channels == 2
-                && spec.sample_format == hound::SampleFormat::Float
-                && spec.bits_per_sample == 32
-                && (8_000..=48_000).contains(&spec.sample_rate)
-                && reader.duration() > 0
-                && u64::from(reader.duration()) * 8 <= path.metadata()?.len(),
-            "Unsupported microphone test WAV"
-        );
         let mut frames = Vec::new();
         frames.try_reserve_exact(reader.duration() as usize)?;
         let mut samples = reader.samples::<f32>();
@@ -482,112 +534,64 @@ impl Clip {
     ///
     /// Returns an error if the selected device is virtual, unavailable or incompatible.
     pub fn play(&self, id: Option<&str>) -> Result<Playback> {
-        let host = host()?;
-        let device = match id {
-            Some(id) => host.device_by_id(&id.parse()?),
-            None => host.default_output_device(),
-        }
-        .context("Playback device unavailable")?;
-        ensure!(
-            !is_virtual_cable(&device),
-            "Choose physical headphones or speakers"
-        );
-        let format = config(&device, Port::Headphones)?;
-        let mut cursor = Cursor {
-            frames: self.frames.clone(),
-            phase: 0,
-            input_rate: self.rate,
-            output_rate: format.sample_rate(),
-            channels: usize::from(format.channels()),
-        };
-        let done = Arc::new(AtomicBool::new(false));
-        let finished = done.clone();
-        let (error, errors) = errors();
-        let cfg = stream_config(&format);
-        let stream = match format.sample_format() {
-            SampleFormat::F32 => device.build_output_stream(
-                cfg,
-                move |out: &mut [f32], _| cursor.fill(out, &finished),
-                error,
-                None,
-            ),
-            SampleFormat::I16 => device.build_output_stream(
-                cfg,
-                move |out: &mut [i16], _| cursor.fill(out, &finished),
-                error,
-                None,
-            ),
-            other => return Err(anyhow!("Unsupported playback format: {other}")),
-        }?;
-        stream.play()?;
-        Ok(Playback {
-            _stream: stream,
-            done,
-            errors,
-        })
-    }
-}
-
-struct Cursor {
-    frames: Arc<[Frame]>,
-    phase: u64,
-    input_rate: u32,
-    output_rate: u32,
-    channels: usize,
-}
-
-impl Cursor {
-    fn fill<T: SizedSample + FromSample<f32>>(&mut self, out: &mut [T], done: &AtomicBool) {
-        out.fill(T::EQUILIBRIUM);
-        let rate = u64::from(self.output_rate);
-        // Keep the stream alive through the callback that consumes the last sample.
-        if self.phase / rate >= self.frames.len() as u64 {
-            done.store(true, Ordering::Relaxed);
-            return;
-        }
-        for frame in out.chunks_exact_mut(self.channels) {
-            let index = (self.phase / rate) as usize;
-            let Some(left) = self.frames.get(index) else {
-                break;
-            };
-            let right = self.frames.get(index + 1).unwrap_or(left);
-            let fraction = (self.phase % rate) as f32 / self.output_rate as f32;
-            let sample = |ch: usize| left[ch] + (right[ch] - left[ch]) * fraction;
-            if self.channels == 1 {
-                frame[0] = T::from_sample((sample(0) + sample(1)) * 0.5);
-            } else {
-                frame[0] = T::from_sample(sample(0));
-                frame[1] = T::from_sample(sample(1));
-            }
-            self.phase += u64::from(self.input_rate);
-        }
-    }
-}
-
-/// Holds the physical output stream. Dropping it stops the preview.
-pub struct Playback {
-    _stream: Stream,
-    done: Arc<AtomicBool>,
-    errors: mpsc::Receiver<cpal::Error>,
-}
-
-impl Playback {
-    /// Return whether the clip has ended or the playback device failed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the audio backend reports device loss.
-    pub fn finished(&self) -> Result<bool> {
-        if let Ok(error) = self.errors.try_recv() {
-            return Err(error.into());
-        }
-        Ok(self.done.load(Ordering::Relaxed))
+        Playback::from_clip(self, id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn collecting_a_wrapped_recording_preserves_the_previous_tail_and_frame_order() {
+        let (mut tx, mut rx) = RingBuffer::new(5);
+        tx.push_entire_slice(&[[0., 1.], [2., 3.], [4., 5.]])
+            .unwrap();
+        let mut frames = vec![[-2., -1.]];
+        append_captured(&mut frames, &mut rx, 2).unwrap();
+        tx.push_entire_slice(&[[6., 7.], [8., 9.], [10., 11.]])
+            .unwrap();
+        append_captured(&mut frames, &mut rx, 4).unwrap();
+        append_captured(&mut frames, &mut rx, 0).unwrap();
+        assert_eq!(
+            frames,
+            [
+                [-2., -1.],
+                [0., 1.],
+                [2., 3.],
+                [4., 5.],
+                [6., 7.],
+                [8., 9.],
+                [10., 11.]
+            ]
+        );
+        assert_eq!(rx.slots(), 0);
+    }
+
+    #[test]
+    fn owned_conversion_matches_the_live_input_clock_and_reuses_native_48_khz_audio() {
+        let source = Arc::new(
+            (0..5_357)
+                .map(|i| [i as f32 * 0.001, (i as f32 * 0.02).sin()])
+                .collect::<Vec<_>>(),
+        );
+        for rate in [8_000, 32_000, 44_100, SAMPLE_RATE] {
+            let converted = Clip {
+                rate,
+                frames: source.clone(),
+            }
+            .into_model_rate()
+            .unwrap();
+            let mut live = InputRate::new(rate);
+            let mut expected = Vec::new();
+            for &frame in source.iter() {
+                live.push(frame, |f| expected.push(f));
+            }
+            assert_eq!(converted.rate, SAMPLE_RATE);
+            assert_eq!(*converted.frames, expected);
+            assert_eq!(Arc::ptr_eq(&converted.frames, &source), rate == SAMPLE_RATE);
+        }
+    }
 
     #[test]
     fn tone_previews_use_the_same_receiver_take_and_the_live_processor() {
@@ -606,7 +610,8 @@ mod tests {
                     };
                     [x, x * 0.6]
                 })
-                .collect(),
+                .collect::<Vec<_>>()
+                .into(),
         };
         let (settings, [before, after]) = room.tone_previews(&voice, Default::default()).unwrap();
         assert_eq!(
@@ -625,6 +630,8 @@ mod tests {
             live.process(block.try_into().unwrap());
         }
         assert_eq!(reference.as_slice(), after.frames.as_ref());
+        let (_, [first, second]) = room.tone_previews(&voice, settings).unwrap();
+        assert!(Arc::ptr_eq(&first.frames, &second.frames));
     }
 
     #[test]
@@ -633,7 +640,7 @@ mod tests {
         let before = dir.path().join("before.wav");
         let after = dir.path().join("after.wav");
         let mut clip = Clip {
-            frames: Arc::from([[0.4, 0.3], [0., 0.]]),
+            frames: Arc::new(vec![[0.4, 0.3], [0., 0.]]),
             rate: 44_100,
         };
         assert!(Clip::load_latest(dir.path()).unwrap().is_none());
@@ -642,7 +649,7 @@ mod tests {
             Clip::load_latest(dir.path()).unwrap().unwrap().frames,
             clip.frames
         );
-        clip.frames = Arc::from([[0.125, -0.125]]);
+        clip.frames = Arc::new(vec![[0.125, -0.125]]);
         clip.save(&after).unwrap();
         assert_eq!(
             Clip::load_latest(dir.path()).unwrap().unwrap().frames,
@@ -661,7 +668,7 @@ mod tests {
             original.frames
         );
         let previous = clip.frames.clone();
-        clip.frames = Arc::from([[0.7, -0.7]]);
+        clip.frames = Arc::new(vec![[0.7, -0.7]]);
         clip.save_latest(dir.path()).unwrap();
         assert_eq!(
             Clip::load_latest(dir.path()).unwrap().unwrap().frames,
@@ -683,29 +690,5 @@ mod tests {
         let loaded = Clip::load_latest(dir.path()).unwrap().unwrap();
         assert_eq!(loaded.duration(), Duration::from_secs(12));
         assert_eq!(loaded.frames, clip.frames);
-    }
-
-    #[test]
-    fn replay_preserves_pauses_across_buffers_and_resamples_both_channels() {
-        let mut cursor = Cursor {
-            frames: Arc::from([[0.5, -0.5], [0., 0.], [0., 0.], [0.5, -0.5]]),
-            phase: 0,
-            input_rate: 24_000,
-            output_rate: 48_000,
-            channels: 2,
-        };
-        let done = AtomicBool::new(false);
-        let mut output = [1.0_f32; 20];
-        for chunk in output.chunks_mut(6) {
-            cursor.fill(chunk, &done);
-        }
-        assert_eq!(
-            output,
-            [
-                0.5, -0.5, 0.25, -0.25, 0., 0., 0., 0., 0., 0., 0.25, -0.25, 0.5, -0.5, 0.5, -0.5,
-                0., 0., 0., 0.
-            ]
-        );
-        assert!(done.load(Ordering::Relaxed));
     }
 }

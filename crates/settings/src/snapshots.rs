@@ -2,7 +2,7 @@
 use super::*;
 use crate::view::{AdjustmentScreen, ReadingCue};
 use orvia_core::{SignalHistory, calibration::Recommendation};
-use orvia_engine::mic_test::Clip;
+use orvia_engine::mic_test::SavedClip;
 
 /// Open the production panel without starting an engine, update check, or microphone stream.
 #[test]
@@ -30,8 +30,13 @@ fn render_window() {
             },
             |window, cx| {
                 cx.new(|cx| {
-                    let mut panel =
-                        Panel::empty(dir, Version::new(1, 0, 0), scene == "mic-standalone", cx);
+                    let mut panel = Panel::empty(
+                        dir,
+                        Version::new(1, 0, 0),
+                        scene == "mic-standalone",
+                        window,
+                        cx,
+                    );
                     window.focus(&panel.root);
                     populate(&mut panel, &scene, language);
                     panel
@@ -183,8 +188,9 @@ fn populate(panel: &mut Panel, scene: &str, language: Language) {
         }
         "mic" | "mic-standalone" => Page::MicTest,
         "mic-recorded" | "mic-playing" | "adjust-ready" => {
-            panel.test.clip =
-                Some(Clip::load(&panel.dir.join("take.wav")).expect("load the synthetic take"));
+            panel.test.clip = Some(
+                SavedClip::open(&panel.dir.join("take.wav")).expect("open the synthetic take"),
+            );
             if scene == "mic-playing" {
                 panel.test.snapshot_action = Some(TestAction::StopPlayback);
             } else if scene == "adjust-ready" {

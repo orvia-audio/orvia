@@ -50,7 +50,7 @@ pub struct BlockLevels {
 }
 
 /// Compact pre-gain measurements for the settings window.
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct SignalHistory {
     /// Pairs of input and filtered peaks, in 1 dB steps above −60 dBFS.
     /// Each pair spans 10 ms, with the earliest pair first.
@@ -59,21 +59,88 @@ pub struct SignalHistory {
     pub attenuation_db: Option<f32>,
 }
 
+const HISTORY_BLOCKS: usize = 200;
+const ENERGY_BLOCKS: usize = 50;
+
+#[derive(Clone, Copy)]
+struct HistoryBlock {
+    peaks: [u8; 2],
+    before_power: f32,
+    after_power: f32,
+}
+
+impl From<BlockLevels> for HistoryBlock {
+    fn from(block: BlockLevels) -> Self {
+        let scale = |v: f32| (60. + 20. * v.max(0.001).log10()).clamp(0., 60.).round() as u8;
+        Self {
+            peaks: [scale(block.before_peak), scale(block.after_peak)],
+            before_power: block.before_power,
+            after_power: block.after_power,
+        }
+    }
+}
+
+/// Two seconds of metered audio, with display peaks scaled once on the control thread.
+/// The history uses heap storage only while it contains measurements.
+#[derive(Default)]
+pub struct SignalWindow {
+    blocks: std::collections::VecDeque<(u64, HistoryBlock)>,
+}
+
+impl SignalWindow {
+    /// Append new 10 ms blocks in capture order and expire history older than two seconds.
+    /// All timestamps are in milliseconds since the audio route started.
+    pub fn update(&mut self, now: u64, incoming: impl Iterator<Item = (u64, BlockLevels)>) {
+        for (timestamp, levels) in incoming {
+            if self.blocks.len() == HISTORY_BLOCKS {
+                self.blocks.pop_front();
+            } else if self.blocks.is_empty() {
+                self.blocks.reserve_exact(HISTORY_BLOCKS);
+            }
+            self.blocks.push_back((timestamp, levels.into()));
+        }
+        while self
+            .blocks
+            .front()
+            .is_some_and(|(t, _)| now.saturating_sub(*t) > 2000)
+        {
+            self.blocks.pop_front();
+        }
+        if self.blocks.is_empty() {
+            self.blocks.shrink_to_fit();
+        }
+    }
+
+    /// Return the chronological peaks and the attenuation over the newest half second.
+    pub fn history(&self) -> SignalHistory {
+        SignalHistory::from_newest(self.blocks.iter().rev().map(|&(_, block)| block))
+    }
+}
+
 impl SignalHistory {
     /// Summarize up to two seconds of consecutive blocks without retaining PCM.
     pub fn from_blocks<'a>(blocks: impl DoubleEndedIterator<Item = &'a BlockLevels>) -> Self {
-        let mut peaks = Vec::with_capacity(200);
+        Self::from_newest(
+            blocks
+                .rev()
+                .take(HISTORY_BLOCKS)
+                .copied()
+                .map(HistoryBlock::from),
+        )
+    }
+
+    fn from_newest(blocks: impl Iterator<Item = HistoryBlock>) -> Self {
+        let mut peaks = Vec::with_capacity(blocks.size_hint().1.unwrap_or(HISTORY_BLOCKS));
         let (mut before, mut after) = (0., 0.);
-        let to_scale = |v: f32| (60. + 20. * v.max(0.001).log10()).clamp(0., 60.).round() as u8;
-        for (i, b) in blocks.rev().take(200).enumerate() {
-            peaks.push([to_scale(b.before_peak), to_scale(b.after_peak)]);
-            if i < 50 {
+        for (i, b) in blocks.enumerate() {
+            peaks.push(b.peaks);
+            if i < ENERGY_BLOCKS {
                 before += b.before_power;
                 after += b.after_power;
             }
         }
         peaks.reverse();
-        let count = peaks.len().min(50) as f32;
+        let count = peaks.len().min(ENERGY_BLOCKS) as f32;
         let attenuation_db = (count > 0. && before > 1e-8 * count)
             .then(|| 10. * (before / after.max(1e-12 * count)).log10());
         Self {
@@ -94,7 +161,7 @@ fn levels(frames: &[[f32; 2]; BLOCK]) -> (f32, f32) {
 
 enum Filter {
     Rnnoise(Box<DenoiseState<'static>>),
-    WebRtc(Box<sonora::AudioProcessing>),
+    WebRtc(Box<sonora::NoiseChannel>),
     DeepFilterNet3(Box<dfn3_rs::Denoiser>),
 }
 
@@ -105,6 +172,7 @@ enum Filter {
 pub struct Processor {
     settings: crate::Settings,
     filters: Vec<Filter>,
+    linked_stereo: bool,
     tone: crate::tone::ToneProcessor,
     delayed_levels: std::collections::VecDeque<(f32, f32)>,
 }
@@ -113,6 +181,17 @@ impl Processor {
     /// Allocate one denoiser per independent channel when suppression is enabled.
     /// Call on the control thread before starting the audio callback.
     pub fn new(settings: &crate::Settings) -> Self {
+        Self::for_input(settings, 2)
+    }
+
+    /// Construct a processor for a negotiated capture format. A single-channel
+    /// source must supply duplicated stereo frames and needs only one filter history.
+    /// Multichannel sources use the first two channels and the selected mixing mode.
+    pub fn for_input(settings: &crate::Settings, input_channels: u16) -> Self {
+        let mut settings = settings.clone();
+        if input_channels == 1 {
+            settings.mixing = Mixing::Average;
+        }
         let channels = if settings.mixing == Mixing::Stereo {
             2
         } else {
@@ -127,20 +206,7 @@ impl Processor {
                         filter.set_attenuation_limit(f32::from(settings.deep_filter_limit_db));
                         Filter::DeepFilterNet3(filter)
                     }
-                    NoiseMethod::WebRtc => {
-                        let config = sonora::Config {
-                            noise_suppression: Some(sonora::config::NoiseSuppression {
-                                level: sonora::config::NoiseSuppressionLevel::High,
-                                ..Default::default()
-                            }),
-                            ..Default::default()
-                        };
-                        let apm = sonora::AudioProcessing::builder()
-                            .config(config)
-                            .capture_config(sonora::StreamConfig::new(SAMPLE_RATE, 1))
-                            .build();
-                        Filter::WebRtc(Box::new(apm))
-                    }
+                    NoiseMethod::WebRtc => Filter::WebRtc(Box::default()),
                 })
                 .collect()
         } else {
@@ -152,8 +218,9 @@ impl Processor {
             Some(NoiseMethod::WebRtc | NoiseMethod::Rnnoise) => 1,
         };
         Self {
-            settings: settings.clone(),
             tone: crate::tone::ToneProcessor::new(settings.tone()),
+            linked_stereo: channels == 2 && settings.suppress_noise,
+            settings,
             filters,
             delayed_levels: vec![(0., 0.); delay_blocks].into(),
         }
@@ -164,7 +231,13 @@ impl Processor {
     /// Non-finite input becomes silence. Gain is limited to 200% and the final
     /// signal is clipped to full scale.
     pub fn process(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> f32 {
-        self.process_with_levels(frames).0
+        self.process_block::<false, true>(frames).0
+    }
+
+    /// Process audio without computing an output peak. Filter state and delayed input
+    /// levels stay aligned when a mixer begins observing the following block.
+    pub fn process_unmetered(&mut self, frames: &mut [[f32; 2]; BLOCK]) {
+        self.process_block::<false, false>(frames);
     }
 
     /// Change linear output gain without clearing filter history. 100 means unity.
@@ -201,6 +274,13 @@ impl Processor {
     /// Process one block and return its output peak and pre-gain filter measurements.
     /// The input envelope follows each filter's delay to the nearest 10 ms.
     pub fn process_with_levels(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> (f32, BlockLevels) {
+        self.process_block::<true, true>(frames)
+    }
+
+    fn process_block<const METER: bool, const OUTPUT_PEAK: bool>(
+        &mut self,
+        frames: &mut [[f32; 2]; BLOCK],
+    ) -> (f32, BlockLevels) {
         for frame in frames.iter_mut() {
             for sample in frame.iter_mut() {
                 *sample = if sample.is_finite() {
@@ -214,8 +294,76 @@ impl Processor {
                 Mixing::Average => [(frame[0] + frame[1]) * 0.5; 2],
             };
         }
-        let input_levels = levels(frames);
-        for (channel, filter) in self.filters.iter_mut().enumerate() {
+        // Keep the delayed input aligned if metering resumes on the next block.
+        let input_levels = if METER || !self.delayed_levels.is_empty() {
+            levels(frames)
+        } else {
+            (0., 0.)
+        };
+        self.suppress(frames);
+        let (before, after) = if let Some(before) = self.delayed_levels.pop_front() {
+            self.delayed_levels.push_back(input_levels);
+            (before, if METER { levels(frames) } else { (0., 0.) })
+        } else {
+            (input_levels, input_levels)
+        };
+        // The mixer already bounded the input. With no active effects its output peak is the input peak.
+        let peak = if self.filters.is_empty() && self.tone.is_bypassed() {
+            if OUTPUT_PEAK && !METER {
+                frames
+                    .iter()
+                    .flatten()
+                    .fold(0_f32, |peak, s| peak.max(s.abs()))
+            } else {
+                input_levels.0
+            }
+        } else {
+            self.tone.process_block::<OUTPUT_PEAK>(frames)
+        };
+        (
+            peak,
+            BlockLevels {
+                before_peak: before.0,
+                before_power: before.1,
+                after_peak: after.0,
+                after_power: after.1,
+            },
+        )
+    }
+
+    fn suppress(&mut self, frames: &mut [[f32; 2]; BLOCK]) {
+        // Identical stereo input has identical recurrent history until the first differing sample.
+        // Once split, equal samples alone cannot establish that the two histories match again.
+        if self.linked_stereo && frames.iter().any(|[l, r]| l.to_bits() != r.to_bits()) {
+            match self.filters.as_mut_slice() {
+                [Filter::Rnnoise(left), Filter::Rnnoise(right)] => right.copy_stream_from(left),
+                [Filter::WebRtc(left), Filter::WebRtc(right)] => right.split_from(left),
+                [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] => {
+                    right.copy_stream_from(left)
+                }
+                _ => unreachable!("linked channels always use the same filter"),
+            }
+            self.linked_stereo = false;
+        }
+        if !self.linked_stereo
+            && let [Filter::DeepFilterNet3(left), Filter::DeepFilterNet3(right)] =
+                self.filters.as_mut_slice()
+        {
+            let inputs = std::array::from_fn(|ch| std::array::from_fn(|i| frames[i][ch]));
+            let mut outputs = [[0.; BLOCK]; 2];
+            dfn3_rs::Denoiser::process_pair(left, right, &inputs, &mut outputs);
+            for (i, frame) in frames.iter_mut().enumerate() {
+                *frame = [outputs[0][i], outputs[1][i]];
+            }
+            return;
+        }
+        let mirror = self.linked_stereo || self.settings.mixing != Mixing::Stereo;
+        for (channel, filter) in self
+            .filters
+            .iter_mut()
+            .take(if mirror { 1 } else { 2 })
+            .enumerate()
+        {
             let mut output = [0.; BLOCK];
             match filter {
                 Filter::Rnnoise(f) => {
@@ -231,36 +379,16 @@ impl Processor {
                 }
                 Filter::WebRtc(f) => {
                     let input: [f32; BLOCK] = std::array::from_fn(|i| frames[i][channel]);
-                    if f.process_capture_f32(&[&input], &mut [&mut output])
-                        .is_err()
-                    {
-                        output = input;
-                    }
+                    f.process(&input, &mut output);
                 }
             }
             for (frame, sample) in frames.iter_mut().zip(output) {
                 frame[channel] = sample;
-                if self.settings.mixing != Mixing::Stereo {
+                if mirror {
                     frame[1] = frame[0];
                 }
             }
         }
-        let (before, after) = if let Some(before) = self.delayed_levels.pop_front() {
-            self.delayed_levels.push_back(input_levels);
-            (before, levels(frames))
-        } else {
-            (input_levels, input_levels)
-        };
-        let peak = self.tone.process(frames);
-        (
-            peak,
-            BlockLevels {
-                before_peak: before.0,
-                before_power: before.1,
-                after_peak: after.0,
-                after_power: after.1,
-            },
-        )
     }
 }
 
@@ -268,6 +396,168 @@ impl Processor {
 mod tests {
     use super::*;
     use crate::Settings;
+
+    #[test]
+    fn mono_devices_preserve_stereo_samples_and_meter_history_when_observation_resumes() {
+        for method in [
+            NoiseMethod::DeepFilterNet3,
+            NoiseMethod::Rnnoise,
+            NoiseMethod::WebRtc,
+        ] {
+            let settings = Settings {
+                noise_method: method,
+                low_cut_hz: 80,
+                deep_filter_limit_db: 12,
+                ..Default::default()
+            };
+            let mut mono = Processor::for_input(&settings, 1);
+            let mut reference = Processor::new(&settings);
+            assert_eq!(mono.filters.len(), 1);
+            for index in 0..30 {
+                let mut frames =
+                    std::array::from_fn(|i| [((index * BLOCK + i) as f32 * 0.03).sin() * 0.08; 2]);
+                let mut expected = frames;
+                let (peak, history) = reference.process_with_levels(&mut expected);
+                if index < 10 {
+                    mono.process_unmetered(&mut frames);
+                } else if index < 20 {
+                    assert_eq!(mono.process(&mut frames), peak);
+                } else {
+                    let (output, levels) = mono.process_with_levels(&mut frames);
+                    assert_eq!(output, peak);
+                    assert_eq!(
+                        (levels.before_power, levels.after_power),
+                        (history.before_power, history.after_power)
+                    );
+                }
+                assert_eq!(frames, expected);
+            }
+        }
+    }
+
+    #[test]
+    fn identical_stereo_can_split_during_a_ramp_and_resume_independent_speech() {
+        for split in [0_usize, 11, 20, 31, 45] {
+            let settings = Settings {
+                deep_filter_limit_db: 12,
+                ..Settings::default()
+            };
+            let mut linked = Processor::new(&settings);
+            let mut independent = Processor::new(&settings);
+            independent.linked_stereo = false;
+            for n in 0..64 {
+                if n == split.saturating_sub(1_usize) {
+                    linked.set_deep_filter_limit(35);
+                    independent.set_deep_filter_limit(35);
+                }
+                let mut frame = std::array::from_fn(|i| {
+                    let left = if (10..28).contains(&n) {
+                        0.
+                    } else {
+                        ((n * BLOCK + i) as f32 * 0.055).sin() * 0.1
+                    };
+                    let right = if n == split && i == BLOCK - 1 {
+                        left + 0.002
+                    } else {
+                        left
+                    };
+                    [left, right]
+                });
+                let mut expected = frame;
+                independent.process_unmetered(&mut expected);
+                linked.process_unmetered(&mut frame);
+                assert_eq!(linked.linked_stereo, n < split);
+                for (i, (actual, expected)) in frame.iter().zip(expected).enumerate() {
+                    assert_eq!(*actual, expected, "split at {split}, block {n}, sample {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn speech_filters_preserve_independent_channel_histories_on_split() {
+        for method in [NoiseMethod::Rnnoise, NoiseMethod::WebRtc] {
+            for split in [0, 47, 153] {
+                let settings = Settings {
+                    noise_method: method,
+                    ..Settings::default()
+                };
+                let mut linked = Processor::new(&settings);
+                let mut separate = Processor::new(&settings);
+                separate.linked_stereo = false;
+                for n in 0..split + 28 {
+                    let mut block = std::array::from_fn(|i| {
+                        let phase = (n * BLOCK + i) as f32;
+                        let left = match n % 53 {
+                            0..=12 => 0.,
+                            13..=14 => {
+                                if i % 7 == 0 {
+                                    1.
+                                } else {
+                                    -1.
+                                }
+                            }
+                            _ => (0.34 * phase).sin() * (0.007 * phase).cos() * 0.3,
+                        };
+                        let right = if n == split && i == BLOCK - 1 {
+                            0.93
+                        } else if n > split && n % 3 == 0 {
+                            -left
+                        } else {
+                            left
+                        };
+                        [left, right]
+                    });
+                    let mut reference = block;
+                    linked.process_unmetered(&mut block);
+                    separate.process_unmetered(&mut reference);
+                    for (i, (a, b)) in block.iter().zip(reference).enumerate() {
+                        assert_eq!(
+                            a.map(f32::to_bits),
+                            b.map(f32::to_bits),
+                            "{method:?}, split {split}, block {n}, sample {i}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rnnoise_preserves_silence_tails_and_resumed_speech() {
+        let mut reference = nnnoiseless_reference::DenoiseState::new();
+        let mut actual = DenoiseState::new();
+        let mut right = DenoiseState::new();
+        for block in 0..385 {
+            let input: [f32; BLOCK] = std::array::from_fn(|i| match block {
+                0..=10 | 31..=200 | 202..=350 => 0.0,
+                201 => f32::from_bits(17),
+                351..=360 => -0.0,
+                _ => ((block * BLOCK + i) as f32 * 0.173).sin() * 32000.0,
+            });
+            if block == 194 {
+                right.copy_stream_from(&actual);
+            }
+            let mut expected = [0.0; BLOCK];
+            let expected_vad = reference.process_frame(&mut expected, &input).to_bits();
+            let check = |channel: &mut DenoiseState<'_>| {
+                let mut out = [0.0; BLOCK];
+                assert_eq!(
+                    channel.process_frame(&mut out, &input).to_bits(),
+                    expected_vad
+                );
+                assert_eq!(
+                    out.map(f32::to_bits),
+                    expected.map(f32::to_bits),
+                    "block {block}"
+                );
+            };
+            check(&mut actual);
+            if block >= 194 {
+                check(&mut right);
+            }
+        }
+    }
 
     #[test]
     fn maps_channels_then_applies_gain() {
@@ -281,6 +571,61 @@ mod tests {
             });
             processor.process(&mut frames);
             assert!(frames.iter().all(|frame| *frame == expected));
+        }
+    }
+
+    #[test]
+    fn bypass_matches_the_tone_processor_across_control_changes() {
+        let neutral = crate::Tone::default();
+        let active = crate::Tone {
+            low_cut_hz: 80,
+            gain_percent: 75,
+            compressor_ratio: 3,
+        };
+        for mixing in [Mixing::Stereo, Mixing::Average] {
+            let mut mixer = Processor::new(&Settings {
+                mixing,
+                suppress_noise: false,
+                ..Settings::default()
+            });
+            let mut tone = crate::tone::ToneProcessor::new(neutral);
+            for (n, controls) in [neutral, active, active, neutral, neutral, neutral, neutral]
+                .into_iter()
+                .enumerate()
+            {
+                mixer.set_tone(controls);
+                tone.configure(controls);
+                let mut actual = std::array::from_fn(|i| match i % 4 {
+                    0 => [-0., f32::from_bits(11)],
+                    1 => [f32::NAN, f32::INFINITY],
+                    2 => [1.3, -0.45],
+                    _ => [-1.7, 0.82],
+                });
+                let mut expected = actual.map(|frame| {
+                    let [l, r] = frame.map(|s| if s.is_finite() { s.clamp(-1., 1.) } else { 0. });
+                    if mixing == Mixing::Average {
+                        [(l + r) * 0.5; 2]
+                    } else {
+                        [l, r]
+                    }
+                });
+                let input = levels(&expected);
+                let peak = tone.process(&mut expected);
+                match n % 3 {
+                    0 => assert_eq!(mixer.process(&mut actual), peak),
+                    1 => mixer.process_unmetered(&mut actual),
+                    _ => {
+                        let (output, b) = mixer.process_with_levels(&mut actual);
+                        assert_eq!(output, peak);
+                        assert_eq!((b.before_peak, b.before_power), input);
+                        assert_eq!((b.after_peak, b.after_power), input);
+                    }
+                }
+                assert_eq!(
+                    actual.map(|f| f.map(f32::to_bits)),
+                    expected.map(|f| f.map(f32::to_bits))
+                );
+            }
         }
     }
 
@@ -427,6 +772,59 @@ mod tests {
                 .attenuation_db
                 .is_none()
         );
+    }
+
+    #[test]
+    fn cached_history_keeps_capture_order_and_expires_only_past_two_seconds() {
+        let blocks: Vec<_> = (0..217)
+            .map(|i| {
+                let before = (i % 61) as f32 / 60.;
+                let after = before * (i % 17) as f32 / 17.;
+                BlockLevels {
+                    before_peak: before,
+                    after_peak: after,
+                    before_power: before * before,
+                    after_power: after * after,
+                }
+            })
+            .collect();
+        let mut window = SignalWindow::default();
+        for (i, &block) in blocks.iter().enumerate() {
+            let stamp = i as u64 * 10;
+            window.update(stamp, std::iter::once((stamp, block)));
+            assert_eq!(
+                window.history(),
+                SignalHistory::from_blocks(blocks[..=i].iter())
+            );
+        }
+        // At 2500 ms the block stamped 500 ms is still part of the waveform.
+        for (now, first) in [
+            (2500, 50),
+            (2501, 51),
+            (4100, 210),
+            (4160, 216),
+            (4161, 217),
+        ] {
+            window.update(now, std::iter::empty());
+            let history = window.history();
+            assert_eq!(history, SignalHistory::from_blocks(blocks[first..].iter()));
+            assert_eq!(window.history(), history);
+        }
+    }
+
+    #[test]
+    fn waveform_storage_follows_the_lifetime_of_its_measurements() {
+        let mut window = SignalWindow::default();
+        assert_eq!(window.blocks.capacity(), 0);
+        for start in [0, 5000] {
+            window.update(start, std::iter::once((start, BlockLevels::default())));
+            let capacity = window.blocks.capacity();
+            assert!(capacity >= HISTORY_BLOCKS);
+            window.update(start + 2000, std::iter::empty());
+            assert_eq!(window.blocks.capacity(), capacity);
+            window.update(start + 2001, std::iter::empty());
+            assert_eq!(window.blocks.capacity(), 0);
+        }
     }
 
     #[test]

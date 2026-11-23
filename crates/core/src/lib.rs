@@ -18,12 +18,17 @@ mod state;
 pub mod tone;
 pub use tone::Tone;
 
-pub use audio::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, SignalHistory};
+pub use audio::{
+    BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, SignalHistory, SignalWindow,
+};
 pub use events::{ENGINE_LOG, ENGINE_LOG_TEXT, EngineEvent, LogEntry};
 pub use state::{
     AUDITION_FILE, Audition, AuditionTarget, EngineStatus, Language, Settings, data_dir, read_json,
     write_json,
 };
+
+/// Request route health and audition acknowledgements without collecting mixer waveforms.
+pub const SUMMARY_OBSERVER: &str = "observe-summary";
 
 /// Adapter friendly name for the stereo, 48 kHz WASAPI transport.
 /// Incompatible wire formats must use a different transport identity.

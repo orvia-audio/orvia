@@ -55,6 +55,17 @@ impl HighPass {
             state: [[0.; 2]; 2],
         }
     }
+    /// Clear a decayed feedback pair before it can stay subnormal throughout a silent input.
+    /// This floor is hundreds of orders of magnitude below the smallest representable PCM sample.
+    fn settle(&mut self) {
+        const FLOOR: f64 = f64::MIN_POSITIVE * 4096.;
+        for pair in &mut self.state {
+            if pair[0].abs() < FLOOR && pair[1].abs() < FLOOR {
+                *pair = [0.; 2];
+            }
+        }
+    }
+
     fn frame(&mut self, mut samples: [f32; 2]) -> [f32; 2] {
         for (sample, state) in samples.iter_mut().zip(&mut self.state) {
             let x = f64::from(*sample) * self.b;
@@ -99,24 +110,115 @@ impl ToneProcessor {
         }
         self.settings = settings;
     }
-    /// Apply one block of at most 480 normalized stereo frames and return the final peak.
-    pub fn process(&mut self, frames: &mut [[f32; 2]]) -> f32 {
-        let count = frames.len().max(1) as f32;
-        let gain = f32::from(self.settings.gain_percent) / 100.;
-        if self.settings.low_cut_hz == 0
+
+    /// Whether bounded input will pass through without advancing any gain or filter transition.
+    pub(crate) fn is_bypassed(&self) -> bool {
+        self.settings == Tone::default()
             && self.previous_filter.is_none()
+            && self.gain == 1.
+            && self.reduction == 1.
+    }
+
+    /// Apply one block of at most 480 normalized stereo frames and return the final peak.
+    /// A settled compressor passes through blocks at or below its threshold.
+    pub fn process(&mut self, frames: &mut [[f32; 2]]) -> f32 {
+        self.process_block::<true>(frames)
+    }
+
+    pub(crate) fn process_block<const OUTPUT_PEAK: bool>(
+        &mut self,
+        frames: &mut [[f32; 2]],
+    ) -> f32 {
+        let gain = f32::from(self.settings.gain_percent) / 100.;
+        if self.previous_filter.is_none()
             && self.settings.compressor_ratio == 1
             && self.reduction == 1.
             && gain == self.gain
         {
+            if self.settings.low_cut_hz != 0 {
+                if self.highpass.state == [[0.; 2]; 2] && frames.iter().flatten().all(|&s| s == 0.)
+                {
+                    return 0.;
+                }
+                let mut peak = 0_f32;
+                for frame in frames {
+                    *frame = self
+                        .highpass
+                        .frame(*frame)
+                        .map(|s| (s * gain).clamp(-1., 1.));
+                    if OUTPUT_PEAK {
+                        peak = peak.max(frame[0].abs()).max(frame[1].abs());
+                    }
+                }
+                self.highpass.settle();
+                return peak;
+            }
             let mut peak = 0_f32;
             for s in frames.iter_mut().flatten() {
                 *s = (*s * gain).clamp(-1., 1.);
-                peak = peak.max(s.abs());
+                if OUTPUT_PEAK {
+                    peak = peak.max(s.abs());
+                }
             }
             return peak;
         }
+        let peak = self.prepare_compressor_input(frames, gain);
+        let threshold = 0.25;
+        // An earlier loud block may still be releasing even after the input falls below threshold.
+        if peak <= threshold && self.reduction == 1. {
+            return if OUTPUT_PEAK { peak } else { 0. };
+        }
+        let target = if self.settings.compressor_ratio > 1 && peak > threshold {
+            (peak / threshold).powf(1. / f32::from(self.settings.compressor_ratio) - 1.)
+        } else {
+            1.
+        };
+        // A block peak drives both channels. Release takes about 150 ms at the engine block size.
+        let step = if target < self.reduction {
+            0.0138
+        } else {
+            0.000139
+        };
+        let mut output = 0_f32;
+        let previous_reduction = self.reduction;
+        let count = frames.len().max(1) as f32;
+        for (i, sample) in frames.iter_mut().enumerate() {
+            if self.settings.compressor_ratio == 1 {
+                self.reduction =
+                    previous_reduction + (1. - previous_reduction) * (i + 1) as f32 / count;
+            } else {
+                self.reduction += step * (target - self.reduction);
+            }
+            for s in sample {
+                *s = (*s * self.reduction).clamp(-1., 1.);
+                if OUTPUT_PEAK {
+                    output = output.max(s.abs());
+                }
+            }
+        }
+        if (1. - self.reduction).abs() < 0.0003 && target == 1. {
+            self.reduction = 1.;
+        }
+        output
+    }
+
+    /// Apply low-cut and gain transitions and measure the peak that drives both channels.
+    fn prepare_compressor_input(&mut self, frames: &mut [[f32; 2]], gain: f32) -> f32 {
+        if self.previous_filter.is_none()
+            && self.settings.low_cut_hz == 0
+            && self.gain == 1.
+            && gain == 1.
+        {
+            let mut left = 0_f32;
+            let mut right = 0_f32;
+            for &[l, r] in frames.iter() {
+                left = left.max(l.abs());
+                right = right.max(r.abs());
+            }
+            return left.max(right);
+        }
         let mut peak = 0_f32;
+        let count = frames.len().max(1) as f32;
         for (i, frame) in frames.iter_mut().enumerate() {
             let mix = (i + 1) as f32 / count;
             let dry = *frame;
@@ -134,38 +236,10 @@ impl ToneProcessor {
                 peak = peak.max(s.abs());
             }
         }
+        self.highpass.settle();
         self.previous_filter = None;
         self.gain = gain;
-        let threshold = 0.25;
-        let target = if self.settings.compressor_ratio > 1 && peak > threshold {
-            (peak / threshold).powf(1. / f32::from(self.settings.compressor_ratio) - 1.)
-        } else {
-            1.
-        };
-        // A block peak drives both channels. Release takes about 150 ms at the engine block size.
-        let step = if target < self.reduction {
-            0.0138
-        } else {
-            0.000139
-        };
-        let mut output = 0_f32;
-        let previous_reduction = self.reduction;
-        for (i, sample) in frames.iter_mut().enumerate() {
-            if self.settings.compressor_ratio == 1 {
-                self.reduction =
-                    previous_reduction + (1. - previous_reduction) * (i + 1) as f32 / count;
-            } else {
-                self.reduction += step * (target - self.reduction);
-            }
-            for s in sample {
-                *s = (*s * self.reduction).clamp(-1., 1.);
-                output = output.max(s.abs());
-            }
-        }
-        if (1. - self.reduction).abs() < 0.0003 && target == 1. {
-            self.reduction = 1.;
-        }
-        output
+        peak
     }
 }
 
@@ -178,9 +252,13 @@ fn power(frames: &[[f32; 2]]) -> f64 {
         / (2 * frames.len()).max(1) as f64
 }
 
-fn filtered(frames: &[[f32; 2]], hz: u16) -> Vec<[f32; 2]> {
-    let mut filter = HighPass::new(hz);
-    frames.iter().map(|&f| filter.frame(f)).collect()
+fn filtered_power(filter: &mut HighPass, frames: &[[f32; 2]]) -> f64 {
+    frames
+        .iter()
+        .flat_map(|&frame| filter.frame(frame))
+        .map(|s| f64::from(s).powi(2))
+        .sum::<f64>()
+        / (2 * frames.len()).max(1) as f64
 }
 
 /// Compare speech energy above the room floor in 100 ms windows. A steady rumble
@@ -203,10 +281,11 @@ fn preserves_speech(dry: &[f64], wet: &[f64]) -> bool {
         let after = after.iter().sum::<f64>() / count - wet_floor;
         losses.push(10. * (before / after.max(1e-15)).log10());
     }
-    losses.sort_unstable_by(f64::total_cmp);
-    losses
-        .get(losses.len() * 9 / 10)
-        .is_some_and(|loss| *loss <= 1.)
+    if losses.is_empty() {
+        return false;
+    }
+    let rank = losses.len() * 9 / 10;
+    *losses.select_nth_unstable_by(rank, f64::total_cmp).1 <= 1.
 }
 
 /// Recommend tone controls from separate virtual-mic noise and speech takes at 48 kHz.
@@ -250,15 +329,21 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
     let noise = power(room);
     let mut hz = 0;
     let mut best = 0.;
+    let mut selected_levels = None;
     if noise > 1e-8 {
         for cutoff in [50, 65, 80, 100, 125, 150] {
-            let reduction = 10. * (noise / power(&filtered(room, cutoff)).max(1e-15)).log10();
-            let candidate = filtered(voice, cutoff);
-            let filtered_levels: Vec<_> = candidate.chunks_exact(BLOCK).map(power).collect();
-            if reduction >= 3.
-                && reduction > best + 0.5
-                && preserves_speech(&levels, &filtered_levels)
-            {
+            let room_power = filtered_power(&mut HighPass::new(cutoff), room);
+            let reduction = 10. * (noise / room_power.max(1e-15)).log10();
+            if reduction < 3. || reduction <= best + 0.5 {
+                continue;
+            }
+            let mut filter = HighPass::new(cutoff);
+            let filtered_levels: Vec<_> = voice
+                .chunks_exact(BLOCK)
+                .map(|block| filtered_power(&mut filter, block))
+                .collect();
+            if preserves_speech(&levels, &filtered_levels) {
+                selected_levels = Some(filtered_levels);
                 hz = cutoff;
                 best = reduction;
                 if reduction >= 6. {
@@ -267,14 +352,11 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
             }
         }
     }
-    let voice = filtered(voice, hz);
-    let mut speech: Vec<_> = active
-        .iter()
-        .map(|&i| power(&voice[i * BLOCK..(i + 1) * BLOCK]))
-        .collect();
-    speech.sort_unstable_by(f64::total_cmp);
+    let selected_levels = selected_levels.as_deref().unwrap_or(&levels);
+    let mut speech: Vec<_> = active.iter().map(|&i| selected_levels[i]).collect();
     // Aim for ordinary speech near -20 dBFS RMS, with at least 1 dB of headroom.
-    let median_power = speech[speech.len() / 2];
+    let rank = speech.len() / 2;
+    let median_power = *speech.select_nth_unstable_by(rank, f64::total_cmp).1;
     let gain = (0.1 / median_power.sqrt().max(1e-6)).clamp(0.01, 2.);
     // Allow loud syllables 8 dB above ordinary speech. Below the compressor knee,
     // gain alone should preserve the speaker's dynamics.
@@ -286,25 +368,30 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
     };
     for ratio in 1..=4 {
         tone.compressor_ratio = ratio;
-        let mut preview = ToneProcessor::new(Tone {
-            low_cut_hz: 0,
-            ..tone
-        });
+        let mut preview = ToneProcessor::new(tone);
         let mut peak = 0_f32;
-        let mut output_powers = Vec::with_capacity(levels.len());
-        for block in voice.chunks(BLOCK) {
+        let mut voiced = Vec::with_capacity(active.len());
+        let mut active_blocks = active.iter().copied().peekable();
+        for (i, block) in voice.chunks(BLOCK).enumerate() {
             let mut buffer = [[0.; 2]; BLOCK];
-            buffer[..block.len()].copy_from_slice(block);
-            peak = peak.max(preview.process(&mut buffer[..block.len()]));
-            output_powers.push(power(&buffer[..block.len()]));
+            let buffer = &mut buffer[..block.len()];
+            buffer.copy_from_slice(block);
+            peak = peak.max(preview.process(buffer));
+            if active_blocks.next_if_eq(&i).is_some() {
+                voiced.push(power(buffer));
+            }
         }
-        let mut voiced: Vec<_> = active.iter().map(|&i| output_powers[i]).collect();
-        voiced.sort_unstable_by(f64::total_cmp);
-        if peak <= 0.89 && (voiced[voiced.len() * 9 / 10] <= loud_power_limit || ratio == 4) {
+        let rank = voiced.len() * 9 / 10;
+        let loud = *voiced.select_nth_unstable_by(rank, f64::total_cmp).1;
+        if peak <= 0.89 && (loud <= loud_power_limit || ratio == 4) {
             return Ok(tone);
         }
     }
-    let peak = voice.iter().flatten().fold(0_f32, |p, s| p.max(s.abs()));
+    let mut filter = HighPass::new(hz);
+    let peak = voice
+        .iter()
+        .flat_map(|&frame| if hz == 0 { frame } else { filter.frame(frame) })
+        .fold(0_f32, |peak, s| peak.max(s.abs()));
     tone.gain_percent = tone.gain_percent.min((89. / peak.max(0.01)).floor() as u16);
     Ok(tone)
 }
@@ -312,6 +399,55 @@ pub fn recommend(room: &[[f32; 2]], voice: &[[f32; 2]]) -> Result<Tone, SampleEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quiet_blocks_pass_through_only_after_compressor_release() {
+        let mut processor = ToneProcessor::new(Tone {
+            compressor_ratio: 2,
+            ..Tone::default()
+        });
+        let quiet = [[-0.0, -0.25]; BLOCK];
+        let mut block = quiet;
+        assert_eq!(processor.process(&mut block), 0.25);
+        assert_eq!(
+            block.map(|f| f.map(f32::to_bits)),
+            quiet.map(|f| f.map(f32::to_bits))
+        );
+
+        let mut loud = [[0.125, 1.0]; BLOCK];
+        processor.process_block::<false>(&mut loud);
+        assert!(loud[BLOCK - 1][0] < 0.125);
+        block = quiet;
+        assert!(processor.process(&mut block) < 0.25);
+        assert!(block[BLOCK - 1][1].abs() > block[0][1].abs());
+
+        for _ in 0..160 {
+            block = quiet;
+            processor.process_block::<false>(&mut block);
+        }
+        assert_eq!(
+            block.map(|f| f.map(f32::to_bits)),
+            quiet.map(|f| f.map(f32::to_bits))
+        );
+    }
+
+    #[test]
+    fn silent_high_pass_feedback_settles_without_changing_pcm_on_resume() {
+        for hz in [1, 50, 150] {
+            let mut reference = HighPass::new(hz);
+            let mut live = HighPass::new(hz);
+            // Both channels have decayed well below f32 PCM. One still receives quiet input.
+            reference.state = [[1e-307, -2e-307], [1e-6, -2e-6]];
+            live.state = reference.state;
+            live.settle();
+            assert_eq!(live.state[0], [0.; 2]);
+            assert_eq!(live.state[1], reference.state[1]);
+            for i in 0..2 * BLOCK {
+                let input = [if i >= BLOCK { 1e-15 } else { 0. }, -0.002];
+                assert_eq!(reference.frame(input), live.frame(input));
+            }
+        }
+    }
 
     fn sine(hz: f32, amplitude: f32, i: usize) -> f32 {
         amplitude * (std::f32::consts::TAU * hz * i as f32 / SAMPLE_RATE as f32).sin()
@@ -340,8 +476,12 @@ mod tests {
         let speech = phrase(155.);
         let tone = recommend(&rumble, &speech).unwrap();
         assert!((50..=100).contains(&tone.low_cut_hz), "{tone:?}");
-        assert!(power(&filtered(&rumble, tone.low_cut_hz)) < 0.5 * power(&rumble));
-        assert!(power(&filtered(&speech, tone.low_cut_hz)) > 0.79 * power(&speech));
+        assert!(
+            filtered_power(&mut HighPass::new(tone.low_cut_hz), &rumble) < 0.5 * power(&rumble)
+        );
+        assert!(
+            filtered_power(&mut HighPass::new(tone.low_cut_hz), &speech) > 0.79 * power(&speech)
+        );
         assert!((135..=155).contains(&tone.gain_percent));
         assert_eq!(tone.compressor_ratio, 1);
         assert_eq!(recommend(&rumble, &phrase(52.)).unwrap().low_cut_hz, 0);

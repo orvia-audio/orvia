@@ -2,7 +2,7 @@
 use std::time::{Duration, Instant};
 
 use orvia_core::Language;
-use orvia_engine::mic_test::Recording;
+use orvia_engine::mic_test::{FileRecording, Recording};
 
 const BASELINE_BLOCKS: usize = 15;
 const ONSET_BLOCKS: usize = 4;
@@ -37,6 +37,28 @@ impl Reader {
     ) -> Result<bool, String> {
         let rate = recording.rate();
         let frames = recording.collect().map_err(|e| e.to_string())?;
+        self.listen_frames(frames, rate, language)
+    }
+
+    /// Retain just the unfinished analysis block while the recording streams to its WAV.
+    pub(super) fn listen_saved(
+        &mut self,
+        recording: &mut FileRecording,
+        language: Language,
+    ) -> Result<bool, String> {
+        let rate = recording.rate();
+        let frames = recording.collect().map_err(|e| e.to_string())?;
+        let done = self.listen_frames(frames, rate, language)?;
+        self.checked -= recording.discard_prefix(self.checked);
+        Ok(done)
+    }
+
+    fn listen_frames(
+        &mut self,
+        frames: &[[f32; 2]],
+        rate: u32,
+        language: Language,
+    ) -> Result<bool, String> {
         let step = (rate / 50) as usize;
         let now = Instant::now();
         if frames.len() - self.checked >= step {
@@ -50,6 +72,11 @@ impl Reader {
                 .into());
         }
         Ok(self.process(frames, step))
+    }
+
+    /// Keep only the incomplete analysis block when another stream supplies the actual preview.
+    pub(super) fn discard_checked(&mut self, recording: &mut Recording) {
+        self.checked -= recording.discard_prefix(self.checked);
     }
 
     /// Keep a quiet lead-in for tone analysis while the reader waits for the user to start.

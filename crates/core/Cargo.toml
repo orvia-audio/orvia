@@ -7,14 +7,18 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-nnnoiseless = { version = "0.5", default-features = false }
+nnnoiseless = { version = "0.5.2", path = "../../vendor/nnnoiseless", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
 fs2 = "0.4"
 sys-locale = "0.3"
-sonora = "0.3"
-dfn3_rs = "0.1.2"
+sonora = { version = "0.3.0", path = "../../vendor/sonora" }
+dfn3_rs = { version = "0.1.2", path = "../../vendor/dfn3_rs" }
+
+[dev-dependencies]
+# Independent reference for bit-exact DSP parity across target-specific FFT implementations.
+nnnoiseless-reference = { package = "nnnoiseless", version = "=0.5.2", default-features = false }
 
 [lints]
 workspace = true

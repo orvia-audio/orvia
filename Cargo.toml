@@ -1,10 +1,16 @@
 [workspace]
-members = ["crates/core", "crates/engine", "crates/settings"]
+members = ["crates/core", "crates/engine", "crates/settings", "vendor/dfn3_rs"]
+exclude = ["vendor/nnnoiseless", "vendor/sonora", "vendor/sonora-ns", "vendor/sonora-common-audio"]
 resolver = "3"
+
+[patch.crates-io]
+# CPAL 0.18.2 leaks the string returned by WASAPI's GetId. Use the upstream stable-0.18 fix.
+cpal = { git = "https://github.com/RustAudio/cpal.git", rev = "450afe54bf205ac90cf4219ae9b126d4eb3f5e8b" }
+sonora-common-audio = { path = "vendor/sonora-common-audio" }
 
 [workspace.package]
 edition = "2024"
-version = "0.1.6-snapshot.1"
+version = "0.1.6-snapshot.10"
 license = "MIT"
 repository = "https://github.com/sya-ri/orvia"
 rust-version = "1.93"
@@ -19,6 +25,10 @@ unsafe_code = "forbid"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"
+
+# Keep the model's feature-detected kernels compact in distribution builds.
+[profile.release.package.dfn3_rs]
+opt-level = 2
 
 [profile.dev]
 debug = 0

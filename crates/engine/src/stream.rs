@@ -4,14 +4,15 @@ use cpal::{
     Device, DeviceId, FromSample, SampleFormat, SizedSample, Stream, SupportedStreamConfig,
     traits::{DeviceTrait, HostTrait, StreamTrait},
 };
-use orvia_core::{BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings};
+use orvia_core::{
+    BLOCK, BlockLevels, Mixing, NoiseMethod, Processor, SAMPLE_RATE, Settings, SignalWindow,
+};
 use orvia_engine::{
     formats::{InputRate, Port, config, stream_config, stream_continues},
     host, is_virtual_cable, label,
 };
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::{
-    collections::VecDeque,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed},
@@ -38,6 +39,7 @@ struct Monitor {
 
 #[derive(Default)]
 struct Counters {
+    metering: AtomicBool,
     peak: AtomicU32,
     missing: AtomicU64,
     dropped: AtomicU64,
@@ -56,6 +58,9 @@ fn controls(settings: &Settings) -> u64 {
 }
 
 pub(super) struct Route {
+    host: cpal::Host,
+    input_id: DeviceId,
+    input_channels: u16,
     controls: Arc<AtomicU64>,
     applied: Arc<AtomicU64>,
     processing: (Mixing, Option<NoiseMethod>),
@@ -63,24 +68,19 @@ pub(super) struct Route {
     retired: Consumer<Processor>,
     incoming_levels: Consumer<(u64, BlockLevels)>,
     pub(super) spectrum: crate::spectrum::Observation,
-    levels: VecDeque<(u64, BlockLevels)>,
+    levels: SignalWindow,
     monitor: Monitor,
     output: Device,
     _streams: (Stream, Stream),
-    pub(super) input_id: DeviceId,
     pub(super) name: String,
     counters: Arc<Counters>,
     start: Instant,
 }
 
-pub(super) fn default_input_id() -> Option<DeviceId> {
-    host().ok()?.default_input_device()?.id().ok()
-}
-
 impl Route {
     pub(super) fn open(settings: &Settings) -> Result<Self> {
         let host = host()?;
-        let output = orvia_engine::mic_test::virtual_output(settings.output.as_deref())?;
+        let output = orvia_engine::mic_test::virtual_output_on(&host, settings.output.as_deref())?;
         let input = match &settings.input {
             Some(id) => host
                 .device_by_id(&id.parse()?)
@@ -107,52 +107,54 @@ impl Route {
         let applied = Arc::new(AtomicU64::new(u64::MAX));
         let acknowledged = applied.clone();
         let monitor = Monitor::default();
-        let mut processor = Processor::new(settings);
+        let input_channels = input_config.channels;
+        let mut processor = Processor::for_input(settings, input_channels);
+        let mut current_controls = None;
         let (replacements, mut next_processor) = RingBuffer::new(1);
         let (mut return_processor, retired) = RingBuffer::new(1);
-        let mut block = [[0.; 2]; BLOCK];
-        let mut used = 0;
+        let mut input_blocks = CaptureBlocks::new(input_config.sample_rate, input_config.channels);
         let meter = counters.clone();
-        let channels = usize::from(input_config.channels);
-        let mut resampler = InputRate::new(input_config.sample_rate);
         let input_stream = input.build_input_stream(
             input_config,
             move |samples: &[f32], _| {
                 let stamp = start.elapsed().as_millis() as u64;
                 meter.captured_ms.store(stamp, Relaxed);
-                for frame in samples.chunks_exact(channels) {
-                    resampler.push([frame[0], *frame.get(1).unwrap_or(&frame[0])], |sample| {
-                        block[used] = sample;
-                        used += 1;
-                        if used == BLOCK {
-                            used = 0;
-                            // Allocate and retire filter state on the control thread.
-                            if !return_processor.is_full()
-                                && let Ok(next) = next_processor.pop()
-                            {
-                                let old = std::mem::replace(&mut processor, next);
-                                let _ = return_processor.push(old);
-                            }
-                            let word = live.load(Relaxed);
-                            processor.set_tone(orvia_core::Tone {
-                                low_cut_hz: word as u16,
-                                gain_percent: (word >> 16) as u16,
-                                compressor_ratio: (word >> 32) as u16,
-                            });
-                            processor.set_deep_filter_limit((word >> 48) as u16);
-                            let (peak, levels) = processor.process_with_levels(&mut block);
-                            spectrum_tap.capture(&block);
-                            acknowledged.store(word, Relaxed);
-                            let _ = envelope_tx.push((stamp, levels));
-                            meter.peak.fetch_max(peak.to_bits(), Relaxed);
-                            for frame in block {
-                                if tx.push((frame, stamp)).is_err() {
-                                    meter.dropped.fetch_add(1, Relaxed);
-                                }
-                            }
-                        }
-                    });
-                }
+                input_blocks.push(samples, |block| {
+                    // Allocate and retire filter state on the control thread.
+                    if !return_processor.is_full()
+                        && let Ok(next) = next_processor.pop()
+                    {
+                        let old = std::mem::replace(&mut processor, next);
+                        let _ = return_processor.push(old);
+                        current_controls = None;
+                    }
+                    let word = live.load(Relaxed);
+                    if current_controls != Some(word) {
+                        processor.set_tone(orvia_core::Tone {
+                            low_cut_hz: word as u16,
+                            gain_percent: (word >> 16) as u16,
+                            compressor_ratio: (word >> 32) as u16,
+                        });
+                        processor.set_deep_filter_limit((word >> 48) as u16);
+                        current_controls = Some(word);
+                    }
+                    if meter.metering.load(Relaxed) {
+                        let (peak, levels) = processor.process_with_levels(block);
+                        let _ = envelope_tx.push((stamp, levels));
+                        meter.peak.fetch_max(peak.to_bits(), Relaxed);
+                    } else {
+                        processor.process_unmetered(block);
+                    }
+                    spectrum_tap.capture(block);
+                    acknowledged.store(word, Relaxed);
+                    let count = tx.slots().min(BLOCK);
+                    if let Ok(chunk) = tx.write_chunk_uninit(count) {
+                        chunk.fill_from_iter(block.iter().map(|&frame| (frame, stamp)));
+                    }
+                    if count < BLOCK {
+                        meter.dropped.fetch_add((BLOCK - count) as u64, Relaxed);
+                    }
+                });
             },
             on_error(&counters),
             None,
@@ -169,6 +171,9 @@ impl Route {
         input_stream.play()?;
         output_stream.play()?;
         Ok(Self {
+            host,
+            input_id,
+            input_channels,
             controls,
             applied,
             processing: (settings.mixing, settings.active_noise_method()),
@@ -176,15 +181,23 @@ impl Route {
             retired,
             incoming_levels,
             spectrum,
-            levels: VecDeque::with_capacity(200),
+            levels: SignalWindow::default(),
             monitor,
             output,
             _streams: (input_stream, output_stream),
             counters,
-            input_id,
             name,
             start,
         })
+    }
+
+    /// Query the live host so a default-device check can reuse its sound server connection.
+    pub(super) fn default_input_changed(&self) -> bool {
+        self.host
+            .default_input_device()
+            .and_then(|device| device.id().ok())
+            .as_ref()
+            != Some(&self.input_id)
     }
 
     pub(super) fn controls_applied(&self, settings: &Settings) -> bool {
@@ -198,35 +211,29 @@ impl Route {
             && now.saturating_sub(self.counters.played_ms.load(Relaxed)) < 2000
     }
 
-    pub(super) fn update_controls(&mut self, settings: &Settings) {
+    pub(super) fn update_controls(&mut self, settings: &Settings, observed: bool) {
+        self.counters.metering.store(observed, Relaxed);
         self.controls.store(controls(settings), Relaxed);
         let _ = self.retired.pop();
         let requested = (settings.mixing, settings.active_noise_method());
-        if self.processing != requested
+        if (self.processing.1 != requested.1
+            || (self.input_channels > 1 && self.processing.0 != requested.0))
             && !self.replacements.is_full()
-            && self.replacements.push(Processor::new(settings)).is_ok()
+            && self
+                .replacements
+                .push(Processor::for_input(settings, self.input_channels))
+                .is_ok()
         {
             self.processing = requested;
         }
         let now = self.start.elapsed().as_millis() as u64;
-        while let Ok(entry) = self.incoming_levels.pop() {
-            if self.levels.len() == 200 {
-                self.levels.pop_front();
-            }
-            self.levels.push_back(entry);
-        }
-        while self
-            .levels
-            .front()
-            .is_some_and(|(t, _)| now.saturating_sub(*t) > 2000)
-        {
-            self.levels.pop_front();
-        }
+        self.levels
+            .update(now, std::iter::from_fn(|| self.incoming_levels.pop().ok()));
         self.update_monitor(settings);
     }
 
     pub(super) fn envelopes(&self) -> orvia_core::SignalHistory {
-        orvia_core::SignalHistory::from_blocks(self.levels.iter().map(|(_, levels)| levels))
+        self.levels.history()
     }
 
     pub(super) fn update_monitor(&mut self, settings: &Settings) {
@@ -278,6 +285,62 @@ impl Route {
             self.counters.missing.load(Relaxed),
             self.counters.dropped.load(Relaxed),
         )
+    }
+}
+
+/// Assemble 48 kHz stereo blocks across arbitrary device callback boundaries.
+struct CaptureBlocks {
+    buffer: [Frame; BLOCK],
+    filled: usize,
+    channels: usize,
+    resampler: Option<InputRate>,
+}
+
+impl CaptureBlocks {
+    fn new(rate: u32, channels: u16) -> Self {
+        Self {
+            buffer: [[0.; 2]; BLOCK],
+            filled: 0,
+            channels: usize::from(channels),
+            resampler: (rate != SAMPLE_RATE).then(|| InputRate::new(rate)),
+        }
+    }
+
+    fn push(&mut self, mut samples: &[f32], mut emit: impl FnMut(&mut [Frame; BLOCK])) {
+        let channels = self.channels;
+        if let Some(rate) = &mut self.resampler {
+            for frame in samples.chunks_exact(channels) {
+                rate.push([frame[0], *frame.get(1).unwrap_or(&frame[0])], |frame| {
+                    self.buffer[self.filled] = frame;
+                    self.filled += 1;
+                    if self.filled == BLOCK {
+                        emit(&mut self.buffer);
+                        self.filled = 0;
+                    }
+                });
+            }
+            return;
+        }
+        while samples.len() >= channels {
+            let count = (samples.len() / channels).min(BLOCK - self.filled);
+            let (batch, rest) = samples.split_at(count * channels);
+            let output = &mut self.buffer[self.filled..][..count];
+            match channels {
+                1 => output.iter_mut().zip(batch).for_each(|(f, &x)| *f = [x; 2]),
+                2 => output.copy_from_slice(batch.as_chunks::<2>().0),
+                _ => {
+                    for (slot, frame) in output.iter_mut().zip(batch.chunks_exact(channels)) {
+                        *slot = [frame[0], frame[1]];
+                    }
+                }
+            }
+            self.filled += count;
+            if self.filled == BLOCK {
+                emit(&mut self.buffer);
+                self.filled = 0;
+            }
+            samples = rest;
+        }
     }
 }
 
@@ -338,6 +401,7 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(format.channels());
+    let native_rate = format.sample_rate() == SAMPLE_RATE;
     let mut rate = InputRate::new(format.sample_rate());
     let meter = counters.clone();
     device.build_input_stream(
@@ -345,6 +409,17 @@ where
         move |data: &[T], _| {
             let stamp = start.elapsed().as_millis() as u64;
             meter.captured_ms.store(stamp, Relaxed);
+            if native_rate {
+                let frames = data.chunks_exact(channels);
+                let count = tx.slots().min(frames.len());
+                if let Ok(chunk) = tx.write_chunk_uninit(count) {
+                    chunk.fill_from_iter(frames.map(|f| {
+                        let left = f[0].to_sample();
+                        ([left, f.get(1).map_or(left, |s| s.to_sample())], stamp)
+                    }));
+                }
+                return;
+            }
             for f in data.chunks_exact(channels) {
                 let left = f[0].to_sample();
                 let right = f.get(1).map_or(left, |s| s.to_sample());
@@ -423,21 +498,29 @@ impl Playback {
         // plus the right-hand sample needed by the interpolator.
         let requested = (frame_count as f64 * self.rate_ratio).ceil() as usize;
         let target = (requested + 3 * BLOCK + 1).min(self.rx.buffer().capacity());
-        if self
-            .current
-            .is_some_and(|(_, t)| now.saturating_sub(t) > 100)
-        {
+        let stale = |&(_, stamp): &TimedFrame| now.saturating_sub(stamp) > 100;
+        let mut dropped = 0;
+        if self.current.as_ref().is_some_and(stale) {
             self.current = None;
             self.fraction = 0.;
-            counts.dropped.fetch_add(1, Relaxed);
+            dropped += 1;
         }
-        while self
-            .rx
-            .peek()
-            .is_ok_and(|(_, t)| now.saturating_sub(*t) > 100)
-        {
-            let _ = self.rx.pop();
-            counts.dropped.fetch_add(1, Relaxed);
+        // A stalled callback can leave several thousand expired frames. Release the
+        // stale prefix in one queue update so the producer can enqueue fresh audio.
+        while self.rx.peek().is_ok_and(stale) {
+            let available = self.rx.slots();
+            let chunk = self.rx.read_chunk(available).expect("single reader");
+            let (first, second) = chunk.as_slices();
+            let expired = first
+                .iter()
+                .chain(second)
+                .take_while(|frame| stale(frame))
+                .count();
+            chunk.commit(expired);
+            dropped += expired as u64;
+        }
+        if dropped > 0 {
+            counts.dropped.fetch_add(dropped, Relaxed);
         }
         let buffered = self.rx.slots();
         if self.current.is_none() {
@@ -453,28 +536,44 @@ impl Playback {
         let drift =
             ((buffered as f64 - target as f64) / (target as f64 * 800.)).clamp(-0.003, 0.003);
         let step = self.rate_ratio * (1. + drift);
-        for (idx, frame) in out.chunks_exact_mut(self.channels).enumerate() {
-            let (Some((left, _)), Ok((right, _))) = (self.current, self.rx.peek()) else {
-                counts
-                    .missing
-                    .fetch_add((frame_count - idx) as u64, Relaxed);
+        let mut output = out.chunks_exact_mut(self.channels);
+        let mut current = self.current.expect("primed playback");
+        while output.len() != 0 || self.fraction >= 1. {
+            let available = self.rx.slots();
+            if available == 0 {
+                counts.missing.fetch_add(output.len() as u64, Relaxed);
                 self.current = None;
                 self.fraction = 0.;
-                break;
-            };
-            let sample = |c: usize| left[c] + (right[c] - left[c]) * self.fraction as f32;
-            if frame.len() == 1 {
-                frame[0] = T::from_sample((sample(0) + sample(1)) * 0.5);
-            } else {
-                frame[0] = T::from_sample(sample(0));
-                frame[1] = T::from_sample(sample(1));
+                return;
             }
-            self.fraction += step;
-            while self.fraction >= 1. {
-                self.current = self.rx.pop().ok();
-                self.fraction -= 1.;
+            // Publish one read position per batch, including when the ring wraps.
+            let chunk = self.rx.read_chunk(available).expect("single reader");
+            let (first, second) = chunk.as_slices();
+            let mut consumed = 0;
+            for mut input in [first, second] {
+                while let Some(&next) = input.first() {
+                    if self.fraction >= 1. {
+                        current = next;
+                        input = &input[1..];
+                        consumed += 1;
+                        self.fraction -= 1.;
+                        continue;
+                    }
+                    let Some(frame) = output.next() else { break };
+                    let sample =
+                        |c: usize| current.0[c] + (next.0[c] - current.0[c]) * self.fraction as f32;
+                    if frame.len() == 1 {
+                        frame[0] = T::from_sample((sample(0) + sample(1)) * 0.5);
+                    } else {
+                        frame[0] = T::from_sample(sample(0));
+                        frame[1] = T::from_sample(sample(1));
+                    }
+                    self.fraction += step;
+                }
             }
+            chunk.commit(consumed);
         }
+        self.current = Some(current);
     }
 }
 
@@ -501,6 +600,51 @@ mod tests {
         callback(cpal::ErrorKind::DeviceNotAvailable.into());
         assert!(counters.failed.load(Relaxed));
     }
+    #[test]
+    fn capture_blocks_match_framewise_conversion_across_device_periods() {
+        for rate in [16_000, 44_100, 48_000] {
+            for channels in [1, 2, 4] {
+                let mut blocks = CaptureBlocks::new(rate, channels as u16);
+                let mut reference = InputRate::new(rate);
+                let mut actual = Vec::new();
+                let mut expected = Vec::new();
+                for n in [127, 360, 1, 1024, 73, 1951] {
+                    let samples: Vec<_> =
+                        (0..n * channels).map(|i| (i as f32 * 0.13).sin()).collect();
+                    blocks.push(&samples, |chunk| actual.extend_from_slice(chunk));
+                    for f in samples.chunks_exact(channels) {
+                        reference.push([f[0], *f.get(1).unwrap_or(&f[0])], |f| expected.push(f));
+                    }
+                }
+                assert_eq!(actual, expected[..expected.len() / BLOCK * BLOCK]);
+                assert_eq!(blocks.buffer[..blocks.filled], expected[actual.len()..]);
+            }
+        }
+    }
+
+    #[test]
+    fn stale_audio_is_discarded_across_ring_wraps_but_the_age_boundary_is_kept() {
+        let (mut tx, mut rx) = RingBuffer::new(10 * BLOCK);
+        for _ in 0..9 * BLOCK {
+            tx.push(([0.; 2], 0)).unwrap();
+        }
+        rx.read_chunk(9 * BLOCK).unwrap().commit_all();
+        for _ in 0..2 * BLOCK {
+            tx.push(([-0.5; 2], 0)).unwrap();
+        }
+        for _ in 0..5 * BLOCK {
+            tx.push(([0.25; 2], 1)).unwrap();
+        }
+        let mut playback = Playback::new(rx, SAMPLE_RATE, 2);
+        playback.current = Some(([-0.75; 2], 0));
+        let counts = Counters::default();
+        let mut output = [0.; 2 * BLOCK];
+        playback.fill(&mut output, 101, &counts);
+        assert_eq!(output, [0.25; 2 * BLOCK]);
+        assert_eq!(counts.dropped.load(Relaxed), (2 * BLOCK + 1) as u64);
+        assert_eq!(counts.missing.load(Relaxed), 0);
+    }
+
     #[test]
     fn renders_48_khz_stereo_processing_to_a_44_1_khz_mono_pcm_cable() {
         let (mut tx, rx) = RingBuffer::new(3 * BLOCK);

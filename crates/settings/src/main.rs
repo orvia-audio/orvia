@@ -338,17 +338,12 @@ impl Panel {
             Page::Mixer if !self.live_mixer() => false,
             Page::Preferences => old.version != new.version,
             Page::MicTest => old.message != new.message || old.version != new.version,
-            Page::Mixer => {
-                old.message != new.message
-                    || old.version != new.version
-                    || old.monitor_error != new.monitor_error
-                    || old.monitoring != new.monitoring
-                    || if self.show_spectrum {
-                        old.spectrum != new.spectrum
-                    } else {
-                        old.signal != new.signal || old.peak != new.peak
-                    }
-            }
+            Page::Mixer => Self::mixer_status_changed(
+                old,
+                new,
+                self.show_spectrum,
+                self.prefs.active_noise_method().is_some(),
+            ),
         }
     }
 

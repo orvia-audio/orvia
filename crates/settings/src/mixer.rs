@@ -6,6 +6,27 @@ const INPUT_COLOR: u32 = 0xb2d3dd;
 const OUTPUT_COLOR: u32 = 0xffaa82;
 const HISTORY_BLOCKS: usize = 200;
 
+fn needs_restart(status: &EngineStatus, spectrum: bool) -> bool {
+    status.version != env!("CARGO_PKG_VERSION")
+        && if spectrum {
+            status.spectrum.is_none()
+        } else {
+            status.signal.peaks.is_empty()
+        }
+}
+
+fn output_label(peak: f32) -> String {
+    if peak > 0.00001 {
+        format!("{:.1} dBFS", 20. * peak.log10())
+    } else {
+        "−∞ dBFS".into()
+    }
+}
+
+fn attenuation_label(db: Option<f32>) -> String {
+    db.map_or_else(|| "—".into(), |db| format!("{db:.1} dB"))
+}
+
 fn history(levels: Vec<[u8; 2]>, filtered: bool) -> impl IntoElement {
     canvas(
         |_, _, _| (),
@@ -98,6 +119,49 @@ impl Slider {
 }
 
 impl Panel {
+    /// Compare the current mixer display, including its visible traces and rounded meter labels.
+    pub(crate) fn mixer_status_changed(
+        old: &EngineStatus,
+        new: &EngineStatus,
+        spectrum: bool,
+        filtered: bool,
+    ) -> bool {
+        if old.message != new.message
+            || old.version != new.version
+            || old.monitor_error != new.monitor_error
+            || old.monitoring != new.monitoring
+        {
+            return true;
+        }
+        if !new.message.starts_with("Streaming") {
+            return false;
+        }
+        if spectrum {
+            return old.spectrum != new.spectrum;
+        }
+        if needs_restart(old, false) != needs_restart(new, false) {
+            return true;
+        }
+        let before = &old.signal.peaks;
+        let after = &new.signal.peaks;
+        if before.len() >= 2 || after.len() >= 2 {
+            let changed = if filtered {
+                before != after
+            } else {
+                before.iter().map(|p| p[0]).ne(after.iter().map(|p| p[0]))
+            };
+            if changed {
+                return true;
+            }
+        }
+        let old_db = old.signal.attenuation_db;
+        let new_db = new.signal.attenuation_db;
+        (old.peak != new.peak && output_label(old.peak) != output_label(new.peak))
+            || (filtered
+                && old_db.map(f32::to_bits) != new_db.map(f32::to_bits)
+                && attenuation_label(old_db) != attenuation_label(new_db))
+    }
+
     pub(super) fn slide_at(&mut self, slider: Slider, x: Pixels, cx: &mut Context<Self>) {
         let bounds = self.slider_anchors[slider as usize].bounds.get();
         if bounds.size.width > px(0.) {
@@ -194,23 +258,8 @@ impl Panel {
             .status
             .as_ref()
             .filter(|s| s.message.starts_with("Streaming"));
-        let outdated = live.is_some_and(|s| {
-            (if self.show_spectrum {
-                s.spectrum.is_none()
-            } else {
-                s.signal.peaks.is_empty()
-            }) && s.version != env!("CARGO_PKG_VERSION")
-        });
+        let outdated = live.is_some_and(|s| needs_restart(s, self.show_spectrum));
         let levels = live.map(|s| s.signal.peaks.as_slice()).unwrap_or_default();
-        let peak = live.map_or(0., |s| s.peak);
-        let output = if peak > 0.00001 {
-            format!("{:.1} dBFS", 20. * peak.log10())
-        } else {
-            "−∞ dBFS".into()
-        };
-        let change = live
-            .and_then(|s| s.signal.attenuation_db)
-            .map_or_else(|| "—".into(), |v| format!("{:.1} dB", v));
         let selected = self.prefs.active_noise_method();
         let filtered = selected.is_some();
         let mut methods = row();
@@ -330,16 +379,18 @@ impl Panel {
                         row()
                             .justify_between()
                             .child(div().flex_1().when(filtered, |d| {
+                                let change =
+                                    attenuation_label(live.and_then(|s| s.signal.attenuation_db));
                                 d.text_sm().child(format!(
                                     "{}  {change}",
                                     l.text("Pre-gain attenuation", "ゲイン適用前の減衰量")
                                 ))
                             }))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .child(format!("{}  {output}", l.text("Output", "出力"))),
-                            ),
+                            .child(div().text_sm().child(format!(
+                                "{}  {}",
+                                l.text("Output", "出力"),
+                                output_label(live.map_or(0., |s| s.peak))
+                            ))),
                     )
             };
         let tone = self.prefs.tone();
@@ -448,5 +499,117 @@ impl Panel {
             )
             .child(signal)
             .child(self.monitor(cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use orvia_core::{SignalHistory, spectrum::Spectrum};
+
+    fn live() -> EngineStatus {
+        EngineStatus {
+            signal: SignalHistory {
+                peaks: vec![[28, 22]; HISTORY_BLOCKS],
+                attenuation_db: Some(6.),
+            },
+            spectrum: None,
+            monitoring: false,
+            monitor_error: None,
+            audition: None,
+            observed: std::time::SystemTime::UNIX_EPOCH,
+            version: env!("CARGO_PKG_VERSION").into(),
+            message: "Streaming".into(),
+            peak: 0.02,
+            missing_frames: 0,
+            dropped_frames: 0,
+        }
+    }
+
+    #[test]
+    fn steady_waveform_repaints_at_the_first_visible_change() {
+        let mut previous = live();
+        for tick in 1..=80 {
+            let mut next = previous.clone();
+            let jitter = (tick as f32 * 0.1).sin() * 0.0001;
+            next.peak = 0.02 * (1. + jitter);
+            next.signal.attenuation_db = Some(6. + jitter);
+            assert!(!Panel::mixer_status_changed(&previous, &next, false, true));
+            previous = next;
+        }
+        let mut next = previous.clone();
+        next.peak = 0.021;
+        assert!(Panel::mixer_status_changed(&previous, &next, false, true));
+        next.peak = previous.peak;
+        next.signal.peaks[125][0] += 1;
+        assert!(Panel::mixer_status_changed(&previous, &next, false, false));
+    }
+
+    #[test]
+    fn bypass_ignores_only_the_filtered_trace_and_attenuation() {
+        let old = live();
+        let mut new = old.clone();
+        new.signal.peaks[99][1] += 1;
+        assert!(!Panel::mixer_status_changed(&old, &new, false, false));
+        assert!(Panel::mixer_status_changed(&old, &new, false, true));
+        new.signal.peaks.clone_from(&old.signal.peaks);
+        new.signal.attenuation_db = None;
+        assert!(!Panel::mixer_status_changed(&old, &new, false, false));
+        assert!(Panel::mixer_status_changed(&old, &new, false, true));
+    }
+
+    #[test]
+    fn meter_labels_follow_display_rounding_and_the_output_floor() {
+        let mut old = live();
+        let mut new = old.clone();
+        for (a, b, changes) in [
+            (0.25, 0.24, false),
+            (0.25, 0.26, true),
+            (-0.01, -0., false),
+            (-0., 0., true),
+        ] {
+            old.signal.attenuation_db = Some(a);
+            new.signal.attenuation_db = Some(b);
+            assert_eq!(
+                Panel::mixer_status_changed(&old, &new, false, true),
+                changes
+            );
+        }
+        old.peak = 0.;
+        new.peak = 0.00001;
+        assert!(!Panel::mixer_status_changed(&old, &new, false, false));
+        new.peak = 0.000011;
+        assert!(Panel::mixer_status_changed(&old, &new, false, false));
+    }
+
+    #[test]
+    fn first_peak_clears_the_legacy_restart_notice_before_a_trace_is_drawn() {
+        let mut old = live();
+        old.signal.peaks.clear();
+        let mut new = old.clone();
+        new.signal.peaks.push([1, 2]);
+        assert!(!Panel::mixer_status_changed(&old, &new, false, true));
+        old.version = "0.0.1".into();
+        new.version.clone_from(&old.version);
+        assert!(Panel::mixer_status_changed(&old, &new, false, true));
+    }
+
+    #[test]
+    fn spectrum_and_offline_mixer_ignore_unused_waveform_data() {
+        let mut old = live();
+        let mut new = old.clone();
+        new.peak = 1.;
+        new.signal.peaks.clear();
+        assert!(!Panel::mixer_status_changed(&old, &new, true, true));
+        new.spectrum = Some(Spectrum {
+            bands: vec![0; Spectrum::BANDS],
+            peak_hz: None,
+        });
+        assert!(Panel::mixer_status_changed(&old, &new, true, true));
+        new.message = "Device disconnected".into();
+        assert!(Panel::mixer_status_changed(&old, &new, false, true));
+        old.message.clone_from(&new.message);
+        assert!(!Panel::mixer_status_changed(&old, &new, false, true));
+        assert!(!Panel::mixer_status_changed(&old, &new, true, true));
     }
 }

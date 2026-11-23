@@ -312,20 +312,24 @@ impl Cursor {
     fn fill<T: SizedSample + FromSample<f32>>(&mut self, out: &mut [T], done: &AtomicBool) {
         out.fill(T::EQUILIBRIUM);
         let rate = u64::from(self.output_rate);
+        let mut index = self.phase / rate;
         // Keep the stream alive through the callback that consumes the last sample.
-        if self.phase / rate >= self.length as u64 {
+        if index >= self.length as u64 {
             done.store(true, Ordering::Relaxed);
             return;
         }
+        // Carry the fractional source frame forward exactly across rates and callback boundaries.
+        let mut remainder = self.phase % rate;
+        let step = u64::from(self.input_rate) / rate;
+        let fraction_step = u64::from(self.input_rate) % rate;
         for frame in out.chunks_exact_mut(self.channels) {
-            let index = (self.phase / rate) as usize;
-            if index >= self.length {
+            if index >= self.length as u64 {
                 break;
             }
-            let Some([left, right]) = self.frames.pair(index, self.length) else {
+            let Some([left, right]) = self.frames.pair(index as usize, self.length) else {
                 break;
             };
-            let fraction = (self.phase % rate) as f32 / self.output_rate as f32;
+            let fraction = remainder as f32 / self.output_rate as f32;
             let sample = |ch: usize| left[ch] + (right[ch] - left[ch]) * fraction;
             if self.channels == 1 {
                 frame[0] = T::from_sample((sample(0) + sample(1)) * 0.5);
@@ -333,8 +337,14 @@ impl Cursor {
                 frame[0] = T::from_sample(sample(0));
                 frame[1] = T::from_sample(sample(1));
             }
-            self.phase += u64::from(self.input_rate);
+            index += step;
+            remainder += fraction_step;
+            if remainder >= rate {
+                remainder -= rate;
+                index += 1;
+            }
         }
+        self.phase = index * rate + remainder;
     }
 }
 
@@ -487,5 +497,73 @@ mod tests {
             ]
         );
         assert!(done.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_starved_replay_resumes_at_the_exact_fractional_frame_of_a_long_take() {
+        let source: Vec<Frame> = (0..17)
+            .map(|i| [i as f32 / 21., 0.25 - i as f32 / 29.])
+            .collect();
+        for (input_rate, output_rate, channels) in [
+            (48_000, 48_000, 2),
+            (44_100, 48_000, 2),
+            (16_000, 48_000, 1),
+            (48_000, 44_100, 3),
+            (48_000, 16_000, 2),
+        ] {
+            // Start a day into the source without allocating its preceding samples.
+            let start = 86_400 * u64::from(input_rate);
+            let rate = u64::from(output_rate);
+            let step = u64::from(input_rate);
+            let initial_fraction = step % rate;
+            let phase = start * rate + initial_fraction;
+            let (mut tx, queue) = RingBuffer::new(source.len());
+            let mut cursor = Cursor {
+                frames: Frames::Buffered {
+                    queue,
+                    pair: [[0.; 2]; 2],
+                    consumed: start as usize,
+                },
+                length: start as usize + source.len(),
+                phase,
+                input_rate,
+                output_rate,
+                channels,
+            };
+            let done = AtomicBool::new(false);
+            let mut callback = vec![1_f32; 3 * channels + usize::from(channels > 1)];
+            tx.push(source[0]).unwrap();
+            cursor.fill(&mut callback, &done);
+            assert!(callback.iter().all(|&sample| sample == 0.));
+            assert_eq!(cursor.phase, phase);
+            assert!(!done.load(Ordering::Relaxed));
+
+            tx.push_entire_slice(&source[1..]).unwrap();
+            let output_frames = (source.len() as u64 * rate - initial_fraction).div_ceil(step);
+            for first in (0..output_frames).step_by(3) {
+                cursor.fill(&mut callback, &done);
+                assert!(!done.load(Ordering::Relaxed));
+                let mut expected = vec![0.; callback.len()];
+                for (offset, frame) in expected.chunks_exact_mut(channels).enumerate() {
+                    let pos = initial_fraction + (first + offset as u64) * step;
+                    let index = (pos / rate) as usize;
+                    if let Some(left) = source.get(index) {
+                        let right = source[(index + 1).min(source.len() - 1)];
+                        let fraction = (pos % rate) as f32 / output_rate as f32;
+                        let sample = |ch: usize| left[ch] + (right[ch] - left[ch]) * fraction;
+                        if channels == 1 {
+                            frame[0] = (sample(0) + sample(1)) * 0.5;
+                        } else {
+                            frame[..2].copy_from_slice(&[sample(0), sample(1)]);
+                        }
+                    }
+                }
+                assert_eq!(callback, expected);
+            }
+            assert_eq!(cursor.phase, phase + output_frames * step);
+            cursor.fill(&mut callback, &done);
+            assert!(done.load(Ordering::Relaxed));
+            assert!(callback.iter().all(|&sample| sample == 0.));
+        }
     }
 }

@@ -141,7 +141,7 @@ impl Panel {
             );
             Settings::default()
         });
-        if !test_only && let Err(e) = engine_control::start() {
+        if !test_only && let Err(e) = engine_control::start(&dir) {
             error = format!(
                 "{} · {e}",
                 prefs

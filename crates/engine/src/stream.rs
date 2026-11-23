@@ -153,7 +153,7 @@ impl Route {
                                 let _ = envelope_tx.push((stamp, levels));
                                 meter.peak.fetch_max(peak.to_bits(), Relaxed);
                             } else {
-                                processor.process(&mut block);
+                                processor.process_unmetered(&mut block);
                             }
                             spectrum_tap.capture(&block);
                             acknowledged.store(word, Relaxed);
@@ -358,6 +358,7 @@ where
     f32: FromSample<T>,
 {
     let channels = usize::from(format.channels());
+    let native_rate = format.sample_rate() == SAMPLE_RATE;
     let mut rate = InputRate::new(format.sample_rate());
     let meter = counters.clone();
     device.build_input_stream(
@@ -365,6 +366,17 @@ where
         move |data: &[T], _| {
             let stamp = start.elapsed().as_millis() as u64;
             meter.captured_ms.store(stamp, Relaxed);
+            if native_rate {
+                let frames = data.chunks_exact(channels);
+                let count = tx.slots().min(frames.len());
+                if let Ok(chunk) = tx.write_chunk_uninit(count) {
+                    chunk.fill_from_iter(frames.map(|f| {
+                        let left = f[0].to_sample();
+                        ([left, f.get(1).map_or(left, |s| s.to_sample())], stamp)
+                    }));
+                }
+                return;
+            }
             for f in data.chunks_exact(channels) {
                 let left = f[0].to_sample();
                 let right = f.get(1).map_or(left, |s| s.to_sample());
@@ -473,28 +485,44 @@ impl Playback {
         let drift =
             ((buffered as f64 - target as f64) / (target as f64 * 800.)).clamp(-0.003, 0.003);
         let step = self.rate_ratio * (1. + drift);
-        for (idx, frame) in out.chunks_exact_mut(self.channels).enumerate() {
-            let (Some((left, _)), Ok((right, _))) = (self.current, self.rx.peek()) else {
-                counts
-                    .missing
-                    .fetch_add((frame_count - idx) as u64, Relaxed);
+        let mut output = out.chunks_exact_mut(self.channels);
+        let mut current = self.current.expect("primed playback");
+        while output.len() != 0 || self.fraction >= 1. {
+            let available = self.rx.slots();
+            if available == 0 {
+                counts.missing.fetch_add(output.len() as u64, Relaxed);
                 self.current = None;
                 self.fraction = 0.;
-                break;
-            };
-            let sample = |c: usize| left[c] + (right[c] - left[c]) * self.fraction as f32;
-            if frame.len() == 1 {
-                frame[0] = T::from_sample((sample(0) + sample(1)) * 0.5);
-            } else {
-                frame[0] = T::from_sample(sample(0));
-                frame[1] = T::from_sample(sample(1));
+                return;
             }
-            self.fraction += step;
-            while self.fraction >= 1. {
-                self.current = self.rx.pop().ok();
-                self.fraction -= 1.;
+            // Publish one read position per batch, including when the ring wraps.
+            let chunk = self.rx.read_chunk(available).expect("single reader");
+            let (first, second) = chunk.as_slices();
+            let mut consumed = 0;
+            for mut input in [first, second] {
+                while let Some(&next) = input.first() {
+                    if self.fraction >= 1. {
+                        current = next;
+                        input = &input[1..];
+                        consumed += 1;
+                        self.fraction -= 1.;
+                        continue;
+                    }
+                    let Some(frame) = output.next() else { break };
+                    let sample =
+                        |c: usize| current.0[c] + (next.0[c] - current.0[c]) * self.fraction as f32;
+                    if frame.len() == 1 {
+                        frame[0] = T::from_sample((sample(0) + sample(1)) * 0.5);
+                    } else {
+                        frame[0] = T::from_sample(sample(0));
+                        frame[1] = T::from_sample(sample(1));
+                    }
+                    self.fraction += step;
+                }
             }
+            chunk.commit(consumed);
         }
+        self.current = Some(current);
     }
 }
 

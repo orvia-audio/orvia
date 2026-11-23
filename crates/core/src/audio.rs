@@ -175,7 +175,13 @@ impl Processor {
     /// Non-finite input becomes silence. Gain is limited to 200% and the final
     /// signal is clipped to full scale.
     pub fn process(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> f32 {
-        self.process_block::<false>(frames).0
+        self.process_block::<false, true>(frames).0
+    }
+
+    /// Process audio without computing an output peak. Filter state and delayed input
+    /// levels stay aligned when a mixer begins observing the following block.
+    pub fn process_unmetered(&mut self, frames: &mut [[f32; 2]; BLOCK]) {
+        self.process_block::<false, false>(frames);
     }
 
     /// Change linear output gain without clearing filter history. 100 means unity.
@@ -212,10 +218,10 @@ impl Processor {
     /// Process one block and return its output peak and pre-gain filter measurements.
     /// The input envelope follows each filter's delay to the nearest 10 ms.
     pub fn process_with_levels(&mut self, frames: &mut [[f32; 2]; BLOCK]) -> (f32, BlockLevels) {
-        self.process_block::<true>(frames)
+        self.process_block::<true, true>(frames)
     }
 
-    fn process_block<const METER: bool>(
+    fn process_block<const METER: bool, const OUTPUT_PEAK: bool>(
         &mut self,
         frames: &mut [[f32; 2]; BLOCK],
     ) -> (f32, BlockLevels) {
@@ -274,7 +280,7 @@ impl Processor {
         } else {
             (input_levels, input_levels)
         };
-        let peak = self.tone.process(frames);
+        let peak = self.tone.process_block::<OUTPUT_PEAK>(frames);
         (
             peak,
             BlockLevels {
@@ -313,7 +319,9 @@ mod tests {
                     std::array::from_fn(|i| [((index * BLOCK + i) as f32 * 0.03).sin() * 0.08; 2]);
                 let mut expected = frames;
                 let (peak, history) = reference.process_with_levels(&mut expected);
-                if index < 20 {
+                if index < 10 {
+                    mono.process_unmetered(&mut frames);
+                } else if index < 20 {
                     assert_eq!(mono.process(&mut frames), peak);
                 } else {
                     let (output, levels) = mono.process_with_levels(&mut frames);

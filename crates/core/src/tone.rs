@@ -101,6 +101,13 @@ impl ToneProcessor {
     }
     /// Apply one block of at most 480 normalized stereo frames and return the final peak.
     pub fn process(&mut self, frames: &mut [[f32; 2]]) -> f32 {
+        self.process_block::<true>(frames)
+    }
+
+    pub(crate) fn process_block<const OUTPUT_PEAK: bool>(
+        &mut self,
+        frames: &mut [[f32; 2]],
+    ) -> f32 {
         let count = frames.len().max(1) as f32;
         let gain = f32::from(self.settings.gain_percent) / 100.;
         if self.settings.low_cut_hz == 0
@@ -112,7 +119,9 @@ impl ToneProcessor {
             let mut peak = 0_f32;
             for s in frames.iter_mut().flatten() {
                 *s = (*s * gain).clamp(-1., 1.);
-                peak = peak.max(s.abs());
+                if OUTPUT_PEAK {
+                    peak = peak.max(s.abs());
+                }
             }
             return peak;
         }
@@ -159,7 +168,9 @@ impl ToneProcessor {
             }
             for s in sample {
                 *s = (*s * self.reduction).clamp(-1., 1.);
-                output = output.max(s.abs());
+                if OUTPUT_PEAK {
+                    output = output.max(s.abs());
+                }
             }
         }
         if (1. - self.reduction).abs() < 0.0003 && target == 1. {

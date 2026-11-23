@@ -47,7 +47,7 @@ fn main() {
     {
         let mut block = *<&[[f32; 2]; BLOCK]>::try_from(frames).unwrap();
         let start = Instant::now();
-        black_box(processor.process(black_box(&mut block)));
+        processor.process_unmetered(black_box(&mut block));
         times.push(start.elapsed().as_nanos());
         black_box(&block);
     }
